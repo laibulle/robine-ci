@@ -4,6 +4,9 @@ defmodule Robine.Runtime.Dependencies do
   alias Robine.ExecutionContext
   alias Robine.Execution.Dependencies, as: ExecutionDependencies
   alias Robine.Pipelines.Dependencies, as: PipelineDependencies
+  alias Robine.Repositories.Dependencies, as: RepositoryDependencies
+  alias Robine.Secrets.Dependencies, as: SecretDependencies
+  alias Robine.Storage.Dependencies, as: StorageDependencies
   alias Robine.Workflows.Dependencies, as: WorkflowDependencies
 
   @spec context(ExecutionContext.actor(), String.t()) :: ExecutionContext.t()
@@ -22,6 +25,25 @@ defmodule Robine.Runtime.Dependencies do
       },
       execution: %ExecutionDependencies{
         runner: Robine.Adapters.Execution.DockerRunner
+      },
+      secrets: %SecretDependencies{
+        repository: Robine.Adapters.Persistence.Postgres.SecretRepository,
+        cipher: Robine.Adapters.Security.AesGcmCipher,
+        clock: Robine.Adapters.System.Clock,
+        id_generator: Robine.Adapters.System.IdGenerator
+      },
+      storage: %StorageDependencies{
+        repository: Robine.Adapters.Persistence.Postgres.StorageRepository,
+        blob_store: Robine.Adapters.Storage.LocalBlobStore,
+        clock: Robine.Adapters.System.Clock,
+        id_generator: Robine.Adapters.System.IdGenerator
+      },
+      repositories: %RepositoryDependencies{
+        repository: Robine.Adapters.Persistence.Postgres.GitHubRepository,
+        signature_verifier: Robine.Adapters.SourceControl.GitHubSignatureVerifier,
+        github: Robine.Adapters.SourceControl.GitHubClient,
+        clock: Robine.Adapters.System.Clock,
+        id_generator: Robine.Adapters.System.IdGenerator
       }
     })
   end
@@ -39,6 +61,30 @@ defmodule Robine.Runtime.Dependencies do
 
     ExecutionDependencies.validate!(%ExecutionDependencies{
       runner: Robine.Adapters.Execution.DockerRunner
+    })
+
+    SecretDependencies.validate!(%SecretDependencies{
+      repository: Robine.Adapters.Persistence.Postgres.SecretRepository,
+      cipher: Robine.Adapters.Security.AesGcmCipher,
+      clock: Robine.Adapters.System.Clock,
+      id_generator: Robine.Adapters.System.IdGenerator
+    })
+
+    Robine.Adapters.Security.AesGcmCipher.validate_configuration!()
+
+    StorageDependencies.validate!(%StorageDependencies{
+      repository: Robine.Adapters.Persistence.Postgres.StorageRepository,
+      blob_store: Robine.Adapters.Storage.LocalBlobStore,
+      clock: Robine.Adapters.System.Clock,
+      id_generator: Robine.Adapters.System.IdGenerator
+    })
+
+    RepositoryDependencies.validate!(%RepositoryDependencies{
+      repository: Robine.Adapters.Persistence.Postgres.GitHubRepository,
+      signature_verifier: Robine.Adapters.SourceControl.GitHubSignatureVerifier,
+      github: Robine.Adapters.SourceControl.GitHubClient,
+      clock: Robine.Adapters.System.Clock,
+      id_generator: Robine.Adapters.System.IdGenerator
     })
   end
 end

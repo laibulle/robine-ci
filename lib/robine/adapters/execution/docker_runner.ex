@@ -115,25 +115,49 @@ defmodule Robine.Adapters.Execution.DockerRunner do
 
     case docker(args, specification.timeout_ms) do
       {:ok, output} ->
-        {:ok, step_result(step, :succeeded, 0, output, started)}
+        {:ok,
+         step_result(
+           step,
+           :succeeded,
+           0,
+           output,
+           started,
+           Map.values(specification.secrets)
+         )}
 
       {:error, %{exit_code: 124, output: output}} ->
-        {:failed, step_result(step, :timed_out, nil, output, started), :timeout}
+        {:failed,
+         step_result(
+           step,
+           :timed_out,
+           nil,
+           output,
+           started,
+           Map.values(specification.secrets)
+         ), :timeout}
 
       {:error, %{exit_code: exit_code, output: output}} ->
-        {:failed, step_result(step, :failed, exit_code, output, started), :command_failed}
+        {:failed,
+         step_result(
+           step,
+           :failed,
+           exit_code,
+           output,
+           started,
+           Map.values(specification.secrets)
+         ), :command_failed}
     end
   end
 
   defp run_step(%Step{kind: :builtin, value: value}, _specification, _resource),
     do: {:error, {:unsupported_builtin, value}}
 
-  defp step_result(step, status, exit_code, output, started) do
+  defp step_result(step, status, exit_code, output, started, secret_values) do
     %StepResult{
       name: step.name,
       status: status,
       exit_code: exit_code,
-      output: truncate_output(output),
+      output: redact_and_truncate(output, secret_values),
       duration_ms: System.monotonic_time(:millisecond) - started
     }
   end
@@ -188,4 +212,13 @@ defmodule Robine.Adapters.Execution.DockerRunner do
 
   defp truncate_output(output),
     do: binary_part(output, 0, @output_limit) <> "\n[output truncated]"
+
+  defp redact_and_truncate(output, []), do: truncate_output(output)
+
+  defp redact_and_truncate(output, secret_values) do
+    case Robine.Secrets.redact_output(%{output: output, values: secret_values}) do
+      {:ok, redacted} -> truncate_output(redacted)
+      {:error, _reason} -> "[output unavailable: redaction failed]"
+    end
+  end
 end

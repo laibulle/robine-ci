@@ -1,5 +1,24 @@
 import Config
 
+if encoded_key = System.get_env("ROBINE_SECRET_KEY") do
+  case Base.decode64(encoded_key) do
+    {:ok, key} when byte_size(key) == 32 ->
+      version = String.to_integer(System.get_env("ROBINE_SECRET_KEY_VERSION", "1"))
+      config :robine, :secret_keyring, current_version: version, keys: %{version => key}
+
+    _ ->
+      raise "ROBINE_SECRET_KEY must be a base64-encoded 32-byte key"
+  end
+end
+
+if webhook_secret = System.get_env("GITHUB_WEBHOOK_SECRET") do
+  config :robine, :github_webhook_secret, webhook_secret
+end
+
+if github_token = System.get_env("GITHUB_TOKEN") do
+  config :robine, :github_token, github_token
+end
+
 # config/runtime.exs is executed for all environments, including
 # during releases. It is executed after compilation and before the
 # system starts, so it is typically used to load production configuration

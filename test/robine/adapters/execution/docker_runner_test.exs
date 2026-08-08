@@ -61,4 +61,25 @@ defmodule Robine.Adapters.Execution.DockerRunnerTest do
     assert result.reason == :command_failed
     assert [%{name: "Fail", exit_code: 7, output: "broken\n"}] = result.steps
   end
+
+  @tag :docker
+  test "redacts secret values before returning command output" do
+    secret = "runner-secret-value"
+
+    specification = %Specification{
+      version: 1,
+      attempt_id: "docker-secret-#{System.unique_integer([:positive])}",
+      image: "postgres:18-alpine",
+      workspace: "/workspace",
+      shell: "/bin/sh",
+      timeout_ms: 20_000,
+      env: %{},
+      secrets: %{"TOKEN" => secret},
+      steps: [%Step{name: "Print", kind: :run, value: "printf '%s' \"$TOKEN\""}]
+    }
+
+    assert {:ok, result} = DockerRunner.run(specification)
+    assert [%{output: "[REDACTED]"}] = result.steps
+    refute inspect(result) =~ secret
+  end
 end

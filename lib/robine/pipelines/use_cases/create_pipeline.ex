@@ -76,6 +76,7 @@ defmodule Robine.Pipelines.UseCases.CreatePipeline do
       "timeout_ms" =>
         Map.get(definition, :timeout_ms, Map.get(definition, "timeout_ms", 1_200_000)),
       "shell" => Map.get(definition, :shell, Map.get(definition, "shell", "/bin/sh")),
+      "secret_names" => Map.get(definition, :secrets, Map.get(definition, "secrets", [])),
       "steps" =>
         definition
         |> Map.get(:steps, Map.get(definition, "steps", []))

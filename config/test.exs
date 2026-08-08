@@ -19,6 +19,12 @@ config :robine, Oban,
   plugins: false,
   peer: false
 
+config :robine, :secret_keyring,
+  current_version: 1,
+  keys: %{1 => :binary.copy(<<42>>, 32)}
+
+config :robine, :github_webhook_secret, "test-github-webhook-secret"
+
 # We don't run a server during test. If one is required,
 # you can enable the server option below.
 config :robine, RobineWeb.Endpoint,

@@ -28,6 +28,7 @@ defmodule Robine.Workflows.UseCases.ValidateWorkflowTest do
       test:
         image: alpine:3.22
         needs: build
+        secrets: [REGISTRY_TOKEN]
         env:
           MIX_ENV: test
         steps:
@@ -40,6 +41,7 @@ defmodule Robine.Workflows.UseCases.ValidateWorkflowTest do
 
     assert result.workflow.order == ["build", "test"]
     assert result.workflow.jobs["test"].needs == ["build"]
+    assert result.workflow.jobs["test"].secrets == ["REGISTRY_TOKEN"]
     assert [%{code: "job.image_mutable", severity: :warning}] = result.warnings
   end
 

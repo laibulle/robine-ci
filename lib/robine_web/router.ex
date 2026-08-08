@@ -20,6 +20,11 @@ defmodule RobineWeb.Router do
     get "/", PageController, :home
   end
 
+  scope "/api/github", RobineWeb do
+    pipe_through :api
+    post "/webhooks", GitHubWebhookController, :create
+  end
+
   # Other scopes may use custom stacks.
   # scope "/api", RobineWeb do
   #   pipe_through :api

@@ -4,7 +4,7 @@ defmodule Robine.Workflows.Domain.Validator do
   alias Robine.Workflows.Domain.{Diagnostic, Job, Step, Workflow}
 
   @root_keys ~w(version name on jobs)
-  @job_keys ~w(image needs steps timeout env)
+  @job_keys ~w(image needs steps timeout env secrets)
   @step_keys ~w(name run uses with)
   @builtins ~w(checkout cache/restore cache/save artifacts/upload artifacts/download)
   @job_id ~r/\A[a-z][a-z0-9_-]{0,62}\z/
@@ -87,6 +87,7 @@ defmodule Robine.Workflows.Domain.Validator do
          {:ok, image} <- nonempty_string(definition, "image", ["jobs", id, "image"]),
          {:ok, needs} <- needs(definition, id),
          {:ok, env} <- env(definition, id),
+         {:ok, secrets} <- secrets(definition, id),
          {:ok, steps} <- steps(definition, id) do
       warnings = image_warnings(image, id)
 
@@ -96,6 +97,7 @@ defmodule Robine.Workflows.Domain.Validator do
          image: image,
          needs: needs,
          env: env,
+         secrets: secrets,
          timeout: Map.get(definition, "timeout"),
          steps: steps
        }, warnings}
@@ -148,6 +150,26 @@ defmodule Robine.Workflows.Domain.Validator do
 
       _ ->
         {:error, Diagnostic.error("job.env", "env must be a map", ["jobs", id, "env"])}
+    end
+  end
+
+  defp secrets(definition, id) do
+    case Map.get(definition, "secrets", []) do
+      names when is_list(names) ->
+        if Enum.all?(names, &(is_binary(&1) and Regex.match?(~r/\A[A-Z_][A-Z0-9_]*\z/, &1))) do
+          {:ok, Enum.uniq(names)}
+        else
+          {:error,
+           Diagnostic.error(
+             "job.secrets",
+             "secrets must contain valid secret names",
+             ["jobs", id, "secrets"]
+           )}
+        end
+
+      _ ->
+        {:error,
+         Diagnostic.error("job.secrets", "secrets must be a list", ["jobs", id, "secrets"])}
     end
   end
 

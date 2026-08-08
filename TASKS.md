@@ -179,27 +179,27 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 
 - **Spec:** [SEC-001](docs/specs/security/sec-001-secrets-and-trust-model.md)
 - **Depends on:** ARCH-002, DEC-004
-- [ ] Select and review the authenticated-encryption construction.
-- [ ] Implement repository and approved instance scopes, write-only API behavior, and audit events.
-- [ ] Require an external versioned master key and fail safely when it is unavailable.
+- [ ] Select and review the authenticated-encryption construction. (AES-256-GCM with per-value nonces and authenticated metadata is implemented; focused security review remains.)
+- [x] Implement repository and approved instance scopes, write-only API behavior, and audit events.
+- [x] Require an external versioned master key and fail safely when it is unavailable.
 - [ ] Implement resumable key rotation.
-- [ ] Enforce explicit references and no fork delivery.
+- [ ] Enforce explicit references and no fork delivery. (Explicit workflow references and dispatch-time resolution exist; GitHub fork policy remains.)
 
 ### SEC-102 — Implement streaming secret redaction
 
 - **Spec:** [SEC-001](docs/specs/security/sec-001-secrets-and-trust-model.md)
 - **Depends on:** SEC-101, EXEC-102
-- [ ] Redact exact secrets across arbitrary log chunk boundaries before persistence or broadcast.
-- [ ] Define and test minimum/maximum size and encoded-variant policy.
+- [x] Redact exact secrets across arbitrary log chunk boundaries before persistence or broadcast.
+- [ ] Define and test minimum/maximum size and encoded-variant policy. (Eight-byte minimum and Base64 variants are tested; maximum and additional encodings remain.)
 - [ ] Ensure diagnostics, exceptions, telemetry, and debug inspection are redaction-safe.
-- [ ] Add adversarial fixture tests without production credentials.
+- [x] Add adversarial fixture tests without production credentials.
 
 ### DATA-101 — Implement safe local blob storage
 
 - **Spec:** [DATA-001](docs/specs/storage/data-001-cache-and-artifacts.md)
 - **Depends on:** ARCH-002, DEC-003
-- [ ] Implement a local storage adapter with opaque object IDs and content digests.
-- [ ] Stream into temporary objects and finalize atomically.
+- [x] Implement a local storage adapter with opaque object IDs and content digests.
+- [ ] Stream into temporary objects and finalize atomically. (Temporary same-filesystem publication is atomic; streaming input remains.)
 - [ ] Enforce archive path, symlink, special-file, file-count, expanded-size, ratio, and time limits.
 - [ ] Implement quotas, retention, reconciliation, and storage-pressure telemetry.
 
@@ -207,9 +207,9 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 
 - **Spec:** [DATA-001](docs/specs/storage/data-001-cache-and-artifacts.md)
 - **Depends on:** DATA-101, EXEC-102
-- [ ] Implement exact-key cache restore and atomic cache save built-ins.
-- [ ] Implement immutable artifact upload/download with digest verification.
-- [ ] Enforce repository scoping and explicit dependency access.
+- [ ] Implement exact-key cache restore and atomic cache save built-ins. (Application operations exist; runner built-in workspace archive integration remains.)
+- [x] Implement immutable artifact upload/download with digest verification.
+- [x] Enforce repository scoping and explicit dependency access.
 - [ ] Implement retry against retained dependency artifacts.
 - [ ] Refuse retries with precise rerun scope when required artifacts expired.
 

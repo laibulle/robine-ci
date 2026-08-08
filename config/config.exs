@@ -9,7 +9,9 @@ import Config
 
 config :robine,
   ecto_repos: [Robine.Repo],
-  generators: [timestamp_type: :utc_datetime]
+  generators: [timestamp_type: :utc_datetime],
+  storage_root: Path.expand("../var/storage", __DIR__),
+  storage_max_object_bytes: 1_073_741_824
 
 config :robine, Oban,
   repo: Robine.Repo,

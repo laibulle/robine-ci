@@ -6,6 +6,7 @@ defmodule Robine.Adapters.Background.RunNextJobWorker do
   alias Robine.Execution.Contracts.{Specification, Step}
   alias Robine.Pipelines
   alias Robine.Runtime.Dependencies
+  alias Robine.Secrets
 
   @impl Oban.Worker
   def perform(%Oban.Job{}) do
@@ -27,7 +28,7 @@ defmodule Robine.Adapters.Background.RunNextJobWorker do
     with {:ok, _preparing} <- record(attempt, 1, :preparing, nil, context),
          {:ok, raw_specification} <-
            Pipelines.job_execution(%{idempotency_token: attempt.idempotency_token}, context),
-         {:ok, specification} <- specification(raw_specification),
+         {:ok, specification} <- specification(raw_specification, context),
          {:ok, _running} <- record(attempt, 2, :running, nil, context),
          {:ok, result} <- Execution.run_job(%{specification: specification}, context),
          {:ok, _terminal} <- record_result(attempt, result, context) do
@@ -39,9 +40,10 @@ defmodule Robine.Adapters.Background.RunNextJobWorker do
     end
   end
 
-  defp specification(raw) do
+  defp specification(raw, context) do
     with image when is_binary(image) <- raw["image"],
-         steps when is_list(steps) and steps != [] <- raw["steps"] do
+         steps when is_list(steps) and steps != [] <- raw["steps"],
+         {:ok, secret_values} <- resolve_secrets(raw, context) do
       {:ok,
        %Specification{
          version: 1,
@@ -51,7 +53,7 @@ defmodule Robine.Adapters.Background.RunNextJobWorker do
          shell: raw["shell"] || "/bin/sh",
          timeout_ms: raw["timeout_ms"] || 1_200_000,
          env: raw["env"] || %{},
-         secrets: %{},
+         secrets: secret_values,
          metadata: %{"idempotency_token" => raw["idempotency_token"]},
          steps: Enum.map(steps, &step/1)
        }}
@@ -59,6 +61,14 @@ defmodule Robine.Adapters.Background.RunNextJobWorker do
       _ -> {:error, :invalid_persisted_execution_specification}
     end
   end
+
+  defp resolve_secrets(%{"secret_names" => []}, _context), do: {:ok, %{}}
+
+  defp resolve_secrets(%{"secret_names" => names} = raw, context) when is_list(names) do
+    Secrets.resolve_secrets(%{repository_id: raw["repository_id"], names: names}, context)
+  end
+
+  defp resolve_secrets(_raw, _context), do: {:ok, %{}}
 
   defp step(raw) do
     %Step{

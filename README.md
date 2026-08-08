@@ -33,6 +33,14 @@ Start PostgreSQL:
 docker compose up -d --wait postgres
 ```
 
+Configure the mandatory secret-encryption master key for the server process:
+
+```bash
+export ROBINE_SECRET_KEY="$(openssl rand -base64 32)"
+```
+
+Keep this key outside PostgreSQL and back it up securely. Losing it makes stored secrets unrecoverable.
+
 Install dependencies, create the database, and build assets:
 
 ```bash
@@ -70,4 +78,3 @@ The MVP is for trusted repository code. Docker containers are not treated as a s
 ## License
 
 Robine CI is distributed under AGPL-3.0-or-later. See [LICENSE](LICENSE).
-
