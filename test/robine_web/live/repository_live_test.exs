@@ -44,6 +44,8 @@ defmodule RobineWeb.RepositoryLiveTest do
     @impl true
     def default_branch_head(_repository), do: {:ok, %{branch: "main", sha: @sha}}
 
+    def branch_head(_repository, branch), do: {:ok, %{branch: branch, sha: @sha}}
+
     @impl true
     def workflow_files(_repository, @sha) do
       {:ok,
@@ -218,8 +220,13 @@ defmodule RobineWeb.RepositoryLiveTest do
     assert {:ok, show, html} = live(conn, ~p"/repositories/#{repository.id}")
     assert html =~ "No source-control request has been made"
 
-    html = show |> element("#discover-manual-workflows") |> render_click()
+    html =
+      show
+      |> form("#manual-branch-form", %{"branch_lookup" => %{"branch" => "feature/dogfood"}})
+      |> render_submit()
+
     assert html =~ String.duplicate("c", 40)
+    assert html =~ "feature/dogfood"
     assert html =~ "Release"
     assert has_element?(show, "select[name='inputs[environment]']")
     assert has_element?(show, "input[name='inputs[version]']")

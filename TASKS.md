@@ -533,6 +533,7 @@ These items are intentionally unordered and must receive specifications before i
 - **Spec:** [WF-004](docs/specs/workflows/wf-004-manual-workflow-inputs.md)
 - **Depends on:** WF-501, GH-102, PIPE-101
 - [x] Resolve the GitHub default-branch head and fetch workflows only at the exact SHA.
+- [x] Resolve a maintainer-selected branch server-side and re-resolve its exact SHA at manual launch.
 - [x] Expose authorized discovery and idempotent manual-launch use cases through the repository facade.
 - [x] Persist trigger, actor, SHA, workflow revision, input map, jobs, and outbox atomically.
 

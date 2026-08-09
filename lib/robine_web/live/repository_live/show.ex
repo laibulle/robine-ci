@@ -21,6 +21,7 @@ defmodule RobineWeb.RepositoryLive.Show do
          workflows: workflows,
          github_preflight: :not_run,
          manual_state: :not_run,
+         manual_branch_form: to_form(%{"branch" => "main"}, as: :branch_lookup),
          manual_head: nil,
          manual_workflows: [],
          manual_request_ids: %{},
@@ -75,9 +76,13 @@ defmodule RobineWeb.RepositoryLive.Show do
     end
   end
 
-  def handle_event("discover-manual-workflows", _params, socket) do
+  def handle_event(
+        "discover-manual-workflows",
+        %{"branch_lookup" => %{"branch" => branch}},
+        socket
+      ) do
     case Repositories.list_manual_workflows(
-           %{repository_id: socket.assigns.repository.id},
+           %{repository_id: socket.assigns.repository.id, branch: branch},
            socket.assigns.execution_context
          ) do
       {:ok, discovery} ->
@@ -86,6 +91,7 @@ defmodule RobineWeb.RepositoryLive.Show do
         {:noreply,
          assign(socket,
            manual_state: :ready,
+           manual_branch_form: to_form(%{"branch" => discovery.branch}, as: :branch_lookup),
            manual_head: %{branch: discovery.branch, commit_sha: discovery.commit_sha},
            manual_workflows: discovery.workflows,
            manual_request_ids: request_ids,
@@ -108,6 +114,7 @@ defmodule RobineWeb.RepositoryLive.Show do
   def handle_event("launch-manual-workflow", params, socket) do
     input = %{
       repository_id: socket.assigns.repository.id,
+      branch: params["branch"],
       workflow_path: params["workflow_path"],
       request_id: params["request_id"],
       inputs: Map.get(params, "inputs", %{})
@@ -267,15 +274,22 @@ defmodule RobineWeb.RepositoryLive.Show do
             <div>
               <h2 class="text-xl font-semibold">Run a workflow</h2>
               <p class="mt-1 text-sm text-base-content/60">
-                Load declarations from the exact default-branch head. Inputs are non-secret and retained.
+                Choose a branch. Robine resolves its current head to an immutable commit before launch.
               </p>
             </div>
-            <button
-              id="discover-manual-workflows"
-              phx-click="discover-manual-workflows"
-              phx-disable-with="Loading…"
-              class="btn btn-outline btn-sm"
-            >Load manual workflows</button>
+            <.form
+              for={@manual_branch_form}
+              id="manual-branch-form"
+              phx-submit="discover-manual-workflows"
+              class="flex items-end gap-2"
+            >
+              <.input field={@manual_branch_form[:branch]} label="Branch" required placeholder="main" />
+              <button
+                id="discover-manual-workflows"
+                phx-disable-with="Loading…"
+                class="btn btn-outline mb-2"
+              >Load workflows</button>
+            </.form>
           </div>
           <p :if={@manual_state == :not_run} class="mt-4 text-sm text-base-content/60">
             No source-control request has been made in this session.
@@ -284,7 +298,7 @@ defmodule RobineWeb.RepositoryLive.Show do
             {@manual_error}
           </div>
           <div :if={@manual_head} id="manual-workflow-head" class="mt-4 rounded-2xl bg-base-200 p-4">
-            <p class="text-sm font-semibold">Default branch: {@manual_head.branch}</p>
+            <p class="text-sm font-semibold">Branch: {@manual_head.branch}</p>
             <code class="mt-1 block break-all text-xs">{@manual_head.commit_sha}</code>
           </div>
           <div
@@ -308,6 +322,7 @@ defmodule RobineWeb.RepositoryLive.Show do
               class="rounded-2xl border border-base-300 p-5"
             >
               <input type="hidden" name="workflow_path" value={workflow.path} />
+              <input type="hidden" name="branch" value={@manual_head.branch} />
               <input type="hidden" name="request_id" value={@manual_request_ids[workflow.path]} />
               <h3 class="font-semibold">{workflow.name}</h3>
               <code class="mt-1 block break-all text-xs text-base-content/55">{workflow.path}</code>

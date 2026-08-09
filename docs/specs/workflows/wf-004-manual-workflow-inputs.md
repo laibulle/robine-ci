@@ -9,7 +9,7 @@
 
 ## Summary
 
-Trusted-repository maintainers can launch a declared workflow manually from Robine with a small typed input form. Robine resolves the repository's default-branch head to an immutable Git SHA, validates the workflow at that exact revision, persists the normalized non-secret inputs, and injects them into every job through reserved environment variables.
+Trusted-repository maintainers can launch a declared workflow manually from any named branch with a small typed input form. Robine resolves the selected branch head to an immutable Git SHA, validates the workflow at that exact revision, persists the normalized non-secret inputs, and injects them into every job through reserved environment variables.
 
 ## Problem
 
@@ -25,7 +25,7 @@ Some CI work—release candidates, maintenance checks, migrations, and explicit 
 ## Non-goals
 
 - Secret inputs, arbitrary environment variables, file uploads, rich JSON, multiline values, or provider expressions.
-- Selecting an arbitrary branch, tag, or SHA in the first contract.
+- Selecting an arbitrary tag or SHA; manual launches accept named branches only.
 - Approvals, deployment environments, reusable-workflow parameters, or scheduled invocations.
 - GitHub's proprietary `workflow_dispatch` API or compatibility with GitHub Actions inputs.
 
@@ -54,7 +54,7 @@ A repository maintainer launching an explicitly enabled maintenance or release w
 - **FR-6:** Boolean defaults and submitted values normalize to the strings `true` or `false`; no other coercion is accepted.
 - **FR-7:** Every missing optional input MUST use its default or the empty string. Every missing required input without a default MUST reject launch before pipeline creation.
 - **FR-8:** Every job receives `ROBINE_INPUT_<UPPER_ID>` with the normalized value. A workflow is invalid if an explicit job environment collides with a declared input variable.
-- **FR-9:** Manual launch MUST resolve the current default-branch head through the installed GitHub App, fetch workflows at that exact 40-character SHA, and select one exact workflow path.
+- **FR-9:** Manual discovery and launch MUST resolve the selected named branch through the installed source-control App, fetch workflows at that exact 40-character SHA, and select one exact workflow path. The provider-resolved SHA, never browser state, is authoritative.
 - **FR-10:** Launch MUST be allowed only for a trusted repository and an administrator or maintainer. Viewers and anonymous users MUST be forbidden even if they forge a LiveView event.
 - **FR-11:** The pipeline MUST persist trigger `workflow_dispatch`, initiating actor, exact SHA, workflow revision, and normalized input map before dispatch.
 - **FR-12:** A caller-supplied opaque request ID MUST make duplicate submission idempotent. Reusing it with another repository, workflow, SHA, or input map MUST return a conflict.
@@ -63,7 +63,7 @@ A repository maintainer launching an explicitly enabled maintenance or release w
 
 ### UX requirements
 
-- **UX-1:** The repository page MUST discover manually enabled workflows from the current default-branch SHA and clearly display that immutable SHA.
+- **UX-1:** The repository page MUST accept a branch name, discover manually enabled workflows from its current head, and clearly display both the resolved branch and immutable SHA.
 - **UX-2:** The launch form MUST render text, select, and boolean controls with descriptions, required state, defaults, accessible labels, and inline stable errors.
 - **UX-3:** Submission MUST disable duplicate clicks, then navigate to the created or reused pipeline.
 - **UX-4:** Pipeline and job views MUST display the non-secret normalized inputs and include an exact local reproduction command.
@@ -99,13 +99,14 @@ on:
 
 The workflow domain normalizes each definition into a `ManualInput` value object. A pure input policy validates a submitted string map and returns the complete normalized map. Job preparation merges the reserved `ROBINE_INPUT_*` variables before matrix expansion, so every expanded variant receives the same values.
 
-The repository context exposes discovery and launch use cases. Both resolve the default-branch head through a source-control port and fetch workflow files by exact SHA. Launch revalidates rather than trusting stale form state, calls the workflow input policy, injects values into normalized jobs, and calls the Pipelines facade with a canonical idempotency key. The pipeline stores inputs as a first-class map; runners receive only the resulting ordinary environment.
+The repository context exposes discovery and launch use cases. Both resolve the requested branch head through a source-control port and fetch workflow files by exact SHA. Launch re-resolves the branch and revalidates rather than trusting stale form state, calls the workflow input policy, injects values into normalized jobs, and calls the Pipelines facade with a canonical idempotency key. The pipeline stores inputs as a first-class map; runners receive only the resulting ordinary environment.
 
 ## Failure modes and recovery
 
 | Failure | Expected behavior | Recovery |
 |---|---|---|
-| GitHub default head changes after form load | Launch re-resolves and revalidates the new exact revision | Review the displayed pipeline SHA |
+| Selected branch head changes after form load | Launch re-resolves and revalidates the new exact revision | Review the displayed pipeline SHA |
+| Selected branch is missing or invalid | No workflow or pipeline is created | Correct the branch name and load again |
 | Workflow no longer enables manual launch | No pipeline is created | Restore `workflow_dispatch` or refresh discovery |
 | Required/choice/boolean value invalid | Inline validation error; no persistence | Correct the field |
 | GitHub installation unavailable | Degraded discovery/launch state | Restore credentials/connectivity and retry |
@@ -135,4 +136,4 @@ None blocking. Branch selection and secret inputs are deliberately deferred.
 
 ## Out of scope / future work
 
-- Branch/tag selection, secret prompts, scheduled values, reusable-workflow inputs, approvals, structured objects, and provider dispatch APIs.
+- Tag/SHA selection, secret prompts, scheduled values, reusable-workflow inputs, approvals, structured objects, and provider dispatch APIs.

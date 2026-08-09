@@ -10,6 +10,10 @@ defmodule Robine.Adapters.SourceControl.ProviderRegistry do
     do: invoke(repository, :default_branch_head, [repository])
 
   @impl true
+  def branch_head(repository, branch),
+    do: invoke(repository, :branch_head, [repository, branch])
+
+  @impl true
   def source_files(repository, sha), do: invoke(repository, :source_files, [repository, sha])
 
   @impl true

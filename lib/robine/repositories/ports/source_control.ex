@@ -5,6 +5,8 @@ defmodule Robine.Repositories.Ports.SourceControl do
               {:ok, [%{path: String.t(), content: binary()}]} | {:error, term()}
   @callback default_branch_head(Robine.Repositories.Domain.Repository.t()) ::
               {:ok, %{branch: String.t(), sha: String.t()}} | {:error, term()}
+  @callback branch_head(Robine.Repositories.Domain.Repository.t(), String.t()) ::
+              {:ok, %{branch: String.t(), sha: String.t()}} | {:error, term()}
   @callback source_files(Robine.Repositories.Domain.Repository.t(), String.t()) ::
               {:ok, [{String.t(), binary()}]} | {:error, term()}
   @callback upsert_check(Robine.Repositories.Domain.Repository.t(), map()) ::
@@ -28,5 +30,6 @@ defmodule Robine.Repositories.Ports.SourceControl do
 
   @optional_callbacks available_repositories: 0,
                       available_repositories: 2,
-                      default_branch_head: 1
+                      default_branch_head: 1,
+                      branch_head: 2
 end

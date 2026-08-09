@@ -1,5 +1,5 @@
 defmodule Robine.Repositories.UseCases.ListManualWorkflows do
-  @moduledoc "Discovers manually enabled workflows from the exact default-branch head."
+  @moduledoc "Discovers manually enabled workflows from one exact branch head."
 
   alias Robine.ExecutionContext
   alias Robine.Repositories.Dependencies
@@ -7,7 +7,7 @@ defmodule Robine.Repositories.UseCases.ListManualWorkflows do
 
   @spec call(map(), ExecutionContext.t()) :: {:ok, map()} | {:error, term()}
   def call(
-        %{repository_id: repository_id},
+        %{repository_id: repository_id} = input,
         %ExecutionContext{
           actor: %{role: role},
           dependencies: %{repositories: %Dependencies{} = deps}
@@ -19,7 +19,7 @@ defmodule Robine.Repositories.UseCases.ListManualWorkflows do
     result =
       with {:ok, repository} <- deps.repository.get_by_id(repository_id),
            true <- repository.trusted,
-           {:ok, head} <- deps.source_control.default_branch_head(repository),
+           {:ok, head} <- resolve_head(deps, repository, Map.get(input, :branch)),
            {:ok, head} <- valid_head(head),
            {:ok, files} <- deps.source_control.workflow_files(repository, head.sha),
            {:ok, workflows} <- manual_workflows(files, context) do
@@ -34,6 +34,14 @@ defmodule Robine.Repositories.UseCases.ListManualWorkflows do
   end
 
   def call(_input, %ExecutionContext{}), do: {:error, :forbidden}
+
+  defp resolve_head(deps, repository, branch) when branch in [nil, ""],
+    do: deps.source_control.default_branch_head(repository)
+
+  defp resolve_head(deps, repository, branch) when is_binary(branch),
+    do: deps.source_control.branch_head(repository, branch)
+
+  defp resolve_head(_deps, _repository, _branch), do: {:error, :invalid_branch}
 
   defp manual_workflows(files, context) do
     sources = Map.new(files, &{&1.path, &1.content})

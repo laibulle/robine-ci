@@ -61,6 +61,26 @@ defmodule Robine.Adapters.SourceControl.GitHubClient do
   end
 
   @impl true
+  def branch_head(repository, branch) when is_binary(branch) do
+    with true <- valid_branch?(branch),
+         {:ok, token} <- token(repository),
+         {:ok, %{body: %{"object" => %{"sha" => sha}}}} when is_binary(sha) <-
+           request(
+             :get,
+             "#{@api}/repos/#{repository.full_name}/git/ref/heads/#{URI.encode(branch)}",
+             token,
+             []
+           ),
+         true <- Regex.match?(~r/\A[0-9a-f]{40}\z/, sha) do
+      {:ok, %{branch: branch, sha: sha}}
+    else
+      false -> {:error, :invalid_branch}
+      {:error, _reason} = error -> error
+      _other -> {:error, :invalid_branch_head}
+    end
+  end
+
+  @impl true
   def upsert_check(repository, check) do
     provider_check_id = Map.get(check, :provider_check_id)
     payload = Map.drop(check, [:provider_check_id])
@@ -177,6 +197,12 @@ defmodule Robine.Adapters.SourceControl.GitHubClient do
   defp workflow_entry?(_entry), do: false
 
   defp token(repository), do: GitHubAppTokenCache.token(repository.installation_id)
+
+  defp valid_branch?(branch) do
+    byte_size(branch) in 1..255 and not String.starts_with?(branch, ["/", "."]) and
+      not String.ends_with?(branch, ["/", ".", ".lock"]) and
+      not String.contains?(branch, ["..", "@{", "\\", " ", "~", "^", ":", "?", "*", "["])
+  end
 
   defp request(method, url, token, options) do
     headers = [

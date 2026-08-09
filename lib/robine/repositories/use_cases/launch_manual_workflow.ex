@@ -1,5 +1,5 @@
 defmodule Robine.Repositories.UseCases.LaunchManualWorkflow do
-  @moduledoc "Launches one revalidated manual workflow at the exact default-branch SHA."
+  @moduledoc "Launches one revalidated manual workflow at an exact branch SHA."
 
   alias Robine.ExecutionContext
   alias Robine.Pipelines
@@ -13,7 +13,7 @@ defmodule Robine.Repositories.UseCases.LaunchManualWorkflow do
           workflow_path: path,
           request_id: request_id,
           inputs: inputs
-        },
+        } = input,
         %ExecutionContext{
           actor: %{id: actor_id, role: role},
           dependencies: %{repositories: %Dependencies{} = deps}
@@ -27,7 +27,7 @@ defmodule Robine.Repositories.UseCases.LaunchManualWorkflow do
     result =
       with {:ok, repository} <- deps.repository.get_by_id(repository_id),
            true <- repository.trusted,
-           {:ok, head} <- deps.source_control.default_branch_head(repository),
+           {:ok, head} <- resolve_head(deps, repository, Map.get(input, :branch)),
            {:ok, head} <- valid_head(head),
            {:ok, files} <- deps.source_control.workflow_files(repository, head.sha),
            {:ok, file} <- exact_file(files, path),
@@ -70,6 +70,14 @@ defmodule Robine.Repositories.UseCases.LaunchManualWorkflow do
   end
 
   def call(_input, %ExecutionContext{}), do: {:error, :forbidden}
+
+  defp resolve_head(deps, repository, branch) when branch in [nil, ""],
+    do: deps.source_control.default_branch_head(repository)
+
+  defp resolve_head(deps, repository, branch) when is_binary(branch),
+    do: deps.source_control.branch_head(repository, branch)
+
+  defp resolve_head(_deps, _repository, _branch), do: {:error, :invalid_branch}
 
   defp exact_file(files, path) do
     case Enum.find(files, &(&1.path == path)) do
