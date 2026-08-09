@@ -1,0 +1,143 @@
+defmodule Robine.Pipelines.Domain.Attempt do
+  @moduledoc "One immutable-history execution attempt for a job."
+
+  @statuses [:queued, :preparing, :running, :cancelling, :succeeded, :failed, :cancelled]
+  @reasons [
+    :command_failed,
+    :timeout,
+    :runner_lost,
+    :service_unavailable,
+    :system_failure,
+    :cancelled
+  ]
+
+  @enforce_keys [:id, :job_id, :number, :idempotency_token, :status, :lease_expires_at]
+  defstruct [
+    :id,
+    :job_id,
+    :number,
+    :idempotency_token,
+    :runner_id,
+    :status,
+    :lease_expires_at,
+    :last_sequence,
+    :result_reason,
+    :inserted_at,
+    :updated_at
+  ]
+
+  @type status ::
+          :queued | :preparing | :running | :cancelling | :succeeded | :failed | :cancelled
+  @type reason ::
+          :command_failed
+          | :timeout
+          | :runner_lost
+          | :service_unavailable
+          | :system_failure
+          | :cancelled
+  @type t :: %__MODULE__{
+          id: String.t(),
+          job_id: String.t(),
+          number: pos_integer(),
+          idempotency_token: String.t(),
+          runner_id: String.t() | nil,
+          status: status(),
+          lease_expires_at: DateTime.t(),
+          last_sequence: non_neg_integer() | nil,
+          result_reason: reason() | nil,
+          inserted_at: DateTime.t() | nil,
+          updated_at: DateTime.t() | nil
+        }
+
+  @spec statuses() :: [status()]
+  def statuses, do: @statuses
+
+  @spec reasons() :: [reason()]
+  def reasons, do: @reasons
+
+  @spec new(map()) :: {:ok, t()} | {:error, term()}
+  def new(
+        %{
+          id: id,
+          job_id: job_id,
+          number: number,
+          idempotency_token: token,
+          lease_expires_at: %DateTime{} = lease
+        } = input
+      )
+      when is_binary(id) and is_binary(job_id) and is_integer(number) and number > 0 and
+             is_binary(token) do
+    {:ok,
+     %__MODULE__{
+       id: id,
+       job_id: job_id,
+       number: number,
+       idempotency_token: token,
+       runner_id: Map.get(input, :runner_id),
+       status: :queued,
+       lease_expires_at: lease,
+       last_sequence: 0
+     }}
+  end
+
+  def new(_input), do: {:error, {:invalid_input, :attempt}}
+
+  @spec record_event(t(), non_neg_integer(), status(), reason() | nil) ::
+          {:ok, t()} | {:error, term()}
+  def record_event(%__MODULE__{last_sequence: last} = attempt, sequence, target, reason \\ nil)
+      when is_integer(sequence) and sequence >= 0 do
+    cond do
+      sequence <= last ->
+        {:ok, attempt}
+
+      sequence != last + 1 ->
+        {:error, {:event_gap, last + 1, sequence}}
+
+      not valid_reason?(target, reason) ->
+        {:error, {:invalid_result_reason, target, reason}}
+
+      not allowed?(attempt.status, target) ->
+        {:error, {:invalid_transition, :attempt, attempt.status, target}}
+
+      true ->
+        {:ok, %{attempt | status: target, last_sequence: sequence, result_reason: reason}}
+    end
+  end
+
+  @spec lease_expired?(t(), DateTime.t()) :: boolean()
+  def lease_expired?(%__MODULE__{lease_expires_at: lease}, now),
+    do: DateTime.compare(lease, now) == :lt
+
+  @spec heartbeat(t(), DateTime.t(), pos_integer()) :: {:ok, t()} | {:error, term()}
+  def heartbeat(%__MODULE__{status: status} = attempt, %DateTime{} = now, lease_seconds)
+      when status in [:queued, :preparing, :running, :cancelling] and is_integer(lease_seconds) and
+             lease_seconds > 0 do
+    renewed_lease = DateTime.add(now, lease_seconds, :second)
+
+    lease_expires_at =
+      case DateTime.compare(attempt.lease_expires_at, renewed_lease) do
+        :lt -> renewed_lease
+        _current_or_later -> attempt.lease_expires_at
+      end
+
+    {:ok, %{attempt | lease_expires_at: lease_expires_at}}
+  end
+
+  def heartbeat(%__MODULE__{status: status}, %DateTime{}, lease_seconds)
+      when is_integer(lease_seconds) and lease_seconds > 0,
+      do: {:error, {:attempt_terminal, status}}
+
+  def heartbeat(%__MODULE__{}, _now, _lease_seconds),
+    do: {:error, {:invalid_input, :heartbeat}}
+
+  defp valid_reason?(:failed, reason), do: reason in (@reasons -- [:cancelled])
+  defp valid_reason?(:cancelled, :cancelled), do: true
+  defp valid_reason?(_status, nil), do: true
+  defp valid_reason?(_status, _reason), do: false
+
+  defp allowed?(:queued, target), do: target in [:preparing, :cancelled, :failed]
+  defp allowed?(:preparing, target), do: target in [:running, :cancelling, :cancelled, :failed]
+  defp allowed?(:running, target), do: target in [:cancelling, :succeeded, :failed, :cancelled]
+  defp allowed?(:cancelling, target), do: target in [:cancelled, :failed]
+  defp allowed?(_terminal, _target), do: false
+end

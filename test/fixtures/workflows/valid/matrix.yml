@@ -1,0 +1,18 @@
+version: 1
+name: Matrix
+on:
+  push: {}
+jobs:
+  test:
+    strategy:
+      matrix:
+        version: ["3.21", "3.22"]
+    image: "alpine:${{ matrix.version }}"
+    steps:
+      - run: printf '%s' "$ROBINE_MATRIX_VERSION"
+  summarize:
+    image: alpine:3.22
+    needs: test
+    if: always
+    steps:
+      - run: echo complete

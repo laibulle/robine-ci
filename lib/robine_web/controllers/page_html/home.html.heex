@@ -1,0 +1,111 @@
+<Layouts.app flash={@flash} shell={false}>
+  <div class="mx-auto flex min-h-[calc(100vh-3rem)] max-w-7xl flex-col overflow-hidden rounded-[2rem] border border-base-300/70 bg-base-100 shadow-panel">
+    <header class="flex h-20 items-center justify-between px-6 sm:px-10">
+      <a href={~p"/"} class="flex items-center gap-3 font-bold tracking-tight">
+        <span class="brand-mark size-10 rounded-xl"><span class="relative z-10 font-black">R</span></span>
+        <span>Robine <span class="font-medium text-base-content/35">CI</span></span>
+      </a>
+      <div class="flex items-center gap-2">
+        <Layouts.theme_toggle />
+        <.link
+          href={if @current_actor, do: ~p"/pipelines", else: ~p"/sign-in"}
+          class="btn btn-primary btn-sm sm:btn-md"
+        >{if @current_actor, do: "Open dashboard", else: "Sign in"}
+        <.icon name="hero-arrow-up-right" class="size-4" /></.link>
+      </div>
+    </header>
+
+    <main class="relative grid flex-1 items-center gap-12 overflow-hidden px-6 py-14 sm:px-10 lg:grid-cols-[1fr_0.9fr] lg:px-16 lg:py-20">
+      <div class="pointer-events-none absolute -right-32 -top-48 size-[34rem] rounded-full bg-primary/10 blur-3xl">
+      </div>
+      <section class="relative max-w-2xl">
+        <p class="page-eyebrow">Continuous integration, made legible</p>
+        <h1 class="mt-7 text-5xl font-semibold leading-[0.98] tracking-[-0.06em] sm:text-7xl">
+          Build with speed.<br /><span class="text-base-content/35">Ship with clarity.</span>
+        </h1>
+        <p class="mt-7 max-w-xl text-base leading-7 text-base-content/60 sm:text-lg sm:leading-8">
+          Robine brings trusted repositories, reproducible jobs and actionable logs into one calm, self-hosted workspace.
+        </p>
+        <div class="mt-9 flex flex-wrap items-center gap-4">
+          <.link
+            href={if @current_actor, do: ~p"/pipelines", else: ~p"/sign-in"}
+            class="btn btn-primary h-12 px-6"
+          >{if @current_actor, do: "Go to dashboard", else: "Sign in to Robine"}
+          <.icon name="hero-arrow-right" class="size-4" /></.link>
+          <span class="flex items-center gap-2 text-sm text-base-content/50"><.icon
+            name="hero-lock-closed"
+            class="size-4 text-primary"
+          /> Your infrastructure. Your data.</span>
+        </div>
+      </section>
+
+      <section class="relative" aria-label="Pipeline preview">
+        <div class="surface-panel rotate-1 rounded-[1.75rem] p-3 transition duration-500 hover:rotate-0 sm:p-5">
+          <div class="rounded-2xl border border-base-300/70 bg-base-200/50 p-5 sm:p-6">
+            <div class="flex items-start justify-between gap-4">
+              <div>
+                <p class="text-xs font-bold uppercase tracking-[0.14em] text-base-content/40">
+                  Latest pipeline
+                </p><h2 class="mt-2 text-xl font-semibold">Release candidate</h2>
+              </div>
+              <span class="badge badge-success gap-2"><span class="size-1.5 rounded-full bg-current"></span>Succeeded</span>
+            </div>
+            <div class="mt-8 space-y-3">
+              <div class="flex items-center gap-3 rounded-xl border border-base-300/60 bg-base-100 p-4">
+                <span class="grid size-8 place-items-center rounded-full bg-success/15 text-success"><.icon
+                  name="hero-check"
+                  class="size-4"
+                /></span>
+                <div class="min-w-0 flex-1">
+                  <p class="font-semibold">test</p><p class="text-xs text-base-content/45">
+                    Unit & integration · 1m 42s
+                  </p>
+                </div><code class="text-xs text-base-content/35">01:42</code>
+              </div>
+              <div class="flex items-center gap-3 rounded-xl border border-base-300/60 bg-base-100 p-4">
+                <span class="grid size-8 place-items-center rounded-full bg-success/15 text-success"><.icon
+                  name="hero-check"
+                  class="size-4"
+                /></span>
+                <div class="min-w-0 flex-1">
+                  <p class="font-semibold">build</p><p class="text-xs text-base-content/45">
+                    Container image · 48s
+                  </p>
+                </div><code class="text-xs text-base-content/35">00:48</code>
+              </div>
+              <div class="flex items-center gap-3 rounded-xl border border-primary/25 bg-primary/5 p-4">
+                <span class="grid size-8 place-items-center rounded-full bg-primary text-primary-content"><.icon
+                  name="hero-arrow-up-tray"
+                  class="size-4"
+                /></span>
+                <div class="min-w-0 flex-1">
+                  <p class="font-semibold">publish</p><p class="text-xs text-base-content/45">
+                    Artifacts retained
+                  </p>
+                </div><span class="text-xs font-semibold text-primary">done</span>
+              </div>
+            </div>
+            <div class="mt-6 flex items-center justify-between border-t border-base-300/60 pt-4 text-xs text-base-content/45">
+              <span class="font-mono">8a41cf2d</span><span>3 jobs · 2m 38s</span>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="grid gap-4 border-t border-base-300/60 px-6 py-6 text-sm text-base-content/50 sm:grid-cols-3 sm:px-10">
+      <span class="flex items-center gap-2"><.icon
+        name="hero-shield-check"
+        class="size-4 text-primary"
+      /> Trusted execution</span>
+      <span class="flex items-center gap-2"><.icon
+        name="hero-command-line"
+        class="size-4 text-primary"
+      /> Local reproduction</span>
+      <span class="flex items-center gap-2"><.icon
+        name="hero-server-stack"
+        class="size-4 text-primary"
+      /> Self-hosted by design</span>
+    </footer>
+  </div>
+</Layouts.app>

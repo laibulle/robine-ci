@@ -1,0 +1,127 @@
+<Layouts.app flash={@flash} shell={false}>
+  <div
+    id="setup-page"
+    class="mx-auto grid min-h-[calc(100vh-3rem)] max-w-6xl overflow-hidden rounded-[2rem] border border-base-300/70 bg-base-100 shadow-panel lg:grid-cols-[0.82fr_1.18fr]"
+  >
+    <aside class="relative flex flex-col overflow-hidden bg-base-content p-7 text-base-100 sm:p-10 lg:p-12">
+      <div class="absolute -right-32 -top-32 size-80 rounded-full bg-primary/25 blur-3xl"></div>
+      <div class="login-grid absolute inset-0 opacity-[0.04]"></div>
+
+      <a href={~p"/"} class="relative flex items-center gap-3 font-bold tracking-tight">
+        <span class="grid size-10 place-items-center rounded-xl bg-base-100 text-base-content">
+          <span class="text-sm font-black">R</span>
+        </span>
+        <span>Robine <span class="font-medium opacity-40">CI</span></span>
+      </a>
+
+      <div class="relative my-auto py-14 lg:py-20">
+        <div class="flex items-center gap-3 text-xs font-bold uppercase tracking-[0.16em] text-primary">
+          <span class="grid size-7 place-items-center rounded-full border border-primary/40 bg-primary/10">1</span>
+          One-time setup
+        </div>
+        <h2 class="mt-7 text-4xl font-semibold leading-[1.02] tracking-[-0.055em] sm:text-5xl">
+          Your control plane,<br /><span class="opacity-40">ready in a minute.</span>
+        </h2>
+        <p class="mt-6 max-w-sm text-sm leading-6 opacity-55">
+          Create the recovery administrator who will connect repositories, manage runners and invite the rest of your team.
+        </p>
+
+        <ol class="mt-10 space-y-4" aria-label="Setup progress">
+          <li class="flex items-center gap-3 text-sm font-semibold">
+            <span class="grid size-6 place-items-center rounded-full bg-primary text-primary-content"><.icon
+              name="hero-check"
+              class="size-3.5"
+            /></span>
+            Robine instance started
+          </li>
+          <li class="flex items-center gap-3 text-sm font-semibold">
+            <span class="grid size-6 place-items-center rounded-full border border-primary text-xs text-primary">2</span>
+            Create recovery administrator
+          </li>
+          <li class="flex items-center gap-3 text-sm opacity-35">
+            <span class="grid size-6 place-items-center rounded-full border border-current text-xs">3</span>
+            Connect your first repository
+          </li>
+        </ol>
+      </div>
+
+      <p class="relative flex items-center gap-2 text-xs opacity-40">
+        <.icon name="hero-lock-closed" class="size-4 text-primary" />
+        Setup closes permanently after this step
+      </p>
+    </aside>
+
+    <div class="flex items-center px-6 py-12 sm:px-12 lg:px-16 lg:py-16">
+      <section class="mx-auto w-full max-w-md" aria-labelledby="setup-title">
+        <div class="flex items-start justify-between gap-4">
+          <div>
+            <p class="page-eyebrow">Secure your instance</p>
+            <h1 id="setup-title" class="mt-4 text-4xl font-bold">Create the administrator</h1>
+          </div>
+          <Layouts.theme_toggle />
+        </div>
+        <p class="mt-4 text-sm leading-6 text-base-content/55">
+          This account keeps local recovery access even when organizational SSO is unavailable.
+        </p>
+
+        <div class="mt-7 flex gap-3 rounded-xl border border-primary/20 bg-primary/5 p-4">
+          <span class="grid size-8 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary"><.icon
+            name="hero-key"
+            class="size-4"
+          /></span>
+          <div>
+            <p class="text-sm font-semibold">Have your setup token ready</p>
+            <p class="mt-1 text-xs leading-5 text-base-content/50">
+              Find the short-lived value in <code class="rounded bg-base-200 px-1.5 py-0.5">ROBINE_BOOTSTRAP_TOKEN</code>. It is never stored.
+            </p>
+          </div>
+        </div>
+
+        <.form for={@form} id="setup-form" action={~p"/setup"} class="mt-7 space-y-4">
+          <.input
+            field={@form[:token]}
+            type="password"
+            label="Setup token"
+            placeholder="Paste the one-time token"
+            required
+            autocomplete="off"
+          />
+          <.input
+            field={@form[:email]}
+            type="email"
+            label="Administrator email"
+            placeholder="you@company.com"
+            required
+            autocomplete="username"
+          />
+          <.input
+            field={@form[:password]}
+            type="password"
+            label="Password"
+            placeholder="At least 12 characters"
+            required
+            minlength="12"
+            autocomplete="new-password"
+          />
+
+          <div class="flex items-start gap-2.5 text-xs leading-5 text-base-content/45">
+            <.icon name="hero-shield-check" class="mt-0.5 size-4 shrink-0 text-primary" />
+            Use a unique password. You can enable SSO and add maintainers after setup.
+          </div>
+
+          <.button
+            id="setup-submit"
+            class="btn btn-primary mt-2 h-12 w-full gap-2"
+            phx-disable-with="Securing your instance…"
+          >
+            Create administrator <.icon name="hero-arrow-right" class="size-4" />
+          </.button>
+        </.form>
+
+        <p class="mt-6 text-center text-xs text-base-content/35">
+          The bootstrap token expires according to your server configuration.
+        </p>
+      </section>
+    </div>
+  </div>
+</Layouts.app>

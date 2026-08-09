@@ -1,0 +1,11 @@
+version: 1
+name: Scheduled maintenance
+on:
+  schedule:
+    - cron: "0 2 * * *"
+    - cron: "*/30 9-17 * * 1-5"
+jobs:
+  maintenance:
+    image: alpine:3.22
+    steps:
+      - run: echo maintenance

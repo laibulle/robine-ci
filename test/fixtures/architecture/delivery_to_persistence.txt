@@ -1,0 +1,3 @@
+defmodule RobineWeb.ForbiddenPersistenceFixture do
+  alias Robine.Repo
+end

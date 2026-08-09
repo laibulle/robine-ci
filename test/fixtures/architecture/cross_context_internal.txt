@@ -1,0 +1,3 @@
+defmodule Robine.Pipelines.UseCases.ForbiddenCrossContextFixture do
+  alias Robine.Secrets.Domain.Secret
+end

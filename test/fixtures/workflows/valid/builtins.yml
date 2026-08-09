@@ -1,0 +1,25 @@
+version: 1
+name: Built-ins
+on:
+  pull_request: {}
+jobs:
+  build:
+    image: alpine:3.22
+    steps:
+      - uses: checkout
+      - uses: cache/restore
+        with:
+          key: deps-${{ checksum('mix.lock') }}
+          paths: [deps]
+      - uses: artifacts/upload
+        with:
+          name: reports
+          paths: [reports]
+  consume:
+    image: alpine:3.22
+    needs: build
+    steps:
+      - uses: artifacts/download
+        with:
+          name: reports
+          from: build

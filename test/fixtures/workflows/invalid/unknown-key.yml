@@ -1,0 +1,8 @@
+version: 1
+name: Unknown key
+on: {push: {}}
+surprise: true
+jobs:
+  test:
+    image: alpine:3.22
+    steps: [{run: "true"}]

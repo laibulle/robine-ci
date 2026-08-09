@@ -1,0 +1,15 @@
+version: 1
+name: Successful equivalence
+on:
+  push: {}
+jobs:
+  verify:
+    image: postgres:18-alpine
+    shell: /bin/sh
+    timeout: 45s
+    env:
+      MESSAGE: successful-environment
+    steps:
+      - uses: checkout
+      - name: Success contract
+        run: "printf 'env=%s workspace=%s' \"$MESSAGE\" \"$PWD\""

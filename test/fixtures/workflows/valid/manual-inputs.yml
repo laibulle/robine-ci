@@ -1,0 +1,21 @@
+version: 1
+name: Manual release
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Deployment target
+        type: choice
+        required: true
+        options: [staging, production]
+      version:
+        type: string
+        required: true
+      dry_run:
+        type: boolean
+        default: true
+jobs:
+  release:
+    image: alpine:3.22
+    steps:
+      - run: echo release

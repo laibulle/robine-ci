@@ -1,0 +1,14 @@
+version: 1
+name: Invalid manual input collision
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: string
+jobs:
+  release:
+    image: alpine:3.22
+    env:
+      ROBINE_INPUT_ENVIRONMENT: forged
+    steps:
+      - run: echo release
