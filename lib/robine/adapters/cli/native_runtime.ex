@@ -25,21 +25,25 @@ defmodule Robine.Adapters.CLI.NativeRuntime do
   defp prepare_bundle do
     bundle_directory = :escript.script_name() |> to_string() |> Path.expand() |> Path.dirname()
 
-    runtime_directory =
+    runtime_root =
       Path.join(
         System.tmp_dir!(),
         "robine-cli-native-#{System.pid()}-#{System.unique_integer([:positive])}"
       )
 
+    # OTP resolves an application's priv directory from an app-shaped code path.
+    # Keeping ebin directly below the arbitrary runtime root makes
+    # :code.priv_dir/1 return {:error, :bad_name}.
+    runtime_directory = Path.join(runtime_root, "exile")
     ebin = Path.join(runtime_directory, "ebin")
 
     with :ok <- copy_bundle(bundle_directory, runtime_directory),
          :ok <- unload_embedded_application(),
-         :ok <- remove_embedded_code_paths(),
          true <- :code.add_patha(String.to_charlist(ebin)),
          :ok <- load_external_application(),
          path when is_list(path) <- :code.priv_dir(:exile),
-         true <- File.regular?(Path.join(to_string(path), "spawner")) do
+         true <- File.regular?(Path.join(to_string(path), "spawner")),
+         :ok <- start_external_application() do
       :ok
     else
       false -> {:error, :native_code_path_unavailable}
@@ -55,22 +59,18 @@ defmodule Robine.Adapters.CLI.NativeRuntime do
     end
   end
 
-  defp remove_embedded_code_paths do
-    :code.get_path()
-    |> Enum.filter(fn path ->
-      path = to_string(path)
-      String.contains?(path, ".escript/") and String.ends_with?(path, "/exile/ebin")
-    end)
-    |> Enum.each(&:code.del_path/1)
-
-    :ok
-  end
-
   defp load_external_application do
     case Application.load(:exile) do
       :ok -> :ok
       {:error, {:already_loaded, :exile}} -> :ok
       {:error, reason} -> {:error, {:native_application_load, reason}}
+    end
+  end
+
+  defp start_external_application do
+    case Application.ensure_all_started(:exile) do
+      {:ok, _applications} -> :ok
+      {:error, reason} -> {:error, {:native_application_start, reason}}
     end
   end
 
