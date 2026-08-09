@@ -54,7 +54,7 @@ jobs:
         uses: cache/restore
         with:
           key: robine-mix-${{ checksum('mix.lock') }}
-          paths: [deps, _build]
+          paths: [deps]
       - name: Install dependencies
         run: mix deps.get
       - name: Run project precommit
@@ -63,4 +63,4 @@ jobs:
         uses: cache/save
         with:
           key: robine-mix-${{ checksum('mix.lock') }}
-          paths: [deps, _build]
+          paths: [deps]
