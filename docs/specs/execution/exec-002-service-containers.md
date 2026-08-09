@@ -74,6 +74,7 @@ A developer or startup team running trusted integration tests against disposable
 - **OR-3:** Ordinary service containers MUST inherit dropped capabilities and `no-new-privileges`; all services, including the narrowly allowed DinD service, inherit process/memory/CPU ceilings and attempt ownership labels. They MUST NOT receive the job workspace by default.
 - **OR-4:** Preparation diagnostics MAY retain at most 64 KiB per failed service and MUST pass through the same streaming secret redactor before persistence.
 - **OR-5:** Orphan reconciliation MUST identify attempt networks and service containers exclusively through Robine-owned labels and MUST never remove unlabeled resources.
+- **OR-6:** TCP readiness MUST execute from a capability-dropped, no-new-privileges helper container on the private attempt network so local, remote-daemon, and DinD runners observe identical reachability. The helper image MUST be pinned by digest and receive no workspace, environment, secret, host mount, or published port.
 
 ## Proposed design
 
@@ -104,7 +105,7 @@ jobs:
 
 The Docker adapter creates one labeled network named from the opaque attempt identifier, starts labeled service containers with network aliases, observes readiness from the runner host against the container's network address, then starts the job container on the same network. It never binds `-p`/`--publish`. Cleanup removes the job container, service containers, workspace volume, and finally the network. Restart reconciliation extends the existing label-owned resource scan to networks and services.
 
-TCP readiness is intentionally the first contract. Arbitrary shell probes would require every image to contain a shell and would execute another repository-controlled language; HTTP semantics and Docker-native health checks can be added later without changing service identity or lifecycle.
+TCP readiness is intentionally the first contract. A digest-pinned Alpine helper joins the private attempt network for one bounded `nc` probe and is removed immediately. This keeps readiness inside the daemon-owned network, including when the daemon is DinD, without requiring the service image to contain diagnostic tools. Arbitrary shell probes would execute another repository-controlled language; HTTP semantics and Docker-native health checks can be added later without changing service identity or lifecycle.
 
 Docker-dependent jobs use an isolated daemon rather than the runner host socket:
 

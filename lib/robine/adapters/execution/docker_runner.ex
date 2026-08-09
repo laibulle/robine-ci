@@ -8,6 +8,7 @@ defmodule Robine.Adapters.Execution.DockerRunner do
 
   @output_limit 10_000_000
   @service_diagnostic_limit 64_000
+  @readiness_image "alpine@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce"
   @attempt_label "io.robine.attempt"
   @service_label "io.robine.service"
 
@@ -243,20 +244,44 @@ defmodule Robine.Adapters.Execution.DockerRunner do
              "Image acquisition",
              1
            ) do
-      specification.services
-      |> Enum.with_index(1)
-      |> Enum.reduce_while(:ok, fn {service, index}, :ok ->
-        case prepare_image(
-               service.image,
-               specification.timeout_ms,
-               callback,
-               "Service #{service.id}",
-               index * 10 + 1
-             ) do
-          :ok -> {:cont, :ok}
-          {:error, reason} -> {:halt, {:error, {:service_image, service.id, reason}}}
-        end
-      end)
+      with :ok <- prepare_service_images(specification, callback),
+           :ok <- prepare_readiness_image(specification, callback) do
+        :ok
+      end
+    end
+  end
+
+  defp prepare_service_images(specification, callback) do
+    specification.services
+    |> Enum.with_index(1)
+    |> Enum.reduce_while(:ok, fn {service, index}, :ok ->
+      case prepare_image(
+             service.image,
+             specification.timeout_ms,
+             callback,
+             "Service #{service.id}",
+             index * 10 + 1
+           ) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, {:service_image, service.id, reason}}}
+      end
+    end)
+  end
+
+  defp prepare_readiness_image(%Specification{services: services} = specification, callback) do
+    if Enum.any?(services, & &1.readiness) do
+      case prepare_image(
+             @readiness_image,
+             specification.timeout_ms,
+             callback,
+             "Service readiness probe",
+             91
+           ) do
+        :ok -> :ok
+        {:error, reason} -> {:error, {:readiness_image, reason}}
+      end
+    else
+      :ok
     end
   end
 
@@ -359,7 +384,7 @@ defmodule Robine.Adapters.Execution.DockerRunner do
              ),
            {:ok, _output} <- create_service(specification, service, name, network),
            {:ok, _output} <- docker(["start", name], specification.timeout_ms),
-           :ok <- await_service(service, name, cancel_requested, specification),
+           :ok <- await_service(service, name, network, cancel_requested, specification),
            :ok <-
              emit_service_phase(
                on_output,
@@ -452,13 +477,20 @@ defmodule Robine.Adapters.Execution.DockerRunner do
     end
   end
 
-  defp await_service(service, name, cancel_requested, specification) do
+  defp await_service(service, name, network, cancel_requested, specification) do
     timeout_ms = if service.readiness, do: service.readiness.timeout_ms, else: 5_000
     deadline = System.monotonic_time(:millisecond) + timeout_ms
-    await_service_until(service, name, cancel_requested, specification, deadline)
+    await_service_until(service, name, network, cancel_requested, specification, deadline)
   end
 
-  defp await_service_until(service, name, cancel_requested, specification, deadline) do
+  defp await_service_until(
+         service,
+         name,
+         network,
+         cancel_requested,
+         specification,
+         deadline
+       ) do
     cond do
       cancel_requested.() ->
         {:error, :cancelled}
@@ -474,11 +506,18 @@ defmodule Robine.Adapters.Execution.DockerRunner do
           {:ok, %{running: true}} when is_nil(service.readiness) ->
             :ok
 
-          {:ok, %{running: true, ip: ip}} ->
-            if tcp_ready?(ip, service.readiness.tcp) do
+          {:ok, %{running: true}} ->
+            if tcp_ready?(network, service.id, service.readiness.tcp) do
               :ok
             else
-              wait_for_service_poll(service, name, cancel_requested, specification, deadline)
+              wait_for_service_poll(
+                service,
+                name,
+                network,
+                cancel_requested,
+                specification,
+                deadline
+              )
             end
 
           {:error, reason} ->
@@ -487,10 +526,25 @@ defmodule Robine.Adapters.Execution.DockerRunner do
     end
   end
 
-  defp wait_for_service_poll(service, name, cancel_requested, specification, deadline) do
+  defp wait_for_service_poll(
+         service,
+         name,
+         network,
+         cancel_requested,
+         specification,
+         deadline
+       ) do
     receive do
     after
-      100 -> await_service_until(service, name, cancel_requested, specification, deadline)
+      100 ->
+        await_service_until(
+          service,
+          name,
+          network,
+          cancel_requested,
+          specification,
+          deadline
+        )
     end
   end
 
@@ -517,18 +571,33 @@ defmodule Robine.Adapters.Execution.DockerRunner do
     end
   end
 
-  defp tcp_ready?(ip, port) when is_binary(ip) and ip != "" do
-    case :gen_tcp.connect(String.to_charlist(ip), port, [:binary, active: false], 100) do
-      {:ok, socket} ->
-        :ok = :gen_tcp.close(socket)
-        true
-
-      {:error, _reason} ->
-        false
+  defp tcp_ready?(network, service_id, port) do
+    case docker(
+           [
+             "run",
+             "--rm",
+             "--pull",
+             "never",
+             "--cap-drop",
+             "ALL",
+             "--security-opt",
+             "no-new-privileges",
+             "--network",
+             network,
+             @readiness_image,
+             "nc",
+             "-z",
+             "-w",
+             "1",
+             service_id,
+             to_string(port)
+           ],
+           2_000
+         ) do
+      {:ok, _output} -> true
+      {:error, _reason} -> false
     end
   end
-
-  defp tcp_ready?(_ip, _port), do: false
 
   defp service_diagnostic(name, secret_values) do
     case docker(["logs", "--tail", "200", name], 2_000) do
