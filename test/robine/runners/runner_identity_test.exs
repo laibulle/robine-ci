@@ -162,6 +162,9 @@ defmodule Robine.Runners.RunnerIdentityTest do
     admin_context = context(%{id: "fleet-admin", role: :administrator})
     anonymous_context = context(%{id: "anonymous", role: :runner})
 
+    assert {:ok, %{status: :available, local_capacity: true}} =
+             Runners.explain_capacity(%{labels: ["docker"]}, admin_context)
+
     assert {:ok, %{status: :absent}} =
              Runners.explain_capacity(%{labels: ["docker", "gpu"]}, admin_context)
 

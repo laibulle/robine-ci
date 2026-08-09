@@ -12,12 +12,14 @@ defmodule Robine.Runners.UseCases.ExplainCapacity do
     with true <- labels != [] and Enum.all?(labels, &is_binary/1),
          {:ok, fleet} <- deps.registry.list_fleet(deps.clock.now()) do
       matching = Enum.filter(fleet, &matches?(&1, labels))
+      local_capacity = Enum.all?(labels, &(&1 == "docker"))
 
       {:ok,
        %{
-         status: placement_status(matching),
+         status: if(local_capacity, do: :available, else: placement_status(matching)),
          requested_labels: labels,
-         matching_runners: length(matching)
+         matching_runners: length(matching),
+         local_capacity: local_capacity
        }}
     else
       false -> {:error, :invalid_runner_requirements}

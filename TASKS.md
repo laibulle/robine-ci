@@ -139,6 +139,7 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - [x] Release jobs only after all declared dependencies succeed.
 - [x] Apply backpressure and fair repository-level limits.
 - [x] Reconcile abandoned claims and expired leases.
+- [x] Reconcile committed queued jobs when their event-driven dispatch notification is lost or consumed early.
 - [x] Publish state changes only after durable commit through idempotent outbox projections.
 
 ## Phase 3 — Local Docker execution

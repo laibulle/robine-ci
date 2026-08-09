@@ -65,10 +65,11 @@ An operator deploying Robine on a Linux Docker host and a contributor implementi
 - **OR-2:** Webhook ingestion, scheduling, execution, and GitHub delivery MUST use bounded retry policies.
 - **OR-3:** The system MUST apply backpressure rather than spawning unbounded processes or Docker containers.
 - **OR-4:** The maximum local concurrency MUST be configurable and default conservatively based on operator configuration, not automatic host probing alone.
+- **OR-5:** A periodic durable reconciliation MUST redispatch eligible queued jobs so a lost, conflicted, or prematurely consumed dispatch notification cannot leave committed work queued indefinitely.
 
 ## Proposed design
 
-The Phoenix application contains bounded contexts for source control, workflows, pipelines, identity, secrets, and storage. Their internal dependency rules, use cases, ports, adapters, and public facades are defined by [PLAT-002](plat-002-clean-application-architecture.md). A durable background-job mechanism handles webhook processing, reconciliation, and outbound GitHub updates. A scheduler claims ready jobs using transactional database locking and sends an execution specification to a local runner adapter.
+The Phoenix application contains bounded contexts for source control, workflows, pipelines, identity, secrets, and storage. Their internal dependency rules, use cases, ports, adapters, and public facades are defined by [PLAT-002](plat-002-clean-application-architecture.md). A durable background-job mechanism handles webhook processing, reconciliation, and outbound GitHub updates. A scheduler claims ready jobs using transactional database locking and sends an execution specification to a local runner adapter. Event-driven dispatch provides low latency; the minute reconciler also schedules an idempotent dispatch pass to recover committed queued jobs after lost or conflicted notifications.
 
 Pipeline states are `created`, `queued`, `running`, `cancelling`, and terminal states `succeeded`, `failed`, `cancelled`, or `invalid`. Job attempts distinguish command failure, cancellation, timeout, runner loss, and system failure. Retrying creates a new attempt; it never mutates the history of the previous attempt.
 
