@@ -21,7 +21,7 @@ defmodule Robine.Repositories.UseCases.ProcessGitHubDelivery do
          {:ok, repository} <- deps.repository.get_by_provider_id(event.repository_id),
          true <- repository.trusted,
          {:ok, files} <- deps.github.workflow_files(repository, event.sha),
-         {:ok, pipeline_ids} <- create_matching(files, event, repository, context),
+         {:ok, pipeline_ids} <- create_matching(files, event, repository, id, context),
          :ok <- deps.repository.finish_delivery(id, :processed, deps.clock.now(), nil) do
       {:ok, %{pipeline_ids: pipeline_ids, commit_sha: event.sha}}
     else
@@ -92,7 +92,7 @@ defmodule Robine.Repositories.UseCases.ProcessGitHubDelivery do
 
   defp normalize(event, _payload), do: {:ignore, {:unsupported_event, event}}
 
-  defp create_matching(files, event, repository, context) do
+  defp create_matching(files, event, repository, delivery_id, context) do
     Enum.reduce_while(files, {:ok, []}, fn file, {:ok, pipeline_ids} ->
       case Workflows.validate(%{source: file.content, path: file.path}, context) do
         {:ok, validated} ->
@@ -103,6 +103,7 @@ defmodule Robine.Repositories.UseCases.ProcessGitHubDelivery do
               commit_sha: event.sha,
               trigger: event.type,
               actor: event.actor,
+              idempotency_key: "github:#{delivery_id}:#{file.path}",
               jobs: validated.workflow.jobs,
               workflow_revision: %{path: file.path, source: file.content}
             }

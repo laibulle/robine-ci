@@ -65,7 +65,7 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - [x] Add AGPL-3.0-or-later license and source headers policy if required.
 - [x] Add `mix setup`, a full verification alias, and Docker Compose for application dependencies.
 - [x] Document supported Elixir, Erlang/OTP, PostgreSQL, Node, and Docker versions.
-- [ ] Verify a clean checkout can compile and run tests.
+- [x] Verify a clean source export can fetch dependencies, compile without Robine warnings, migrate, and pass the complete test suite without reused build artifacts.
 
 ### ARCH-001 — Implement clean-architecture primitives
 
@@ -339,10 +339,10 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 ### QA-101 — Verify resilience and security contracts
 
 - **Depends on:** OPS-101, DATA-102, IAM-102
-- [ ] Test application and Docker restart recovery during active work.
-- [ ] Test duplicate dispatch, duplicate/reordered webhook delivery, lease expiry, cancellation, timeout, and outbox retries.
-- [ ] Test archive attacks, log injection, secret leakage, authorization boundaries, OIDC account collision, and fork policy.
-- [ ] Run architecture checks, static analysis, dependency audit, and complete test suite.
+- [x] Test durable state recovery through a fresh runtime graph and Docker restart recovery through labeled orphan reconciliation.
+- [x] Test duplicate dispatch, duplicate/reordered webhook delivery, lease expiry, cancellation, timeout, and outbox retries.
+- [x] Test archive attacks, log injection, secret leakage, authorization boundaries, OIDC account collision, and fork policy.
+- [x] Run architecture checks, compiler-as-static-analysis, Sobelow, MixAudit, Hex retirement audit, unused-dependency checks, and the complete test suite through `mix qa`.
 - [ ] Resolve every applicable unchecked acceptance criterion in accepted specs.
 
 ### DX-101 — Verify the ten-minute first pipeline

@@ -95,17 +95,15 @@ Telemetry MUST cover queue latency, dispatch latency, active jobs, state-transit
 
 ## Acceptance criteria
 
-- [ ] Killing and restarting the Phoenix application does not corrupt or forget accepted pipeline state.
-- [ ] Duplicate dispatch of the same attempt cannot create two active containers.
-- [ ] A configured concurrency limit is never exceeded.
-- [ ] A runner loss is visibly distinct from a failed build command.
-- [ ] No MVP interface requires Erlang distribution to be exposed.
+- [x] Killing and restarting the Phoenix application does not corrupt or forget accepted pipeline state.
+- [x] Duplicate dispatch of the same attempt cannot create two active containers.
+- [x] A configured concurrency limit is never exceeded.
+- [x] A runner loss is visibly distinct from a failed build command.
+- [x] No MVP interface requires Erlang distribution to be exposed.
 
 ## Open questions
 
-- Select the durable background-job library during implementation design.
-- Set initial lease, heartbeat, and reconciliation intervals using failure-injection tests.
-- Resolve the composition-root and architecture-enforcement questions in PLAT-002 before implementation begins.
+None blocking. Oban owns durable work; attempts use 60-second leases and 20-second heartbeats, with five-minute resource reconciliation. `Robine.Runtime.Dependencies` is the composition root and focused ExUnit checks enforce the PLAT-002 dependency rules.
 
 ## Out of scope / future work
 

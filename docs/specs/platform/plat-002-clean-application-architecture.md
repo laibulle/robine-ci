@@ -283,18 +283,18 @@ Mocks SHOULD verify protocol-relevant interactions only. State-based fakes are p
 
 ## Acceptance criteria
 
-- [ ] Every MVP state-changing operation is represented by a named use-case module and exposed by exactly one context facade.
-- [ ] Every public facade operation is an explicit documented `defdelegate` to one use case.
-- [ ] A representative use case is called unchanged from LiveView, an Oban worker, and a unit test.
-- [ ] A use-case unit test runs without starting the application supervision tree or external services.
-- [ ] Domain modules compile without Ecto, Phoenix, Oban, Docker, GitHub, or filesystem dependencies.
-- [ ] Ecto schemas never appear in facade or use-case public types.
-- [ ] External network or Docker side effects never execute inside a database transaction.
+- [x] Every MVP state-changing operation is represented by a named use-case module and exposed by exactly one context facade.
+- [x] Every public facade operation is an explicit documented `defdelegate` to one use case.
+- [x] A representative use case is called unchanged from LiveView, an Oban worker, and a unit test.
+- [x] A use-case unit test runs without starting the application supervision tree or external services.
+- [x] Domain modules compile without Ecto, Phoenix, Oban, Docker, GitHub, or filesystem dependencies.
+- [x] Ecto schemas never appear in facade or use-case public types.
+- [x] External network or Docker side effects never execute inside a database transaction.
 - [x] An outbox integration test proves that a committed effect survives a missing worker job, is reconciled, and is delivered idempotently.
-- [ ] Architecture checks fail on fixtures representing each forbidden dependency direction.
-- [ ] Only the composition root refers to concrete adapters when assembling production dependencies.
-- [ ] Cross-context calls use the target context facade or an explicitly published contract.
-- [ ] The reference feature documented by DX-4 is implemented and used as the pattern for subsequent work.
+- [x] Architecture checks fail on fixtures representing each forbidden dependency direction.
+- [x] Only the composition root refers to concrete adapters when assembling production dependencies.
+- [x] Cross-context calls use the target context facade or an explicitly published contract.
+- [x] The reference feature documented by DX-4 is implemented and used as the pattern for subsequent work.
 
 ## Open questions
 

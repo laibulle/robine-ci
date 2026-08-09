@@ -88,6 +88,42 @@ defmodule Robine.Repositories.GitHubDeliveryTest do
              Repo.get!(Pipeline, pipeline_id)
 
     assert Repo.get!(GitHubDelivery, delivery_id).status == :processed
+
+    assert {:ok, %{pipeline_ids: [^pipeline_id]}} =
+             Repositories.process_github_delivery(%{delivery_id: delivery_id}, context)
+
+    assert Repo.aggregate(Pipeline, :count) == 1
+  end
+
+  test "processes reordered deliveries independently at each exact commit" do
+    context = context_with_fake_github()
+    provider_id = 44_444_444
+    _repository = register(context, provider_id)
+    older_sha = String.duplicate("1", 40)
+    newer_sha = String.duplicate("2", 40)
+
+    for {delivery_id, sha} <- [{"older-push", older_sha}, {"newer-push", newer_sha}] do
+      accept(
+        delivery_id,
+        "push",
+        %{
+          "repository" => %{"id" => provider_id},
+          "after" => sha,
+          "ref" => "refs/heads/main"
+        },
+        context
+      )
+    end
+
+    assert {:ok, %{commit_sha: ^newer_sha}} =
+             Repositories.process_github_delivery(%{delivery_id: "newer-push"}, context)
+
+    assert {:ok, %{commit_sha: ^older_sha}} =
+             Repositories.process_github_delivery(%{delivery_id: "older-push"}, context)
+
+    assert Repo.all(Pipeline)
+           |> Enum.map(& &1.commit_sha)
+           |> Enum.sort() == [older_sha, newer_sha]
   end
 
   test "checks installation permissions through the public facade" do

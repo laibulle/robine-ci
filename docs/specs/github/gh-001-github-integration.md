@@ -100,11 +100,11 @@ Every GitHub API and installation-token request emits bounded latency and outcom
 
 ## Acceptance criteria
 
-- [ ] Replaying a webhook delivery does not create another pipeline.
-- [ ] A matching push and pull request each run the workflow from their exact commit.
-- [ ] A failed job appears as a failed GitHub check with a deep link to logs.
-- [ ] A temporary GitHub API failure does not stop local execution and is reconciled later.
-- [ ] A fork pull request receives no secret-bearing execution by default.
+- [x] Replaying a webhook delivery does not create another pipeline.
+- [x] A matching push and pull request each run the workflow from their exact commit.
+- [x] A failed job appears as a failed GitHub check with a deep link to logs.
+- [x] A temporary GitHub API failure does not stop local execution and is reconciled later.
+- [x] A fork pull request receives no secret-bearing execution by default.
 
 ## Open questions
 

@@ -106,17 +106,16 @@ Measure LiveView connection count, reconnect rate, page latency, log segment lat
 
 ## Acceptance criteria
 
-- [ ] A user can complete all MVP administration through the UI.
-- [ ] A running job updates without manual refresh and reconnects without duplicate log lines.
+- [x] A user can complete all MVP administration through the UI.
+- [x] A running job updates without manual refresh and reconnects without duplicate log lines.
 - [x] A 100 MB test log can be navigated without loading 100 MB into a LiveView process or browser DOM.
-- [ ] A failed step is apparent from the pipeline page and directly linkable.
+- [x] A failed step is apparent from the pipeline page and directly linkable.
 - [ ] All core journeys pass automated keyboard and accessibility checks, plus a manual screen-reader smoke test.
-- [ ] Retry clearly handles present and expired dependency artifacts.
+- [x] Retry clearly handles present and expired dependency artifacts.
 
 ## Open questions
 
-- Define log search indexing and raw download behavior for the MVP.
-- Create the initial visual design tokens before feature implementation.
+None blocking. MVP search is deliberately limited to the bounded visible log window; indexed full-log search and raw download are post-MVP. Semantic Tailwind design tokens and accessibility contracts are published in `docs/design-system.md`.
 
 ## Out of scope / future work
 

@@ -96,9 +96,9 @@ The service exposes structured application logs, health endpoints, webhook proce
 ## Acceptance criteria
 
 - [ ] A new operator follows documented steps from an empty host to a green GitHub check in under ten minutes, excluding external approvals and image downloads.
-- [ ] A developer can reproduce a failed CI job locally using a command shown in the web UI.
-- [ ] Restarting the server during a pipeline does not lose its recorded state.
-- [ ] Every non-user-actionable infrastructure failure has a distinct visible reason.
+- [x] A developer can reproduce a failed CI job locally using a command shown in the web UI.
+- [x] Restarting the server during a pipeline does not lose its recorded state.
+- [x] Every non-user-actionable infrastructure failure has a distinct visible reason.
 
 ## Open questions
 

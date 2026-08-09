@@ -30,6 +30,7 @@ defmodule Robine.MixProject do
     [
       preferred_envs: [
         precommit: :test,
+        qa: :test,
         verify: :test,
         "robine.release": :cli,
         "robine.verify_checksums": :cli
@@ -78,6 +79,8 @@ defmodule Robine.MixProject do
        depth: 1},
       {:swoosh, "~> 1.16"},
       {:req, "~> 0.5"},
+      {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false},
+      {:sobelow, "~> 0.14", only: [:dev, :test], runtime: false},
       {:telemetry_metrics, "~> 1.0"},
       {:telemetry_metrics_prometheus_core, "~> 1.0"},
       {:telemetry_poller, "~> 1.0"},
@@ -108,6 +111,15 @@ defmodule Robine.MixProject do
         "phx.digest"
       ],
       verify: ["format --check-formatted", "compile --warnings-as-errors", "test"],
+      qa: [
+        "format --check-formatted",
+        "compile --warnings-as-errors",
+        "sobelow --exit --threshold medium --private --compact",
+        "deps.audit",
+        "cmd env MIX_ENV=dev mix hex.audit",
+        "deps.unlock --check-unused",
+        "test"
+      ],
       precommit: ["verify"]
     ]
   end

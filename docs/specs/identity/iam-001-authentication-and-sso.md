@@ -107,18 +107,16 @@ Metrics include login success/failure by method, OIDC discovery/JWKS failures, s
 
 ## Acceptance criteria
 
-- [ ] First-admin setup cannot be repeated after the first account exists.
-- [ ] OIDC login validates issuer, audience, signature, nonce, state, and PKCE.
-- [ ] Email collision cannot silently take over an existing local account.
-- [ ] The last usable administrator cannot remove their own recovery path accidentally.
+- [x] First-admin setup cannot be repeated after the first account exists.
+- [x] OIDC login validates issuer, audience, signature, nonce, state, and PKCE.
+- [x] Email collision cannot silently take over an existing local account.
+- [x] The last usable administrator cannot remove their own recovery path accidentally.
 - [x] Every protected LiveView route and action performs server-side authorization, including forged hidden-event coverage.
 - [x] A provider outage during authorization or callback creates no partial identity/session, and a local administrator can still sign in and reach instance administration.
 
 ## Open questions
 
-- Choose the default account-provisioning policy: invite-only, verified-domain, or any authenticated OIDC user.
-- Define secure delivery and rotation of the bootstrap token for Docker Compose.
-- Decide whether repository-specific authorization is required before MVP acceptance.
+None blocking. Any provider-authenticated identity with a verified email may be provisioned as a viewer. The one-use bootstrap token is supplied through `ROBINE_BOOTSTRAP_TOKEN`, expires after 15 minutes, and is rotated by restarting with a fresh value before initial setup. MVP repository access uses the global viewer/maintainer/administrator roles; repository-specific authorization is future work.
 
 ## Out of scope / future work
 

@@ -100,9 +100,9 @@ Audit events record secret creation, replacement, deletion, grants, and key rota
 ## Acceptance criteria
 
 - [x] Database inspection and database-only backups reveal no secret plaintext.
-- [ ] Secrets cannot be retrieved through UI or API after creation.
+- [x] Secrets cannot be retrieved through UI or API after creation.
 - [x] A secret split across log chunks is redacted before persistence and broadcast.
-- [ ] Fork-triggered work receives no secrets under every event ordering tested.
+- [x] Fork-triggered work receives no secrets under every event ordering tested.
 - [x] Interrupted key rotation resumes without losing access to any secret.
 - [x] Application logs, diagnostic output, telemetry payloads, and debug inspection contain no fixture secret values.
 

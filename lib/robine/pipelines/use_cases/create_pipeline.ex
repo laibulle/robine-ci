@@ -17,24 +17,65 @@ defmodule Robine.Pipelines.UseCases.CreatePipeline do
       when actor.role in [:administrator, :maintainer] do
     deps.unit_of_work.transaction(fn ->
       now = deps.clock.now()
-      pipeline_id = deps.id_generator.generate()
       jobs = Map.get(input, :jobs, %{})
 
       input = Map.put_new(input, :actor, actor.id)
       input = Map.put_new(input, :correlation_id, context.correlation_id)
 
-      with {:ok, pipeline} <- Pipeline.create(input, pipeline_id, now),
-           {:ok, revision} <- workflow_revision(input, jobs, pipeline_id, now, deps),
-           :ok <- deps.pipeline_repository.insert(pipeline),
-           :ok <- deps.pipeline_repository.insert_revision(revision),
-           :ok <- insert_jobs(jobs, pipeline, deps),
-           :ok <- deps.event_outbox.append(created_event(pipeline, deps)) do
-        {:ok, PipelineView.from_domain(pipeline)}
+      with {:ok, pipeline_id} <- pipeline_id(input, deps) do
+        case deps.pipeline_repository.get(pipeline_id) do
+          {:ok, existing} -> reuse(existing, input)
+          {:error, :not_found} -> create(input, jobs, pipeline_id, now, deps)
+          {:error, reason} -> {:error, reason}
+        end
       end
     end)
   end
 
   def call(_input, %ExecutionContext{}), do: {:error, :forbidden}
+
+  defp create(input, jobs, pipeline_id, now, deps) do
+    with {:ok, pipeline} <- Pipeline.create(input, pipeline_id, now),
+         {:ok, revision} <- workflow_revision(input, jobs, pipeline_id, now, deps),
+         :ok <- deps.pipeline_repository.insert(pipeline),
+         :ok <- deps.pipeline_repository.insert_revision(revision),
+         :ok <- insert_jobs(jobs, pipeline, deps),
+         :ok <- deps.event_outbox.append(created_event(pipeline, deps)) do
+      {:ok, PipelineView.from_domain(pipeline)}
+    end
+  end
+
+  defp reuse(existing, input) do
+    expected = {
+      Map.get(input, :repository_id),
+      Map.get(input, :workflow_name),
+      Map.get(input, :commit_sha),
+      input |> Map.get(:trigger, :manual) |> to_string()
+    }
+
+    actual = {
+      existing.repository_id,
+      existing.workflow_name,
+      existing.commit_sha,
+      to_string(existing.trigger)
+    }
+
+    if actual == expected,
+      do: {:ok, PipelineView.from_domain(existing)},
+      else: {:error, :idempotency_conflict}
+  end
+
+  defp pipeline_id(%{idempotency_key: key}, _deps)
+       when is_binary(key) and byte_size(key) in 1..512 do
+    <<bytes::binary-size(16), _rest::binary>> = :crypto.hash(:sha256, key)
+    <<a::binary-size(8), b::binary-size(4), c::binary-size(4), d::binary-size(4),
+      e::binary-size(12)>> = Base.encode16(bytes, case: :lower)
+
+    {:ok, Enum.join([a, b, c, d, e], "-")}
+  end
+
+  defp pipeline_id(%{idempotency_key: _invalid}, _deps), do: {:error, :invalid_idempotency_key}
+  defp pipeline_id(_input, deps), do: {:ok, deps.id_generator.generate()}
 
   defp created_event(pipeline, deps) do
     %PipelineCreated{
