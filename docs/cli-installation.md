@@ -11,11 +11,11 @@ mix deps.get
 mix robine.release --output dist
 ```
 
-The release task automatically selects the isolated `MIX_ENV=cli`; this prevents the local escript from loading server-only database, endpoint, or bootstrap-secret requirements. The command creates `dist/robine-<version>.escript` with executable permissions and `dist/SHA256SUMS`. The manifest is sorted by artifact filename and written atomically. Release automation must publish both files from the same build.
+The release task automatically selects the isolated `MIX_ENV=cli`; this prevents the local escript from loading server-only database, endpoint, or bootstrap-secret requirements. The command creates `robine-<version>.escript`, three `robine-exile*` native runtime files, and `SHA256SUMS`. All five files are one inseparable bundle and must remain in the same directory. The manifest is sorted and written atomically; release automation must publish every listed file from the same build.
 
 ## Verify a downloaded release
 
-Place the escript and `SHA256SUMS` in the same directory. On Linux:
+Place every bundle file and `SHA256SUMS` in the same directory. On Linux:
 
 ```sh
 sha256sum --check SHA256SUMS
@@ -51,7 +51,13 @@ After successful verification on Linux or macOS:
 
 ```sh
 chmod +x robine-<version>.escript
-install -m 0755 robine-<version>.escript "$HOME/.local/bin/robine"
+install -d "$HOME/.local/lib/robine" "$HOME/.local/bin"
+install -m 0755 robine-<version>.escript robine-exile-spawner "$HOME/.local/lib/robine/"
+install -m 0644 robine-exile.app robine-exile.so "$HOME/.local/lib/robine/"
+ln -sfn "$HOME/.local/lib/robine/robine-<version>.escript" "$HOME/.local/bin/robine"
+ln -sfn "$HOME/.local/lib/robine/robine-exile.app" "$HOME/.local/bin/robine-exile.app"
+ln -sfn "$HOME/.local/lib/robine/robine-exile.so" "$HOME/.local/bin/robine-exile.so"
+ln -sfn "$HOME/.local/lib/robine/robine-exile-spawner" "$HOME/.local/bin/robine-exile-spawner"
 robine version
 ```
 

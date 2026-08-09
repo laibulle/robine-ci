@@ -5,6 +5,7 @@ defmodule Robine.Adapters.CLI do
   alias Robine.Execution
   alias Robine.Execution.Dependencies, as: ExecutionDependencies
   alias Robine.Adapters.CLI.LocalSecretFile
+  alias Robine.Adapters.CLI.NativeRuntime
   alias Robine.Workflows
   alias Robine.Workflows.Dependencies
 
@@ -13,7 +14,12 @@ defmodule Robine.Adapters.CLI do
 
   @spec main([String.t()]) :: no_return()
   def main(arguments) do
-    {status, output} = run(arguments, File.cwd!())
+    {status, output} =
+      case NativeRuntime.prepare() do
+        :ok -> run(arguments, File.cwd!())
+        {:error, reason} -> {3, "CLI native runtime is unavailable: #{inspect(reason)}"}
+      end
+
     IO.puts(output)
     System.halt(status)
   end

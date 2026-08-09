@@ -17,15 +17,20 @@ defmodule Robine.Release.ChecksumsTest do
     output = Path.join(directory, "dist")
     File.write!(source, "#!/usr/bin/env escript\nmain(_) -> ok.\n")
 
-    assert {:ok, %{artifact: artifact, manifest: manifest}} =
+    assert {:ok, %{artifact: artifact, native_artifacts: native, manifest: manifest}} =
              Package.create(source, output, "1.2.3-rc.1+build.7")
 
     assert Path.basename(artifact) == "robine-1.2.3-rc.1+build.7.escript"
     assert File.stat!(artifact).access == :read_write
+
+    assert Enum.map(native, &Path.basename/1) |> Enum.sort() ==
+             ~w(robine-exile-spawner robine-exile.app robine-exile.so)
+
     assert :ok = Checksums.verify(manifest, output)
 
     expected = :crypto.hash(:sha256, File.read!(artifact)) |> Base.encode16(case: :lower)
-    assert File.read!(manifest) == "#{expected}  #{Path.basename(artifact)}\n"
+    assert File.read!(manifest) =~ "#{expected}  #{Path.basename(artifact)}\n"
+    assert length(String.split(File.read!(manifest), "\n", trim: true)) == 4
 
     File.write!(artifact, "tampered")
     assert {:error, {:checksum_mismatch, [name]}} = Checksums.verify(manifest, output)
