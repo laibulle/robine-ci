@@ -3,6 +3,8 @@ defmodule Robine.TestSupport.ForgejoServer do
 
   use GenServer
 
+  alias Robine.TestSupport.DockerEndpoint
+
   @image "codeberg.org/forgejo/forgejo:16.0.2-rootless"
   @username "robine"
   @password "robine-integration-password"
@@ -23,10 +25,12 @@ defmodule Robine.TestSupport.ForgejoServer do
          :ok <- create_user(name),
          {:ok, token} <- create_token(name),
          {:ok, sha} <- create_repository(port, token) do
+      endpoint = DockerEndpoint.http_url(port)
+
       {:ok,
        %{
          container_id: String.trim(container_id),
-         endpoint: "http://127.0.0.1:#{port}",
+         endpoint: endpoint,
          name: name,
          repository: @repository,
          sha: sha,
@@ -66,7 +70,7 @@ defmodule Robine.TestSupport.ForgejoServer do
         "--name",
         name,
         "--publish",
-        "127.0.0.1:#{port}:3000",
+        "#{DockerEndpoint.publish_address()}:#{port}:3000",
         "--env",
         "FORGEJO__database__DB_TYPE=sqlite3",
         "--env",
@@ -74,7 +78,7 @@ defmodule Robine.TestSupport.ForgejoServer do
         "--env",
         "FORGEJO__security__INSTALL_LOCK=true",
         "--env",
-        "FORGEJO__server__ROOT_URL=http://127.0.0.1:#{port}/",
+        "FORGEJO__server__ROOT_URL=#{DockerEndpoint.http_url(port)}/",
         @image
       ],
       stderr_to_stdout: true
@@ -87,7 +91,10 @@ defmodule Robine.TestSupport.ForgejoServer do
   end
 
   defp connect_until_ready(port, deadline) do
-    case Req.get("http://127.0.0.1:#{port}/api/v1/version", retry: false, receive_timeout: 200) do
+    case Req.get("#{DockerEndpoint.http_url(port)}/api/v1/version",
+           retry: false,
+           receive_timeout: 200
+         ) do
       {:ok, %{status: 200}} ->
         :ok
 
@@ -159,7 +166,7 @@ defmodule Robine.TestSupport.ForgejoServer do
   end
 
   defp create_repository(port, token) do
-    endpoint = "http://127.0.0.1:#{port}"
+    endpoint = DockerEndpoint.http_url(port)
 
     with {:ok, %{status: 201}} <-
            Req.post("#{endpoint}/api/v1/user/repos",

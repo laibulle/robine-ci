@@ -6,12 +6,17 @@ defmodule Robine.Adapters.Storage.S3IntegrationTest do
   alias Robine.TestSupport.MinioServer
 
   @moduletag :s3_integration
+  @image_available match?(
+                     {_output, 0},
+                     System.cmd(
+                       "docker",
+                       ["image", "inspect", MinioServer.image()],
+                       stderr_to_stdout: true
+                     )
+                   )
 
-  setup_all do
-    case System.cmd("docker", ["image", "inspect", MinioServer.image()], stderr_to_stdout: true) do
-      {_output, 0} -> :ok
-      _missing -> [skip: "the pinned MinIO integration image is not installed"]
-    end
+  if not @image_available do
+    @moduletag skip: "the pinned MinIO integration image is not installed"
   end
 
   setup do

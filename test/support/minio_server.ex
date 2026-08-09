@@ -3,6 +3,8 @@ defmodule Robine.TestSupport.MinioServer do
 
   use GenServer
 
+  alias Robine.TestSupport.DockerEndpoint
+
   @image "minio/minio:RELEASE.2025-09-07T16-13-09Z"
 
   def image, do: @image
@@ -25,7 +27,7 @@ defmodule Robine.TestSupport.MinioServer do
 
   @impl true
   def handle_call(:endpoint, _from, state),
-    do: {:reply, "http://127.0.0.1:#{state.port}", state}
+    do: {:reply, DockerEndpoint.http_url(state.port), state}
 
   @impl true
   def handle_info({:EXIT, port, :normal}, state) when is_port(port), do: {:noreply, state}
@@ -48,7 +50,7 @@ defmodule Robine.TestSupport.MinioServer do
         "--name",
         name,
         "--publish",
-        "127.0.0.1:#{port}:9000",
+        "#{DockerEndpoint.publish_address()}:#{port}:9000",
         "--env",
         "MINIO_ROOT_USER=robine-test-access",
         "--env",
@@ -69,7 +71,7 @@ defmodule Robine.TestSupport.MinioServer do
   end
 
   defp connect_until_ready(port, deadline) do
-    case Req.get("http://127.0.0.1:#{port}/minio/health/live",
+    case Req.get("#{DockerEndpoint.http_url(port)}/minio/health/live",
            retry: false,
            receive_timeout: 100,
            decode_body: false

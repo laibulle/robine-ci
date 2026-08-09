@@ -6,12 +6,17 @@ defmodule Robine.Adapters.SourceControl.ForgejoIntegrationTest do
   alias Robine.TestSupport.ForgejoServer
 
   @moduletag :forgejo_integration
+  @image_available match?(
+                     {_output, 0},
+                     System.cmd(
+                       "docker",
+                       ["image", "inspect", ForgejoServer.image()],
+                       stderr_to_stdout: true
+                     )
+                   )
 
-  setup_all do
-    case System.cmd("docker", ["image", "inspect", ForgejoServer.image()], stderr_to_stdout: true) do
-      {_output, 0} -> :ok
-      _missing -> [skip: "the pinned Forgejo integration image is not installed"]
-    end
+  if not @image_available do
+    @moduletag skip: "the pinned Forgejo integration image is not installed"
   end
 
   setup do
