@@ -252,6 +252,7 @@ defmodule RobineWeb.AdminLive.Index do
     %{
       public_url: public_url,
       webhook_url: public_url <> "/api/github/webhooks",
+      private_key_default: Application.get_env(:robine, :dev_github_private_key_form_default, ""),
       app_id_configured?: Application.get_env(:robine, :github_app_id) not in [nil, ""],
       healthy?: is_map(github_health) and github_health.status == :ok,
       health_detail:
@@ -807,7 +808,7 @@ defmodule RobineWeb.AdminLive.Index do
                     spellcheck="false"
                     placeholder="-----BEGIN RSA PRIVATE KEY-----"
                     class="textarea textarea-bordered mt-4 min-h-36 w-full font-mono text-xs"
-                  ></textarea>
+                  >{@github_setup.private_key_default}</textarea>
                   <button class="btn btn-primary btn-sm mt-3" phx-disable-with="Encrypting…">Store private key</button>
                 </form>
                 <form

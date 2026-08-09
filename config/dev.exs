@@ -1,5 +1,13 @@
 import Config
 
+dev_github_private_key =
+  Path.expand("../local/robine-ci.2026-08-09.private-key.pem", __DIR__)
+  |> File.read()
+  |> case do
+    {:ok, contents} -> contents
+    {:error, _reason} -> ""
+  end
+
 # Stable local-only credential for the first-run setup screen. Production
 # continues to require ROBINE_BOOTSTRAP_TOKEN at runtime.
 config :robine,
@@ -10,7 +18,8 @@ config :robine,
     "token" => "dev-bootstrap-token",
     "email" => "admin@robine.local",
     "password" => "password1234"
-  }
+  },
+  dev_github_private_key_form_default: dev_github_private_key
 
 # Fixed development-only key. Runtime environment keys still override this value.
 config :robine, :secret_keyring,
