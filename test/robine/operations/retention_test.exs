@@ -8,6 +8,8 @@ defmodule Robine.Operations.RetentionTest do
 
   setup do
     previous = Application.fetch_env!(:robine, :retention)
+    previous_root = Application.fetch_env!(:robine, :storage_root)
+    storage_root = Path.join(System.tmp_dir!(), "robine-retention-#{Ecto.UUID.generate()}")
 
     Application.put_env(:robine, :retention,
       log_seconds: 60,
@@ -15,7 +17,13 @@ defmodule Robine.Operations.RetentionTest do
       batch_size: 100
     )
 
-    on_exit(fn -> Application.put_env(:robine, :retention, previous) end)
+    Application.put_env(:robine, :storage_root, storage_root)
+
+    on_exit(fn ->
+      Application.put_env(:robine, :retention, previous)
+      Application.put_env(:robine, :storage_root, previous_root)
+      File.rm_rf(storage_root)
+    end)
   end
 
   test "prunes expired metadata and deletes an unreferenced blob" do
@@ -79,6 +87,55 @@ defmodule Robine.Operations.RetentionTest do
   test "retention is administrator-only" do
     context = Dependencies.context(%{id: "viewer", role: :viewer}, "retention-forbidden")
     assert {:error, :forbidden} = Operations.prune_retention(%{}, context)
+  end
+
+  test "reconciles orphan and missing objects and emits physical storage metrics" do
+    context = admin_context()
+    repository_id = Ecto.UUID.generate()
+    handler = "storage-reconciliation-#{System.unique_integer([:positive])}"
+    parent = self()
+
+    :ok =
+      :telemetry.attach(
+        handler,
+        [:robine, :storage, :reconciliation],
+        fn event, measurements, metadata, _config ->
+          send(parent, {:storage_reconciliation, event, measurements, metadata})
+        end,
+        nil
+      )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    assert {:ok, orphan} = LocalBlobStore.put("orphan-content")
+
+    assert {:ok, artifact} =
+             Storage.upload_artifact(
+               %{
+                 repository_id: repository_id,
+                 attempt_id: Ecto.UUID.generate(),
+                 name: "missing.txt",
+                 content: "missing-content"
+               },
+               context
+             )
+
+    assert :ok = LocalBlobStore.delete(artifact.digest)
+    assert {:ok, result} = Operations.prune_retention(%{}, context)
+    assert result.orphan_objects == 1
+    assert result.missing_objects == 1
+    assert result.physical_bytes == byte_size("orphan-content")
+    assert result.logical_bytes == byte_size("missing-content")
+    assert Repo.get!(StorageGcCandidate, orphan.digest)
+
+    assert_receive {:storage_reconciliation, [:robine, :storage, :reconciliation], measurements,
+                    %{}}
+
+    assert measurements.orphan_objects == 1
+    assert measurements.missing_objects == 1
+
+    assert {:ok, %{blobs_deleted: 1}} = Operations.prune_retention(%{}, context)
+    assert {:error, :not_found} = LocalBlobStore.get(orphan.digest, orphan.digest)
   end
 
   defp admin_context do

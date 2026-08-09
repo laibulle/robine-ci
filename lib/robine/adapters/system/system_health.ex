@@ -4,15 +4,17 @@ defmodule Robine.Adapters.System.SystemHealth do
   import Ecto.Query
 
   alias Robine.Repo
+  alias Robine.Adapters.Persistence.Postgres.Schemas.OutboxEvent
 
   @impl true
   def check do
     checks = %{
       database: database(),
       durable_queue: durable_queue(),
+      outbox: outbox(),
       docker: docker(),
       storage: storage(),
-      github_app: configured([:github_app_id, :github_app_private_key, :github_webhook_secret]),
+      github_app: github_app(),
       oidc: optional_configuration(:oidc_config)
     }
 
@@ -49,6 +51,48 @@ defmodule Robine.Adapters.System.SystemHealth do
     _error -> %{status: :error, detail: "Durable queue unavailable"}
   end
 
+  defp outbox do
+    pending =
+      Repo.aggregate(from(event in OutboxEvent, where: is_nil(event.delivered_at)), :count)
+
+    stale =
+      Repo.aggregate(
+        from(event in OutboxEvent,
+          where:
+            is_nil(event.delivered_at) and
+              event.occurred_at < ^DateTime.add(DateTime.utc_now(), -300, :second)
+        ),
+        :count
+      )
+
+    worker = "Robine.Adapters.Background.OutboxDeliveryWorker"
+
+    dead_letters =
+      Repo.aggregate(
+        from(job in Oban.Job,
+          where: job.worker == ^worker and job.state in ["discarded", "cancelled"]
+        ),
+        :count
+      )
+
+    status =
+      cond do
+        dead_letters > 0 -> :error
+        stale > 0 -> :degraded
+        true -> :ok
+      end
+
+    %{
+      status: status,
+      detail: "#{pending} pending, #{stale} stale, #{dead_letters} dead-letter outbox events",
+      pending: pending,
+      stale: stale,
+      dead_letters: dead_letters
+    }
+  rescue
+    _error -> %{status: :error, detail: "Outbox state unavailable"}
+  end
+
   defp docker do
     task =
       Task.async(fn ->
@@ -82,13 +126,18 @@ defmodule Robine.Adapters.System.SystemHealth do
     _error -> %{status: :error, detail: "Local blob storage is not writable"}
   end
 
-  defp configured(keys) do
-    if Enum.all?(keys, fn key ->
-         value = Application.get_env(:robine, key)
-         is_binary(value) and value != ""
-       end),
-       do: %{status: :ok, detail: "Configured"},
-       else: %{status: :degraded, detail: "Not fully configured"}
+  defp github_app do
+    app_id = Application.get_env(:robine, :github_app_id)
+
+    with true <- is_binary(app_id) and app_id != "",
+         {:ok, _private_key} <-
+           Robine.Adapters.SourceControl.GitHubCredentials.fetch(:private_key),
+         {:ok, _webhook_secret} <-
+           Robine.Adapters.SourceControl.GitHubCredentials.fetch(:webhook_secret) do
+      %{status: :ok, detail: "Encrypted or bootstrap credentials configured"}
+    else
+      _reason -> %{status: :degraded, detail: "GitHub App credentials incomplete"}
+    end
   end
 
   defp optional_configuration(key) do

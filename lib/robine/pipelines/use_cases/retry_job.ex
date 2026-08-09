@@ -2,7 +2,7 @@ defmodule Robine.Pipelines.UseCases.RetryJob do
   @moduledoc "Requeues one failed or cancelled job after validating its durable prerequisites."
   alias Robine.ExecutionContext
   alias Robine.Pipelines.Dependencies
-  alias Robine.Pipelines.Domain.{Job, Pipeline}
+  alias Robine.Pipelines.Domain.{Job, Pipeline, PipelineProjectionRequested}
 
   def call(%{job_id: job_id} = input, %ExecutionContext{
         actor: %{role: role},
@@ -16,7 +16,8 @@ defmodule Robine.Pipelines.UseCases.RetryJob do
            {:ok, pipeline} <- deps.pipeline_repository.get(job.pipeline_id),
            {:ok, reopened_pipeline} <- Pipeline.reopen_for_retry(pipeline),
            {:ok, result} <- retry_strategy(job, jobs, input, deps),
-           :ok <- deps.pipeline_repository.update(reopened_pipeline) do
+           :ok <- deps.pipeline_repository.update(reopened_pipeline),
+           :ok <- deps.event_outbox.append(projection_event(reopened_pipeline.id, deps)) do
         {:ok, Map.merge(result, %{pipeline_id: reopened_pipeline.id})}
       end
     end)
@@ -143,5 +144,14 @@ defmodule Robine.Pipelines.UseCases.RetryJob do
         inputs: Enum.map(requirements, &"#{&1.from}/#{&1.name}"),
         rerun_jobs: requirements |> Enum.map(& &1.from) |> Enum.uniq()
       }}}
+  end
+
+  defp projection_event(pipeline_id, deps) do
+    %PipelineProjectionRequested{
+      event_id: deps.id_generator.generate(),
+      pipeline_id: pipeline_id,
+      occurred_at: deps.clock.now(),
+      dispatch: true
+    }
   end
 end

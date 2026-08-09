@@ -58,14 +58,47 @@ config :robine,
        :runner_cancellation_grace_ms,
        positive_integer.("ROBINE_RUNNER_CANCELLATION_GRACE_MS", 5_000)
 
-if encoded_key = System.get_env("ROBINE_SECRET_KEY") do
-  case Base.decode64(encoded_key) do
-    {:ok, key} when byte_size(key) == 32 ->
-      version = String.to_integer(System.get_env("ROBINE_SECRET_KEY_VERSION", "1"))
-      config :robine, :secret_keyring, current_version: version, keys: %{version => key}
+decode_secret_key = fn encoded, label ->
+  case Base.decode64(encoded) do
+    {:ok, key} when byte_size(key) == 32 -> key
+    _ -> raise "#{label} must contain a base64-encoded 32-byte key"
+  end
+end
 
-    _ ->
-      raise "ROBINE_SECRET_KEY must be a base64-encoded 32-byte key"
+if encoded_keys = System.get_env("ROBINE_SECRET_KEYS") do
+  current_version = positive_integer.("ROBINE_SECRET_KEY_VERSION", 1)
+
+  keys =
+    encoded_keys
+    |> then(fn value ->
+      case Jason.decode(value) do
+        {:ok, decoded} when is_map(decoded) -> decoded
+        _ -> raise "ROBINE_SECRET_KEYS must be a JSON object of version-to-key entries"
+      end
+    end)
+    |> Enum.map(fn {version, encoded} ->
+      case Integer.parse(version) do
+        {number, ""} when number > 0 and is_binary(encoded) ->
+          {number, decode_secret_key.(encoded, "ROBINE_SECRET_KEYS[#{version}]")}
+
+        _ ->
+          raise "ROBINE_SECRET_KEYS versions must be positive integer strings"
+      end
+    end)
+    |> Map.new()
+
+  unless Map.has_key?(keys, current_version) do
+    raise "ROBINE_SECRET_KEYS must contain ROBINE_SECRET_KEY_VERSION"
+  end
+
+  config :robine, :secret_keyring, current_version: current_version, keys: keys
+else
+  if encoded_key = System.get_env("ROBINE_SECRET_KEY") do
+    version = positive_integer.("ROBINE_SECRET_KEY_VERSION", 1)
+
+    config :robine, :secret_keyring,
+      current_version: version,
+      keys: %{version => decode_secret_key.(encoded_key, "ROBINE_SECRET_KEY")}
   end
 end
 

@@ -3,6 +3,7 @@ defmodule Robine.Execution.Contracts.Specification do
 
   alias Robine.Execution.Contracts.Step
 
+  @derive {Inspect, except: [:secrets]}
   @enforce_keys [:version, :attempt_id, :image, :workspace, :shell, :steps, :timeout_ms]
   defstruct [
     :version,

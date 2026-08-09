@@ -20,6 +20,15 @@ defmodule Robine.Pipelines.UseCases.CreatePipelineTest do
     end
 
     @impl true
+    def insert_revision(revision) do
+      send(self(), {:revision_inserted, revision})
+      :ok
+    end
+
+    @impl true
+    def get_revision(_pipeline_id), do: {:error, :not_found}
+
+    @impl true
     def get(_id), do: {:error, :not_found}
 
     @impl true
@@ -42,6 +51,8 @@ defmodule Robine.Pipelines.UseCases.CreatePipelineTest do
 
     @impl true
     def mark_delivered(_id, _at), do: :ok
+    @impl true
+    def reconcile_pending(_limit), do: {:ok, 0}
   end
 
   defmodule FakeClock do
@@ -83,6 +94,8 @@ defmodule Robine.Pipelines.UseCases.CreatePipelineTest do
     assert {:ok, view} = Pipelines.create_pipeline(input, context)
     assert view.status == :created
     assert_receive {:pipeline_inserted, %{id: id}}
+    assert_receive {:revision_inserted, %{pipeline_id: ^id, digest: digest}}
+    assert byte_size(digest) == 64
     assert_receive {:event_appended, %{pipeline_id: ^id}}
   end
 

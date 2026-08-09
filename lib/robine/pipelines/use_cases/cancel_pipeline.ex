@@ -4,7 +4,7 @@ defmodule Robine.Pipelines.UseCases.CancelPipeline do
   alias Robine.ExecutionContext
   alias Robine.Pipelines.Contracts.PipelineView
   alias Robine.Pipelines.Dependencies
-  alias Robine.Pipelines.Domain.{Job, Pipeline}
+  alias Robine.Pipelines.Domain.{Job, Pipeline, PipelineProjectionRequested}
 
   @spec call(map(), ExecutionContext.t()) :: {:ok, PipelineView.t()} | {:error, term()}
   def call(%{pipeline_id: id}, %ExecutionContext{
@@ -16,7 +16,8 @@ defmodule Robine.Pipelines.UseCases.CancelPipeline do
       with {:ok, pipeline} <- deps.pipeline_repository.get(id),
            {:ok, cancelled} <- Pipeline.request_cancellation(pipeline),
            :ok <- cancel_jobs(id, deps),
-           :ok <- deps.pipeline_repository.update(cancelled) do
+           :ok <- deps.pipeline_repository.update(cancelled),
+           :ok <- deps.event_outbox.append(projection_event(cancelled.id, deps)) do
         {:ok, PipelineView.from_domain(cancelled)}
       end
     end)
@@ -50,4 +51,13 @@ defmodule Robine.Pipelines.UseCases.CancelPipeline do
 
   defp cancellation_target(%Job{status: :running}), do: :cancelling
   defp cancellation_target(%Job{}), do: nil
+
+  defp projection_event(pipeline_id, deps) do
+    %PipelineProjectionRequested{
+      event_id: deps.id_generator.generate(),
+      pipeline_id: pipeline_id,
+      occurred_at: deps.clock.now(),
+      dispatch: false
+    }
+  end
 end

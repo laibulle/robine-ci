@@ -39,6 +39,11 @@ defmodule Robine.Architecture.DependencyRulesTest do
       "Ecto.Query",
       "Adapters.Persistence.Postgres.Schemas"
     ])
+
+    assert_clean(
+      Path.wildcard("lib/robine_web/**/*.ex") ++ Path.wildcard("lib/robine_cli/**/*.ex"),
+      ["Robine.Adapters"]
+    )
   end
 
   test "bounded contexts do not reach into another context's internals" do

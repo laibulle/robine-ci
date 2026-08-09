@@ -28,6 +28,6 @@ defmodule Robine.Adapters.Persistence.Postgres.Schemas.Pipeline do
       :status,
       :inserted_at
     ])
-    |> unique_constraint(:id)
+    |> unique_constraint(:id, name: :pipelines_pkey)
   end
 end

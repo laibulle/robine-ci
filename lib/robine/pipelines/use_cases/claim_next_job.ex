@@ -3,7 +3,7 @@ defmodule Robine.Pipelines.UseCases.ClaimNextJob do
 
   alias Robine.ExecutionContext
   alias Robine.Pipelines.Dependencies
-  alias Robine.Pipelines.Domain.{Attempt, Job}
+  alias Robine.Pipelines.Domain.{Attempt, Job, PipelineProjectionRequested}
 
   @spec call(map(), ExecutionContext.t()) :: {:ok, Attempt.t()} | {:error, term()}
   def call(input, %ExecutionContext{
@@ -24,7 +24,8 @@ defmodule Robine.Pipelines.UseCases.ClaimNextJob do
              {:ok, attempt} <- new_attempt(job, lease_seconds, deps, repository),
              :ok <- deps.pipeline_repository.update(running_pipeline),
              :ok <- repository.update_job(running_job),
-             :ok <- repository.insert_attempt(attempt) do
+             :ok <- repository.insert_attempt(attempt),
+             :ok <- deps.event_outbox.append(projection_event(running_pipeline.id, deps)) do
           {:ok, attempt}
         end
       end)
@@ -58,4 +59,13 @@ defmodule Robine.Pipelines.UseCases.ClaimNextJob do
 
   defp admit(%Dependencies{admission: nil}), do: :ok
   defp admit(%Dependencies{admission: admission}), do: admission.check()
+
+  defp projection_event(pipeline_id, deps) do
+    %PipelineProjectionRequested{
+      event_id: deps.id_generator.generate(),
+      pipeline_id: pipeline_id,
+      occurred_at: deps.clock.now(),
+      dispatch: false
+    }
+  end
 end

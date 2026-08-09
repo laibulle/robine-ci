@@ -5,6 +5,7 @@ defmodule Robine.Secrets.UseCases.StoreSecret do
   alias Robine.Secrets.Contracts.SecretMetadata
   alias Robine.Secrets.Dependencies
   alias Robine.Secrets.Domain.Secret
+  alias Robine.Secrets.Domain.ValuePolicy
 
   @name ~r/\A[A-Z_][A-Z0-9_]{0,127}\z/
 
@@ -51,13 +52,14 @@ defmodule Robine.Secrets.UseCases.StoreSecret do
     scope = Map.get(input, :scope, :repository)
     repository_id = Map.get(input, :repository_id)
     grants = Map.get(input, :allowed_repository_ids, [])
+    value_error = value_error(value)
 
     cond do
       not (is_binary(name) and Regex.match?(@name, name)) ->
         {:error, {:invalid_secret, :name}}
 
-      not (is_binary(value) and byte_size(value) >= 8) ->
-        {:error, {:invalid_secret, :value_too_short}}
+      value_error != nil ->
+        {:error, {:invalid_secret, value_error}}
 
       scope == :repository and not is_binary(repository_id) ->
         {:error, {:invalid_secret, :repository_id}}
@@ -80,6 +82,15 @@ defmodule Robine.Secrets.UseCases.StoreSecret do
            repository_id: if(scope == :repository, do: repository_id),
            allowed_repository_ids: if(scope == :instance, do: Enum.uniq(grants), else: [])
          }}
+    end
+  end
+
+  defp value_error(value) do
+    case ValuePolicy.validate(value) do
+      :ok -> nil
+      {:error, :not_binary} -> :value
+      {:error, :secret_too_short} -> :value_too_short
+      {:error, :secret_too_large} -> :value_too_large
     end
   end
 end

@@ -15,7 +15,13 @@ defmodule Robine.Adapters.Security.AesGcmCipher do
   end
 
   @impl true
-  def decrypt(%{ciphertext: ciphertext, nonce: nonce, tag: tag, key_version: version}, aad) do
+  def decrypt(
+        %{ciphertext: ciphertext, nonce: nonce, tag: tag, key_version: version},
+        aad
+      )
+      when is_binary(ciphertext) and is_binary(nonce) and byte_size(nonce) == 12 and
+             is_binary(tag) and byte_size(tag) == 16 and is_integer(version) and version > 0 and
+             is_binary(aad) do
     with {:ok, key} <- key(version) do
       case :crypto.crypto_one_time_aead(:aes_256_gcm, key, nonce, ciphertext, aad, tag, false) do
         :error -> {:error, :authentication_failed}
@@ -23,6 +29,8 @@ defmodule Robine.Adapters.Security.AesGcmCipher do
       end
     end
   end
+
+  def decrypt(_encrypted, _aad), do: {:error, :invalid_ciphertext}
 
   @spec validate_configuration!() :: :ok
   def validate_configuration! do
@@ -32,6 +40,14 @@ defmodule Robine.Adapters.Security.AesGcmCipher do
 
       {:error, :key_unavailable} ->
         raise "Robine secret encryption key is unavailable; set ROBINE_SECRET_KEY to a base64-encoded 32-byte key"
+    end
+  end
+
+  @impl true
+  def current_version do
+    case current_key() do
+      {:ok, version, _key} -> {:ok, version}
+      {:error, reason} -> {:error, reason}
     end
   end
 

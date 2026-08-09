@@ -2,10 +2,10 @@
 
 ## Status
 
-- **State:** Draft
+- **State:** Accepted
 - **Owner:** Security
 - **Target:** MVP
-- **Last updated:** 2026-08-08
+- **Last updated:** 2026-08-09
 
 ## Summary
 
@@ -72,9 +72,13 @@ A maintainer storing credentials required by a trusted build or test job and an 
 
 ## Proposed design
 
-Encrypted records contain ciphertext, nonce, key version, scope, name, and metadata. Envelope encryption is preferred so master-key rotation can rotate data-encryption keys safely, but the implementation may begin with versioned direct encryption if the migration and rotation story is tested before acceptance.
+Encrypted records contain ciphertext, a unique 96-bit nonce, a 128-bit authentication tag, key version, scope, name, and metadata. The MVP uses versioned direct AES-256-GCM with metadata-bound authenticated additional data. Administrators configure old and current keys outside PostgreSQL, then re-encrypt bounded cursor-based batches. Each successful record update and audit entry is atomic; interruption leaves both old and newly rotated records readable and the returned cursor resumes progress.
 
 The workflow syntax maps a secret to an environment variable explicitly. Eligibility is evaluated before an execution specification is built. The runner receives only the selected values for that attempt. A streaming redactor operates across chunk boundaries before log persistence and broadcast.
+
+Secret values MUST be binary values from 8 bytes through 65,536 bytes inclusive. Larger values are rejected before encryption so memory use and redaction cost remain bounded. The redactor masks the exact literal value, standard Base64 with and without padding, URL-safe Base64 with and without padding, and uppercase byte-wise percent encoding. It does not attempt semantic decoding, Unicode normalization, substring heuristics, or arbitrary transformations.
+
+Complete matches are replaced before the redactor buffers a possible partial suffix. This ordering is required for self-overlapping values such as repeated characters. Patterns are inspected from longest to shortest so padded and unpadded encodings cannot produce partial replacement. Execution specifications omit secret fields from debug inspection, redactor state omits patterns and buffered fragments, and runner-generated exception or built-in diagnostic text passes through the same exact-value policy. Telemetry carries only counts, outcomes, and key version numbers.
 
 ## Failure modes and recovery
 
@@ -95,20 +99,19 @@ Audit events record secret creation, replacement, deletion, grants, and key rota
 
 ## Acceptance criteria
 
-- [ ] Database inspection and database-only backups reveal no secret plaintext.
+- [x] Database inspection and database-only backups reveal no secret plaintext.
 - [ ] Secrets cannot be retrieved through UI or API after creation.
-- [ ] A secret split across log chunks is redacted before persistence and broadcast.
+- [x] A secret split across log chunks is redacted before persistence and broadcast.
 - [ ] Fork-triggered work receives no secrets under every event ordering tested.
-- [ ] Interrupted key rotation resumes without losing access to any secret.
-- [ ] Application logs and captured exception reports contain no fixture secret values.
+- [x] Interrupted key rotation resumes without losing access to any secret.
+- [x] Application logs, diagnostic output, telemetry payloads, and debug inspection contain no fixture secret values.
 
 ## Open questions
 
-- Choose the cryptographic construction and key-management library after a focused security review.
-- Define minimum/maximum secret size and encoded-variant masking policy.
-- Decide whether the MVP needs instance-scoped secrets or can defer them to reduce authorization surface.
+None blocking for the MVP.
+
+The AES-256-GCM construction and versioned direct-key lifecycle are accepted in [the focused encryption review](../../security/encryption-review.md). Instance-scoped secrets are included with explicit per-repository grants and administrator-only writes.
 
 ## Out of scope / future work
 
 - Vault/KMS integrations, approval gates, secretless OIDC federation, and untrusted-code isolation.
-

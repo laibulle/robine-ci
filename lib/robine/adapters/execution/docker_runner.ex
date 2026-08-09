@@ -24,11 +24,23 @@ defmodule Robine.Adapters.Execution.DockerRunner do
     resource = resource_name(specification.attempt_id)
     volume = resource <> "-workspace"
 
-    with :ok <- prepare_image(specification, on_output),
-         :ok <- ensure_resource_absent(resource),
-         {:ok, _output} <- docker(["volume", "create", "--label", label(specification), volume]),
-         {:ok, _output} <- create_container(specification, resource, volume),
-         :ok <- copy_source(specification.source_path, resource, specification.workspace),
+    with :ok <- prepare_image(specification, on_output) do
+      case provision(specification, resource, volume) do
+        :ok ->
+          run_owned(specification, resource, volume, started_at, on_output, cancel_requested)
+
+        {:error, :duplicate_attempt} ->
+          {:error, {:docker, :duplicate_attempt}}
+
+        {:error, reason} ->
+          _cleanup_warning = cleanup(resource, volume)
+          {:error, {:docker, reason}}
+      end
+    end
+  end
+
+  defp run_owned(specification, resource, volume, started_at, on_output, cancel_requested) do
+    with :ok <- copy_source(specification.source_path, resource, specification.workspace),
          :ok <- start_container(resource, specification.shell),
          :ok <- ensure_shell(resource, specification.shell),
          {:ok, step_results} <-
@@ -77,6 +89,14 @@ defmodule Robine.Adapters.Execution.DockerRunner do
       {:error, reason} ->
         _cleanup_warning = cleanup(resource, volume)
         {:error, {:docker, reason}}
+    end
+  end
+
+  defp provision(specification, resource, volume) do
+    with {:ok, _output} <-
+           docker(["volume", "create", "--label", label(specification), volume]),
+         {:ok, _output} <- create_container(specification, resource, volume) do
+      :ok
     end
   end
 
@@ -156,14 +176,6 @@ defmodule Robine.Adapters.Execution.DockerRunner do
     end)
   end
 
-  defp ensure_resource_absent(resource) do
-    case docker(["container", "inspect", resource]) do
-      {:error, %{exit_code: 1}} -> :ok
-      {:ok, _output} -> {:error, :duplicate_attempt}
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
   defp prepare_image(specification, callback) do
     started = System.monotonic_time(:millisecond)
 
@@ -241,7 +253,18 @@ defmodule Robine.Adapters.Execution.DockerRunner do
           ]
       )
 
-    docker(args, specification.timeout_ms)
+    case docker(args, specification.timeout_ms) do
+      {:error, %{output: output}} = error ->
+        if String.contains?(output, "already in use") or
+             String.contains?(output, "already exists") do
+          {:error, :duplicate_attempt}
+        else
+          redact_error(error, Map.values(specification.secrets))
+        end
+
+      result ->
+        result
+    end
   end
 
   @doc false
@@ -469,12 +492,30 @@ defmodule Robine.Adapters.Execution.DockerRunner do
       {:ok, message} ->
         duration = System.monotonic_time(:millisecond) - started
         :ok = emit_terminal(callback, step, position, 1, :succeeded, 0, duration)
-        {:ok, step_result(step, :succeeded, 0, message, started, [])}
+
+        {:ok,
+         step_result(
+           step,
+           :succeeded,
+           0,
+           message,
+           started,
+           Map.values(specification.secrets)
+         )}
 
       {:error, reason} ->
         duration = System.monotonic_time(:millisecond) - started
         _ = emit_terminal(callback, step, position, 1, :failed, 1, duration)
-        {:failed, step_result(step, :failed, 1, inspect(reason), started, []), :command_failed}
+
+        {:failed,
+         step_result(
+           step,
+           :failed,
+           1,
+           inspect(reason),
+           started,
+           Map.values(specification.secrets)
+         ), :command_failed}
     end
   end
 
@@ -621,7 +662,13 @@ defmodule Robine.Adapters.Execution.DockerRunner do
       {:error, reason} -> {:error, {:redactor, reason}}
     end
   rescue
-    error -> {:error, %{exit_code: nil, output: Exception.message(error), chunk_count: 0}}
+    error ->
+      {:error,
+       %{
+         exit_code: nil,
+         output: redact_and_truncate(Exception.message(error), secret_values),
+         chunk_count: 0
+       }}
   end
 
   defp stream_receive(port, deadline, on_chunk, resource, cancel_requested, state) do
@@ -814,5 +861,9 @@ defmodule Robine.Adapters.Execution.DockerRunner do
       {:ok, redacted} -> truncate_output(redacted)
       {:error, _reason} -> "[output unavailable: redaction failed]"
     end
+  end
+
+  defp redact_error({:error, %{output: output} = reason}, secret_values) do
+    {:error, %{reason | output: redact_and_truncate(output, secret_values)}}
   end
 end

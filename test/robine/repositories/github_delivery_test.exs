@@ -48,6 +48,10 @@ defmodule Robine.Repositories.GitHubDeliveryTest do
       send(self(), {:upsert_check, repository.full_name, check})
       {:ok, :erlang.phash2(check.external_id)}
     end
+
+    @impl true
+    def installation_permissions(_repository),
+      do: {:ok, %{"metadata" => "read", "contents" => "read", "checks" => "write"}}
   end
 
   test "processes a matching push from the exact commit only once" do

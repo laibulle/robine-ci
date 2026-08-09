@@ -5,7 +5,7 @@
 - **State:** Draft
 - **Owner:** Integrations
 - **Target:** MVP
-- **Last updated:** 2026-08-08
+- **Last updated:** 2026-08-09
 
 ## Summary
 
@@ -111,4 +111,3 @@ Metrics include webhook verification failures, acknowledgement latency, processi
 ## Out of scope / future work
 
 - GitLab, Forgejo, Bitbucket, merge queues, deployment statuses, and automatic PR comments.
-

@@ -1,7 +1,6 @@
 defmodule RobineWeb.JobLive.Show do
   use RobineWeb, :live_view
   alias Robine.Pipelines
-  alias Robine.Adapters.Background.{RunNextJobWorker, SyncGitHubChecksWorker}
 
   @impl true
   def mount(%{"id" => pipeline_id, "job_id" => job_id}, _session, socket) do
@@ -32,9 +31,7 @@ defmodule RobineWeb.JobLive.Show do
 
   def handle_event("retry", _params, socket) do
     case Pipelines.retry_job(%{job_id: socket.assigns.job_id}, socket.assigns.execution_context) do
-      {:ok, result} ->
-        _ = RunNextJobWorker.new(%{}) |> Oban.insert()
-        _ = %{pipeline_id: result.pipeline_id} |> SyncGitHubChecksWorker.new() |> Oban.insert()
+      {:ok, _result} ->
         {:noreply, socket |> put_flash(:info, "Job queued for retry.") |> load()}
 
       {:error, {:retry_dependencies_unavailable, dependencies}} ->
@@ -65,9 +62,6 @@ defmodule RobineWeb.JobLive.Show do
            socket.assigns.execution_context
          ) do
       {:ok, result} ->
-        _ = RunNextJobWorker.new(%{}) |> Oban.insert()
-        _ = %{pipeline_id: result.pipeline_id} |> SyncGitHubChecksWorker.new() |> Oban.insert()
-
         {:noreply,
          socket
          |> assign(rerun_suggestion: nil)

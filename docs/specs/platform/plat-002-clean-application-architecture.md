@@ -113,6 +113,8 @@ Infrastructure adapters ┘
 
 The domain knows no outer layer. Use cases know the domain and port behaviours. Facades know use-case modules only. Adapters know the contracts they implement. The composition root knows concrete adapters and assembles dependencies.
 
+The implemented pipeline creation path is documented as the [canonical reference vertical slice](../../architecture/reference-vertical-slice.md), including its durable GitHub delivery path, shared LiveView/worker facade call, port contract, and transaction integration tests.
+
 ### Suggested source layout
 
 ```text
@@ -288,7 +290,7 @@ Mocks SHOULD verify protocol-relevant interactions only. State-based fakes are p
 - [ ] Domain modules compile without Ecto, Phoenix, Oban, Docker, GitHub, or filesystem dependencies.
 - [ ] Ecto schemas never appear in facade or use-case public types.
 - [ ] External network or Docker side effects never execute inside a database transaction.
-- [ ] An outbox integration test proves that a committed effect survives a worker crash and is delivered idempotently.
+- [x] An outbox integration test proves that a committed effect survives a missing worker job, is reconciled, and is delivered idempotently.
 - [ ] Architecture checks fail on fixtures representing each forbidden dependency direction.
 - [ ] Only the composition root refers to concrete adapters when assembling production dependencies.
 - [ ] Cross-context calls use the target context facade or an explicitly published contract.

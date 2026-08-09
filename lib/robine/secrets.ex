@@ -11,9 +11,18 @@ defmodule Robine.Secrets do
   @spec resolve_secrets(map(), ExecutionContext.t()) :: {:ok, map()} | {:error, term()}
   defdelegate resolve_secrets(input, context), to: UseCases.ResolveSecrets, as: :call
 
+  @spec resolve_instance_secrets(map(), ExecutionContext.t()) ::
+          {:ok, map()} | {:error, term()}
+  defdelegate resolve_instance_secrets(input, context),
+    to: UseCases.ResolveInstanceSecrets,
+    as: :call
+
   @spec redact_output(map()) :: {:ok, String.t()} | {:error, term()}
   defdelegate redact_output(input), to: UseCases.RedactOutput, as: :call
 
   @spec list_secrets(map(), ExecutionContext.t()) :: {:ok, [map()]} | {:error, term()}
   defdelegate list_secrets(input, context), to: UseCases.ListSecrets, as: :call
+
+  @spec rotate_keys(map(), ExecutionContext.t()) :: {:ok, map()} | {:error, term()}
+  defdelegate rotate_keys(input, context), to: UseCases.RotateKeys, as: :call
 end

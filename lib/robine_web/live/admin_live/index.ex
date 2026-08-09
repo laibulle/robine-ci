@@ -1,6 +1,6 @@
 defmodule RobineWeb.AdminLive.Index do
   use RobineWeb, :live_view
-  alias Robine.{Identities, Operations}
+  alias Robine.{Identities, Operations, Secrets}
 
   @impl true
   def mount(_params, _session, socket), do: {:ok, load(socket)}
@@ -33,6 +33,38 @@ defmodule RobineWeb.AdminLive.Index do
     end
   end
 
+  def handle_event("rotate-secret-keys", _params, socket) do
+    input =
+      case socket.assigns.secret_rotation_cursor do
+        nil -> %{limit: 100}
+        cursor -> %{limit: 100, cursor: cursor}
+      end
+
+    case Secrets.rotate_keys(input, socket.assigns.execution_context) do
+      {:ok, result} ->
+        message =
+          if result.complete,
+            do: "Secret key rotation complete; #{result.rotated} secrets rotated in this batch.",
+            else: "Rotated #{result.rotated} secrets; continue to process the next batch."
+
+        {:noreply,
+         socket
+         |> assign(secret_rotation_cursor: result.next_cursor)
+         |> put_flash(:info, message)}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, "Secret key rotation failed: #{inspect(reason)}")}
+    end
+  end
+
+  def handle_event("save-github-private-key", %{"value" => value}, socket) do
+    store_github_credential(socket, "GITHUB_APP_PRIVATE_KEY", value, "GitHub private key")
+  end
+
+  def handle_event("save-github-webhook-secret", %{"value" => value}, socket) do
+    store_github_credential(socket, "GITHUB_WEBHOOK_SECRET", value, "Webhook secret")
+  end
+
   def handle_event("change-role", %{"user_id" => user_id, "role" => role}, socket) do
     role =
       if role in ~w(administrator maintainer viewer),
@@ -63,7 +95,12 @@ defmodule RobineWeb.AdminLive.Index do
     with {:ok, users} <- Identities.list_users(%{}, socket.assigns.execution_context),
          {:ok, oidc} <- Identities.oidc_configuration(%{}, socket.assigns.execution_context) do
       socket
-      |> assign(users: users, oidc: oidc, retention: retention_projection())
+      |> assign(
+        users: users,
+        oidc: oidc,
+        retention: retention_projection(),
+        secret_rotation_cursor: Map.get(socket.assigns, :secret_rotation_cursor)
+      )
       |> load_health()
     else
       {:error, reason} ->
@@ -71,7 +108,8 @@ defmodule RobineWeb.AdminLive.Index do
         |> assign(
           users: [],
           oidc: %{enabled: false, preflight: {:error, reason}},
-          retention: retention_projection()
+          retention: retention_projection(),
+          secret_rotation_cursor: Map.get(socket.assigns, :secret_rotation_cursor)
         )
         |> load_health()
     end
@@ -84,8 +122,33 @@ defmodule RobineWeb.AdminLive.Index do
     end
   end
 
+  defp store_github_credential(socket, name, value, label) do
+    case Secrets.store_secret(
+           %{
+             name: name,
+             value: value,
+             scope: :instance,
+             allowed_repository_ids: []
+           },
+           socket.assigns.execution_context
+         ) do
+      {:ok, _metadata} ->
+        {:noreply,
+         socket
+         |> put_flash(
+           :info,
+           "#{label} encrypted and stored. The value cannot be displayed again."
+         )
+         |> load_health()}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, "Cannot store #{label}: #{inspect(reason)}")}
+    end
+  end
+
   defp check_label(:database), do: "PostgreSQL"
   defp check_label(:durable_queue), do: "Durable queue"
+  defp check_label(:outbox), do: "Event outbox"
   defp check_label(:docker), do: "Docker Engine"
   defp check_label(:storage), do: "Blob storage"
   defp check_label(:github_app), do: "GitHub App"
@@ -151,6 +214,69 @@ defmodule RobineWeb.AdminLive.Index do
               </div>
               <p class="mt-2 text-sm text-base-content/60">{check.detail}</p>
             </article>
+          </div>
+        </section>
+        <section class="rounded-3xl border border-base-300 bg-base-100 p-6">
+          <h2 class="text-xl font-semibold">GitHub App credentials</h2>
+          <p class="mt-1 max-w-3xl text-sm text-base-content/60">
+            Values are encrypted with the instance secret key, are never displayed again, and override environment bootstrap credentials. Configure the non-secret App ID with <code>ROBINE_GITHUB_APP_ID</code>.
+          </p>
+          <div class="mt-6 grid gap-6 lg:grid-cols-2">
+            <form id="github-private-key-form" phx-submit="save-github-private-key" class="space-y-3">
+              <label for="github-private-key" class="font-semibold">Private key (PEM)</label>
+              <textarea
+                id="github-private-key"
+                name="value"
+                required
+                minlength="8"
+                maxlength="65536"
+                autocomplete="off"
+                spellcheck="false"
+                class="textarea textarea-bordered min-h-32 w-full font-mono text-xs"
+              ></textarea>
+              <button class="btn btn-primary btn-sm" phx-disable-with="Encrypting…">
+                Store private key
+              </button>
+            </form>
+            <form
+              id="github-webhook-secret-form"
+              phx-submit="save-github-webhook-secret"
+              class="space-y-3"
+            >
+              <label for="github-webhook-secret" class="font-semibold">Webhook secret</label>
+              <input
+                id="github-webhook-secret"
+                type="password"
+                name="value"
+                required
+                minlength="8"
+                maxlength="65536"
+                autocomplete="new-password"
+                class="input input-bordered w-full"
+              />
+              <button class="btn btn-primary btn-sm" phx-disable-with="Encrypting…">
+                Store webhook secret
+              </button>
+            </form>
+          </div>
+        </section>
+        <section class="rounded-3xl border border-base-300 bg-base-100 p-6">
+          <div class="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <h2 class="text-xl font-semibold">Secret encryption keys</h2>
+              <p class="mt-1 max-w-2xl text-sm text-base-content/60">
+                Re-encrypt stored secrets in bounded audited batches after configuring a new current key. Keep every old key configured until rotation completes.
+              </p>
+            </div>
+            <button
+              id="rotate-secret-keys"
+              phx-click="rotate-secret-keys"
+              data-confirm="Rotate the next batch of encrypted secrets with the configured current key?"
+              phx-disable-with="Rotating…"
+              class="btn btn-outline btn-sm"
+            >
+              {if @secret_rotation_cursor, do: "Continue rotation", else: "Rotate keys"}
+            </button>
           </div>
         </section>
         <section class="rounded-3xl border border-base-300 bg-base-100 p-6">

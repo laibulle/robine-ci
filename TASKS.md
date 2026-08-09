@@ -82,11 +82,11 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 
 - **Spec:** [PLAT-002](docs/specs/platform/plat-002-clean-application-architecture.md)
 - **Depends on:** ARCH-001
-- [ ] Implement one small pipeline operation through command, facade `defdelegate`, use case, domain policy, port, PostgreSQL adapter, delivery adapter, and tests. (Facade, use case, domain, ports, PostgreSQL, and tests exist; delivery adapters remain.)
-- [ ] Demonstrate the same facade call from LiveView and a background worker.
+- [x] Implement pipeline creation through structured input, facade `defdelegate`, use case, domain policy, ports, PostgreSQL adapters, durable GitHub delivery, and tests.
+- [x] Demonstrate the same facade call from LiveView and a background worker (`list_pipelines/2`).
 - [x] Provide a use-case unit test that starts no supervision tree or external service.
-- [ ] Add port contract and adapter integration tests. (PostgreSQL integration exists; shared port contracts remain.)
-- [ ] Document the slice as the canonical implementation example.
+- [x] Add a reusable pipeline-repository port contract and PostgreSQL adapter integration tests.
+- [x] Document the slice as the canonical implementation example.
 
 ### ARCH-003 — Implement durable work and outbox foundation
 
@@ -94,9 +94,9 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - **Depends on:** ARCH-002
 - [x] Select and configure the durable background-job mechanism.
 - [x] Implement transaction-owned outbox persistence and idempotent delivery.
-- [ ] Implement correlation IDs, bounded retries, backoff, dead-letter visibility, and reconciliation.
-- [ ] Prove committed events survive worker and application crashes.
-- [ ] Expose queue, retry, outbox, and reconciliation telemetry.
+- [x] Implement correlation IDs, bounded retries, capped exponential backoff, dead-letter visibility, and reconciliation.
+- [x] Prove committed events survive a missing worker job and are reconciled and delivered idempotently.
+- [x] Expose queue, retry, outbox, and reconciliation health and telemetry.
 
 ## Phase 2 — Workflow and pipeline core
 
@@ -125,7 +125,7 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - **Specs:** [PLAT-001](docs/specs/platform/plat-001-system-architecture.md), [PROD-001](docs/specs/product/prod-001-mvp-definition.md)
 - **Depends on:** ARCH-003, WF-102
 - [x] Model pipeline, job, attempt, and step states and valid transitions in the domain.
-- [ ] Persist workflow revisions and pipeline graphs transactionally. (Pipeline graphs are atomic; workflow revision persistence remains.)
+- [x] Persist exact immutable workflow revisions and normalized pipeline graphs transactionally.
 - [x] Implement create, queue, cancel, record-event, and reconcile use cases.
 - [x] Give every attempt an idempotency token and lease semantics.
 - [x] Distinguish user command failures, cancellation, timeout, runner loss, and system failures.
@@ -139,7 +139,7 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - [x] Release jobs only after all declared dependencies succeed.
 - [x] Apply backpressure and fair repository-level limits.
 - [x] Reconcile abandoned claims and expired leases.
-- [ ] Publish state changes only after durable commit.
+- [x] Publish state changes only after durable commit through idempotent outbox projections.
 
 ## Phase 3 — Local Docker execution
 
@@ -170,8 +170,8 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - [x] Dispatch claimed attempts through the runner port with unique attempt resources.
 - [x] Persist runner events before any future broadcast.
 - [x] Implement leases, heartbeats, cancellation, timeout, retry, and runner-loss behavior.
-- [ ] Prove duplicate dispatch cannot create two active containers.
-- [ ] Add failure-injection tests for Docker and application restarts.
+- [x] Prove concurrent duplicate dispatch cannot create two active containers or delete the winner.
+- [x] Add Docker phase-failure tests and simulate application interruption through orphan reconciliation.
 
 ## Phase 4 — Secrets, caches, and artifacts
 
@@ -179,10 +179,10 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 
 - **Spec:** [SEC-001](docs/specs/security/sec-001-secrets-and-trust-model.md)
 - **Depends on:** ARCH-002, DEC-004
-- [ ] Select and review the authenticated-encryption construction. (AES-256-GCM with per-value nonces and authenticated metadata is implemented; focused security review remains.)
+- [x] Select and review versioned AES-256-GCM with per-value nonces and authenticated metadata.
 - [x] Implement repository and approved instance scopes, write-only API behavior, and audit events.
 - [x] Require an external versioned master key and fail safely when it is unavailable.
-- [ ] Implement resumable key rotation.
+- [x] Implement administrator-only, audited, cursor-resumable key rotation with mixed-version reads.
 - [x] Enforce explicit references and no fork delivery.
 
 ### SEC-102 — Implement streaming secret redaction
@@ -190,8 +190,8 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - **Spec:** [SEC-001](docs/specs/security/sec-001-secrets-and-trust-model.md)
 - **Depends on:** SEC-101, EXEC-102
 - [x] Redact exact secrets across arbitrary log chunk boundaries before persistence or broadcast.
-- [ ] Define and test minimum/maximum size and encoded-variant policy. (Eight-byte minimum and Base64 variants are tested; maximum and additional encodings remain.)
-- [ ] Ensure diagnostics, exceptions, telemetry, and debug inspection are redaction-safe.
+- [x] Define and test an inclusive 8-byte to 64-KiB value policy with literal, Base64, Base64url, and percent-encoded variants.
+- [x] Ensure diagnostics, exceptions, telemetry, and debug inspection are redaction-safe.
 - [x] Add adversarial fixture tests without production credentials.
 
 ### DATA-101 — Implement safe local blob storage
@@ -199,9 +199,9 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - **Spec:** [DATA-001](docs/specs/storage/data-001-cache-and-artifacts.md)
 - **Depends on:** ARCH-002, DEC-003
 - [x] Implement a local storage adapter with opaque object IDs and content digests.
-- [ ] Stream into temporary objects and finalize atomically. (Temporary same-filesystem publication is atomic; streaming input remains.)
+- [x] Stream lazy binary chunks into hidden temporary objects with incremental size/digest enforcement and atomic finalization.
 - [x] Enforce archive path, symlink, special-file, file-count, expanded-size, ratio, and time limits for source, cache, and artifact archives.
-- [ ] Implement quotas, retention, reconciliation, and storage-pressure telemetry. (Atomic instance/repository logical quotas and hourly bounded retention with persistent, reference-safe blob GC are implemented; full filesystem reconciliation and pressure telemetry remain.)
+- [x] Implement quotas, retention, filesystem/database reconciliation, persistent reference-safe GC, and storage-pressure telemetry.
 
 ### DATA-102 — Implement caches and artifacts
 
@@ -240,7 +240,7 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - **Spec:** [GH-001](docs/specs/github/gh-001-github-integration.md)
 - **Depends on:** GH-102, PIPE-102
 - [x] Create pipeline check suites and job check runs with stable Robine deep links. (GitHub creates the App/SHA check suite automatically when Robine creates its pipeline and job check runs.)
-- [ ] Deliver updates idempotently through the outbox. (Provider IDs and stable external keys make updates idempotent; check updates currently use Oban rather than the domain outbox.)
+- [x] Deliver updates idempotently through the outbox using stable external keys and persisted provider IDs.
 - [x] Retry with bounded exponential backoff and jitter.
 - [x] Reconcile stale or missing checks after GitHub outages.
 - [ ] Monitor API errors and rate limits.
@@ -309,7 +309,7 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 
 - **Spec:** [WEB-001](docs/specs/web/web-001-pipeline-experience.md)
 - **Depends on:** WEB-101, EXEC-103, GH-103
-- [ ] Build repository, workflow, pipeline-history, pipeline-detail, and job-detail pages. (Repository, workflow summaries, pipeline history/detail, and job detail exist; a dedicated workflow revision page remains.)
+- [x] Build repository, immutable workflow-revision, pipeline-history, pipeline-detail, and job-detail pages.
 - [ ] Display dependency graph/list, status, trigger, actor, commit, phases, duration, and infrastructure failures.
 - [x] Implement authorized cancellation and job retry with confirmation.
 - [x] Show copyable local reproduction commands and omitted CI-only inputs.

@@ -73,9 +73,9 @@ A developer caching dependencies, transferring build outputs, downloading diagno
 
 ## Proposed design
 
-The database records logical cache entries and immutable artifacts. Blobs use content-derived paths below a configured storage root, never user-provided path components. Uploads stream to a temporary object while hashing and enforcing limits, then atomically finalize and commit metadata.
+The database records logical cache entries and immutable artifacts. Blobs use content-derived paths below a configured storage root, never user-provided path components. Uploads accept lazy binary chunk streams, write a hidden same-filesystem temporary object while incrementally hashing and enforcing the object-size limit, then atomically finalize and commit metadata. Enumeration stops as soon as the limit or an invalid chunk is observed. A failed or interrupted stream removes its temporary object and can never expose a final content address.
 
-The MVP defaults artifact and cache declarations to seven days and log retention to 30 days. An hourly durable worker removes expired metadata in batches of 1,000 and places possible orphan blobs into a persistent garbage-collection queue. It waits one hour, rechecks references across artifacts and caches, deletes the blob, and acknowledges the candidate only after filesystem deletion succeeds. Operators may configure log retention, grace, and batch size through environment variables.
+The MVP defaults artifact and cache declarations to seven days and log retention to 30 days. An hourly durable worker removes expired metadata in batches of 1,000 and places possible orphan blobs into a persistent garbage-collection queue. It waits one hour, rechecks references across artifacts and caches, deletes the blob, and acknowledges the candidate only after filesystem deletion succeeds. The same pass inventories content-addressed objects, compares them with cache and artifact references, stages bounded orphan batches, reports missing and unsafe objects, and deletes abandoned temporary files older than the grace interval. Operators may configure log retention, grace, and batch size through environment variables.
 
 The initial storage ceilings are 50 GiB of logical retained content for the instance and 10 GiB per repository. TAR with gzip compression is the sole MVP archive format. An artifact that completed publication before its job later failed keeps its declared retention; the MVP does not run implicit post-failure artifact collection after command execution stops.
 
@@ -101,12 +101,12 @@ Caches and artifacts are untrusted archives. Collection and extraction prevent p
 
 ## Observability
 
-Metrics include logical and physical bytes, cache hit ratio, upload/download latency, corruption, quota denials, eviction, expired bytes, reconciliation differences, and retry failures caused by missing artifacts.
+Metrics include streamed blob-write bytes and outcomes, logical and physical retained bytes, reconciliation orphan/missing/unsafe differences, abandoned temporary deletion, and periodic disk available bytes and used percentage. Cache hit ratio, request latency, quota denials, eviction, corruption, and retry failures remain part of the complete operations metric catalogue.
 
 ## Acceptance criteria
 
 - [x] Cache miss does not fail a representative job.
-- [ ] Interrupted uploads never become visible as complete objects.
+- [x] Interrupted uploads never become visible as complete objects.
 - [x] Traversal, symlink escape, archive bomb, and special-file fixtures are rejected for source, cache, and artifact archives.
 - [x] An artifact digest mismatch is detected before extraction.
 - [x] A failed job can be retried using retained dependency artifacts.

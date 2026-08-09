@@ -2,7 +2,7 @@ defmodule RobineWeb.AdminLiveTest do
   use RobineWeb.ConnCase, async: false
   import Phoenix.LiveViewTest
 
-  alias Robine.Adapters.Persistence.Postgres.Schemas.User
+  alias Robine.Adapters.Persistence.Postgres.Schemas.{Secret, User}
   alias Robine.Repo
 
   test "shows secret-free identity configuration and protects the last administrator", %{
@@ -19,6 +19,8 @@ defmodule RobineWeb.AdminLiveTest do
     assert html =~ "Durable queue"
     assert html =~ "Blob storage"
     assert html =~ "Retention policy"
+    assert html =~ "GitHub App credentials"
+    assert has_element?(view, "#rotate-secret-keys", "Rotate keys")
     assert html =~ "30 days"
     assert html =~ "admin@example.com"
     refute html =~ "test-bootstrap-token"
@@ -30,6 +32,20 @@ defmodule RobineWeb.AdminLiveTest do
 
     assert html =~ "Create another usable administrator"
     assert Repo.get!(User, admin.id).role == :administrator
+
+    assert view |> element("#rotate-secret-keys") |> render_click() =~ "rotation complete"
+
+    credential = "encrypted-webhook-fixture"
+
+    rendered =
+      view
+      |> form("#github-webhook-secret-form", %{"value" => credential})
+      |> render_submit()
+
+    assert rendered =~ "Webhook secret encrypted and stored"
+    refute rendered =~ credential
+    stored = Repo.get_by!(Secret, name: "GITHUB_WEBHOOK_SECRET", scope: :instance)
+    refute stored.ciphertext =~ credential
   end
 
   test "redirects non-administrators from instance administration", %{conn: conn} do

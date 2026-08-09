@@ -17,7 +17,8 @@ defmodule Robine.Pipelines do
           {:ok, PipelineView.t()} | {:error, term()}
   defdelegate cancel_pipeline(input, context), to: UseCases.CancelPipeline, as: :call
 
-  @spec deliver_event(map(), ExecutionContext.t()) :: {:ok, :delivered} | {:error, term()}
+  @spec deliver_event(map(), ExecutionContext.t()) ::
+          {:ok, :dispatch | :none} | {:error, term()}
   defdelegate deliver_event(input, context), to: UseCases.DeliverEvent, as: :call
 
   @spec claim_next_job(map(), ExecutionContext.t()) ::
@@ -73,4 +74,12 @@ defmodule Robine.Pipelines do
   @spec heartbeat_attempt(map(), ExecutionContext.t()) ::
           {:ok, Robine.Pipelines.Domain.Attempt.t()} | {:error, term()}
   defdelegate heartbeat_attempt(input, context), to: UseCases.HeartbeatAttempt, as: :call
+
+  @spec reconcile_outbox(map(), ExecutionContext.t()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  defdelegate reconcile_outbox(input, context), to: UseCases.ReconcileOutbox, as: :call
+
+  @spec workflow_revision(map(), ExecutionContext.t()) ::
+          {:ok, Robine.Pipelines.Contracts.WorkflowRevisionView.t()} | {:error, term()}
+  defdelegate workflow_revision(input, context), to: UseCases.GetWorkflowRevision, as: :call
 end

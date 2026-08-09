@@ -67,6 +67,8 @@ A self-hosting administrator operating one Robine instance.
 
 The `Robine.Operations` facade delegates to an administrator-authorized health use case. The use case depends on a health port, implemented by the system adapter. Public Phoenix controllers project only overall readiness; the administrator LiveView renders the complete secret-free result. Liveness remains a delivery-only process probe because it intentionally performs no application dependency work.
 
+The event outbox reports pending, five-minute-stale, and dead-letter counts in authenticated instance health. A minute-level reconciler recreates missing delivery jobs for every undelivered event. Delivery retries use exponential backoff capped at 30 minutes, and delivery outcomes plus reconciliation counts emit bounded `[:robine, :outbox, ...]` telemetry events.
+
 ## Failure modes and recovery
 
 | Failure | Expected behavior | Recovery |

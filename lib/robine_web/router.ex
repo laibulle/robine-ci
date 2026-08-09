@@ -31,6 +31,7 @@ defmodule RobineWeb.Router do
       on_mount: [{RobineWeb.UserAuth, :require_authenticated}] do
       live "/pipelines", PipelineLive.Index, :index
       live "/pipelines/:id", PipelineLive.Show, :show
+      live "/pipelines/:id/workflow", WorkflowRevisionLive.Show, :show
       live "/pipelines/:id/jobs/:job_id", JobLive.Show, :show
       live "/repositories", RepositoryLive.Index, :index
       live "/repositories/:id", RepositoryLive.Show, :show

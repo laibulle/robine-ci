@@ -48,6 +48,15 @@ export ROBINE_BOOTSTRAP_TOKEN="$(openssl rand -hex 24)"
 
 Keep this key outside PostgreSQL and back it up securely. Losing it makes stored secrets unrecoverable.
 
+For key rotation, configure all retained versions as a JSON object and select the new current version:
+
+```bash
+export ROBINE_SECRET_KEYS='{"1":"<old-base64-key>","2":"<new-base64-key>"}'
+export ROBINE_SECRET_KEY_VERSION="2"
+```
+
+Restart Robine, then run bounded rotation batches from Instance Administration. Keep old keys configured until the UI reports completion and a backup has been verified.
+
 Install dependencies, create the database, and build assets:
 
 ```bash
@@ -65,6 +74,8 @@ Open [http://localhost:4000](http://localhost:4000).
 For development, visit `/setup` and use `development-bootstrap-token` unless `ROBINE_BOOTSTRAP_TOKEN` was provided. Production requires a fresh token at startup; it expires after 15 minutes and cannot be reused after the first account is created.
 
 Retention cleanup runs hourly and can also be triggered by an administrator. Logs default to 30 days; expired artifact and cache metadata follows each object's declared expiry, while unreferenced content-addressed blobs have a one-hour safety grace. Override these bounded cleanup settings with `ROBINE_LOG_RETENTION_SECONDS`, `ROBINE_GC_GRACE_SECONDS`, and `ROBINE_RETENTION_BATCH_SIZE`.
+
+The event outbox is reconciled every minute. Delivery retries use bounded exponential backoff, and authenticated instance health reports pending, stale, and dead-letter events.
 
 Artifact and cache metadata is admitted atomically against logical quotas of 50 GiB per instance and 10 GiB per repository. Override them with `ROBINE_STORAGE_INSTANCE_QUOTA_BYTES` and `ROBINE_STORAGE_REPOSITORY_QUOTA_BYTES`; the repository value cannot exceed the instance value.
 

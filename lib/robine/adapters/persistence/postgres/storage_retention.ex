@@ -21,9 +21,54 @@ defmodule Robine.Adapters.Persistence.Postgres.StorageRetention do
     log_seconds = Keyword.fetch!(options, :log_seconds)
 
     with {:ok, staged} <- stage(now, batch_size, grace_seconds, log_seconds),
-         {:ok, garbage} <- drain(now, batch_size) do
-      {:ok, Map.put(staged, :blobs_deleted, garbage)}
+         {:ok, garbage} <- drain(now, batch_size),
+         {:ok, reconciliation} <- reconcile(now, batch_size, grace_seconds) do
+      {:ok, staged |> Map.put(:blobs_deleted, garbage) |> Map.merge(reconciliation)}
     end
+  end
+
+  defp reconcile(now, batch_size, grace_seconds) do
+    with {:ok, %{objects: objects, unsafe: unsafe}} <- LocalBlobStore.inventory(),
+         {:ok, temporary_deleted} <-
+           LocalBlobStore.delete_temporary_before(DateTime.add(now, -grace_seconds, :second)) do
+      physical_ids = MapSet.new(objects, & &1.blob_id)
+      referenced = referenced_blob_ids()
+      referenced_ids = MapSet.new(referenced, & &1.blob_id)
+
+      orphan_ids =
+        physical_ids
+        |> MapSet.difference(referenced_ids)
+
+      missing = MapSet.difference(referenced_ids, physical_ids) |> MapSet.size()
+
+      staged_orphans =
+        stage_blobs(
+          Enum.take(orphan_ids, batch_size),
+          DateTime.add(now, grace_seconds, :second),
+          now
+        )
+
+      logical_bytes = Enum.reduce(referenced, 0, &(&1.size + &2))
+      physical_bytes = Enum.reduce(objects, 0, &(&1.size + &2))
+
+      measurements = %{
+        count: 1,
+        logical_bytes: logical_bytes,
+        physical_bytes: physical_bytes,
+        orphan_objects: MapSet.size(orphan_ids),
+        missing_objects: missing,
+        unsafe_objects: unsafe,
+        temporary_deleted: temporary_deleted
+      }
+
+      :telemetry.execute([:robine, :storage, :reconciliation], measurements, %{})
+      {:ok, Map.put(measurements, :orphans_staged, staged_orphans)}
+    end
+  end
+
+  defp referenced_blob_ids do
+    Repo.all(from artifact in Artifact, select: %{blob_id: artifact.blob_id, size: artifact.size}) ++
+      Repo.all(from cache in CacheEntry, select: %{blob_id: cache.blob_id, size: cache.size})
   end
 
   defp stage(now, batch_size, grace_seconds, log_seconds) do
@@ -80,10 +125,13 @@ defmodule Robine.Adapters.Persistence.Postgres.StorageRetention do
       |> Enum.uniq()
       |> Enum.map(&%{blob_id: &1, not_before: not_before, inserted_at: now})
 
-    Repo.insert_all(StorageGcCandidate, rows,
-      on_conflict: :nothing,
-      conflict_target: [:blob_id]
-    )
+    {count, _result} =
+      Repo.insert_all(StorageGcCandidate, rows,
+        on_conflict: :nothing,
+        conflict_target: [:blob_id]
+      )
+
+    count
   end
 
   defp drain(now, limit) do

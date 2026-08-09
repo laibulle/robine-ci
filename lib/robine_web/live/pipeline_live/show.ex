@@ -1,7 +1,6 @@
 defmodule RobineWeb.PipelineLive.Show do
   use RobineWeb, :live_view
   alias Robine.Pipelines
-  alias Robine.Adapters.Background.SyncGitHubChecksWorker
 
   @impl true
   def mount(%{"id" => id}, _session, socket) do
@@ -22,11 +21,6 @@ defmodule RobineWeb.PipelineLive.Show do
            socket.assigns.execution_context
          ) do
       {:ok, _pipeline} ->
-        _ =
-          %{pipeline_id: socket.assigns.pipeline_id}
-          |> SyncGitHubChecksWorker.new()
-          |> Oban.insert()
-
         {:noreply, socket |> put_flash(:info, "Cancellation requested.") |> load()}
 
       {:error, reason} ->
@@ -68,6 +62,11 @@ defmodule RobineWeb.PipelineLive.Show do
               class="btn btn-error btn-sm"
             >Cancel pipeline</button>
           </div><p class="mt-3 font-mono text-sm text-base-content/65">{@pipeline.commit_sha}</p>
+          <.link
+            id="workflow-revision-link"
+            navigate={~p"/pipelines/#{@pipeline.id}/workflow"}
+            class="link mt-3 inline-block text-sm"
+          >View immutable workflow revision</.link>
         </header>
         <div class="grid gap-4 md:grid-cols-3">
           <div class="stat rounded-2xl border border-base-300">

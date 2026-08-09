@@ -20,7 +20,11 @@ defmodule RobineWeb.PipelineLiveTest do
                  repository_id: Ecto.UUID.generate(),
                  workflow_name: "CI",
                  commit_sha: String.duplicate("e", 40),
-                 jobs: %{"build" => %{needs: []}, "test" => %{needs: ["build"]}}
+                 jobs: %{"build" => %{needs: []}, "test" => %{needs: ["build"]}},
+                 workflow_revision: %{
+                   path: ".robine-ci/workflows/ci.yml",
+                   source: "version: 1\nname: CI\n"
+                 }
                },
                context
              )
@@ -37,6 +41,13 @@ defmodule RobineWeb.PipelineLiveTest do
     snapshot = Pipelines.pipeline_snapshot(%{pipeline_id: pipeline.id}, context) |> elem(1)
     job = Enum.find(snapshot.jobs, &(&1.job_key == "test"))
     assert has_element?(show, "a[href='/pipelines/#{pipeline.id}/jobs/#{job.id}']", "test")
+    assert has_element?(show, "#workflow-revision-link")
+
+    assert {:ok, revision_view, _html} = live(conn, ~p"/pipelines/#{pipeline.id}/workflow")
+    assert has_element?(revision_view, "#workflow-revision-title", ".robine-ci/workflows/ci.yml")
+    assert has_element?(revision_view, "#workflow-revision-source", "version: 1")
+    assert has_element?(revision_view, "#workflow-revision-digest")
+    assert has_element?(revision_view, "#workflow-revision-graph", "build")
 
     assert {:ok, _job_view, job_html} = live(conn, ~p"/pipelines/#{pipeline.id}/jobs/#{job.id}")
     assert job_html =~ "robine run test"

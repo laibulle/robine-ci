@@ -1,6 +1,7 @@
 defmodule Robine.Secrets.Domain.Secret do
   @moduledoc "Encrypted secret metadata and scope policy."
 
+  @derive {Inspect, except: [:ciphertext, :nonce, :tag]}
   @enforce_keys [:id, :name, :scope, :ciphertext, :nonce, :tag, :key_version, :inserted_at]
   defstruct [
     :id,

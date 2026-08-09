@@ -12,7 +12,7 @@ defmodule Robine.Storage.UseCases.SaveCache do
       })
       when role in [:administrator, :maintainer] do
     with {:ok, values} <- validate(input),
-         {:ok, blob} <- deps.blob_store.put(values.content) do
+         {:ok, blob} <- deps.blob_store.put_stream(values.content_stream) do
       now = DateTime.truncate(deps.clock.now(), :microsecond)
 
       cache = %CacheEntry{
@@ -60,7 +60,7 @@ defmodule Robine.Storage.UseCases.SaveCache do
     values = %{
       repository_id: Map.get(input, :repository_id),
       key: Map.get(input, :key),
-      content: Map.get(input, :content),
+      content_stream: content_stream(input),
       retention_seconds: Map.get(input, :retention_seconds, 604_800)
     }
 
@@ -71,7 +71,7 @@ defmodule Robine.Storage.UseCases.SaveCache do
       not (is_binary(values.key) and byte_size(values.key) in 1..512) ->
         {:error, {:invalid_cache, :key}}
 
-      not is_binary(values.content) ->
+      not valid_stream?(values.content_stream) ->
         {:error, {:invalid_cache, :content}}
 
       not (is_integer(values.retention_seconds) and values.retention_seconds > 0) ->
@@ -81,4 +81,11 @@ defmodule Robine.Storage.UseCases.SaveCache do
         {:ok, values}
     end
   end
+
+  defp content_stream(%{content: content}) when is_binary(content), do: [content]
+  defp content_stream(%{content_stream: stream}) when not is_nil(stream), do: stream
+  defp content_stream(_input), do: :invalid
+
+  defp valid_stream?(:invalid), do: false
+  defp valid_stream?(stream), do: not is_nil(Enumerable.impl_for(stream))
 end

@@ -13,7 +13,7 @@ defmodule Robine.Storage.UseCases.UploadArtifact do
       })
       when role in [:administrator, :maintainer] do
     with {:ok, values} <- validate(input),
-         {:ok, blob} <- deps.blob_store.put(values.content) do
+         {:ok, blob} <- deps.blob_store.put_stream(values.content_stream) do
       now = DateTime.truncate(deps.clock.now(), :microsecond)
 
       artifact = %Artifact{
@@ -69,7 +69,7 @@ defmodule Robine.Storage.UseCases.UploadArtifact do
       repository_id: Map.get(input, :repository_id),
       attempt_id: Map.get(input, :attempt_id),
       name: Map.get(input, :name),
-      content: Map.get(input, :content),
+      content_stream: content_stream(input),
       retention_seconds: Map.get(input, :retention_seconds, 604_800)
     }
 
@@ -83,7 +83,7 @@ defmodule Robine.Storage.UseCases.UploadArtifact do
       not (is_binary(values.name) and Regex.match?(@name, values.name)) ->
         {:error, {:invalid_artifact, :name}}
 
-      not is_binary(values.content) ->
+      not valid_stream?(values.content_stream) ->
         {:error, {:invalid_artifact, :content}}
 
       not (is_integer(values.retention_seconds) and values.retention_seconds > 0) ->
@@ -93,4 +93,11 @@ defmodule Robine.Storage.UseCases.UploadArtifact do
         {:ok, values}
     end
   end
+
+  defp content_stream(%{content: content}) when is_binary(content), do: [content]
+  defp content_stream(%{content_stream: stream}) when not is_nil(stream), do: stream
+  defp content_stream(_input), do: :invalid
+
+  defp valid_stream?(:invalid), do: false
+  defp valid_stream?(stream), do: not is_nil(Enumerable.impl_for(stream))
 end

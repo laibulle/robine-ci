@@ -27,4 +27,10 @@ defmodule Robine.Repositories do
 
   @spec list_repositories(map(), ExecutionContext.t()) :: {:ok, [map()]} | {:error, term()}
   defdelegate list_repositories(input, context), to: UseCases.ListRepositories, as: :call
+
+  @spec check_github_installation(map(), ExecutionContext.t()) ::
+          {:ok, map()} | {:error, term()}
+  defdelegate check_github_installation(input, context),
+    to: UseCases.CheckGitHubInstallation,
+    as: :call
 end

@@ -3,7 +3,7 @@ defmodule Robine.Pipelines.UseCases.RecordRunnerEvent do
 
   alias Robine.ExecutionContext
   alias Robine.Pipelines.Dependencies
-  alias Robine.Pipelines.Domain.{Attempt, Job, Pipeline}
+  alias Robine.Pipelines.Domain.{Attempt, Job, Pipeline, PipelineProjectionRequested}
 
   @terminal_attempts [:succeeded, :failed, :cancelled]
   @attempt_statuses [:queued, :preparing, :running, :cancelling, :succeeded, :failed, :cancelled]
@@ -24,7 +24,8 @@ defmodule Robine.Pipelines.UseCases.RecordRunnerEvent do
              Attempt.record_event(attempt, sequence, status, Map.get(input, :reason)),
            :ok <- repository.update_attempt(updated_attempt),
            :ok <- reconcile_job(updated_attempt, repository),
-           :ok <- reconcile_graph(updated_attempt.job_id, deps) do
+           {:ok, pipeline_id} <- reconcile_graph(updated_attempt.job_id, deps),
+           :ok <- maybe_project(attempt, updated_attempt, pipeline_id, deps) do
         {:ok, updated_attempt}
       end
     end)
@@ -53,7 +54,7 @@ defmodule Robine.Pipelines.UseCases.RecordRunnerEvent do
          {:ok, pipeline} <- deps.pipeline_repository.get(source_job.pipeline_id),
          {:ok, completed_pipeline} <- Pipeline.complete_from_jobs(pipeline, refreshed_jobs),
          :ok <- persist_if_changed(pipeline, completed_pipeline, deps.pipeline_repository) do
-      :ok
+      {:ok, source_job.pipeline_id}
     end
   end
 
@@ -77,4 +78,18 @@ defmodule Robine.Pipelines.UseCases.RecordRunnerEvent do
   defp job_status(:succeeded), do: :succeeded
   defp job_status(:failed), do: :failed
   defp job_status(:cancelled), do: :cancelled
+
+  defp maybe_project(attempt, attempt, _pipeline_id, _deps), do: :ok
+
+  defp maybe_project(_previous, %Attempt{status: status}, pipeline_id, deps)
+       when status in @terminal_attempts do
+    deps.event_outbox.append(%PipelineProjectionRequested{
+      event_id: deps.id_generator.generate(),
+      pipeline_id: pipeline_id,
+      occurred_at: deps.clock.now(),
+      dispatch: true
+    })
+  end
+
+  defp maybe_project(_previous, _updated, _pipeline_id, _deps), do: :ok
 end

@@ -82,7 +82,8 @@ defmodule Robine.Repositories.UseCases.ProcessGitHubDelivery do
               repository_id: repository.id,
               workflow_name: validated.workflow.name,
               commit_sha: event.sha,
-              jobs: validated.workflow.jobs
+              jobs: validated.workflow.jobs,
+              workflow_revision: %{path: file.path, source: file.content}
             }
 
             case Pipelines.create_pipeline(input, context) do

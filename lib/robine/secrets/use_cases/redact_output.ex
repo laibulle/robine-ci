@@ -1,5 +1,5 @@
 defmodule Robine.Secrets.UseCases.RedactOutput do
-  @moduledoc "Redacts literal and base64-encoded secret values from output."
+  @moduledoc "Redacts every representation covered by the secret value policy from output."
   alias Robine.Secrets.Domain.Redactor
 
   @spec call(map()) :: {:ok, String.t()} | {:error, term()}

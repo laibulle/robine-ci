@@ -6,7 +6,6 @@ defmodule Robine.Adapters.Background.RunNextJobWorker do
   alias Robine.Execution.Contracts.{Specification, Step}
   alias Robine.Execution.Domain.CacheKey
   alias Robine.Adapters.Background.RunnerControl
-  alias Robine.Adapters.Background.SyncGitHubChecksWorker
   alias Robine.Pipelines
   alias Robine.Repositories
   alias Robine.Runtime.Dependencies
@@ -55,8 +54,7 @@ defmodule Robine.Adapters.Background.RunNextJobWorker do
   defp execute_specification(attempt, raw, specification, context) do
     with {:ok, _running} <- record(attempt, 2, :running, nil, context),
          {:ok, result} <- run_with_control(attempt, raw, specification, context),
-         {:ok, _terminal} <- record_result(attempt, result, context),
-         :ok <- enqueue_checks(raw["pipeline_id"]) do
+         {:ok, _terminal} <- record_result(attempt, result, context) do
       enqueue_next()
     else
       {:error, reason} ->
@@ -327,13 +325,6 @@ defmodule Robine.Adapters.Background.RunNextJobWorker do
 
   defp enqueue_next do
     case Oban.insert(new(%{})) do
-      {:ok, _job} -> :ok
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  defp enqueue_checks(pipeline_id) do
-    case %{pipeline_id: pipeline_id} |> SyncGitHubChecksWorker.new() |> Oban.insert() do
       {:ok, _job} -> :ok
       {:error, reason} -> {:error, reason}
     end

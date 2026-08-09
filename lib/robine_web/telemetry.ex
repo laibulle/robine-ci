@@ -79,15 +79,34 @@ defmodule RobineWeb.Telemetry do
       summary("vm.memory.total", unit: {:byte, :kilobyte}),
       summary("vm.total_run_queue_lengths.total"),
       summary("vm.total_run_queue_lengths.cpu"),
-      summary("vm.total_run_queue_lengths.io")
+      summary("vm.total_run_queue_lengths.io"),
+      counter("robine.outbox.delivery.count", tags: [:outcome]),
+      sum("robine.outbox.reconciliation.count"),
+      sum("robine.secrets.rotation.count", tags: [:from_version, :to_version]),
+      sum("robine.storage.blob.write.bytes", tags: [:outcome]),
+      counter("robine.storage.blob.write.count", tags: [:outcome]),
+      last_value("robine.storage.reconciliation.logical_bytes"),
+      last_value("robine.storage.reconciliation.physical_bytes"),
+      sum("robine.storage.reconciliation.orphan_objects"),
+      sum("robine.storage.reconciliation.missing_objects"),
+      sum("robine.storage.reconciliation.unsafe_objects"),
+      sum("robine.storage.reconciliation.temporary_deleted"),
+      last_value("robine.storage.pressure.available_bytes", tags: [:status]),
+      last_value("robine.storage.pressure.used_percent", tags: [:status]),
+      counter("robine.github.api.request.count", tags: [:method, :outcome, :status]),
+      summary("robine.github.api.request.duration",
+        tags: [:method, :outcome, :status],
+        unit: {:native, :millisecond}
+      ),
+      last_value("robine.github.api.request.rate_limit_remaining"),
+      last_value("robine.github.api.request.rate_limit_limit"),
+      last_value("robine.github.api.request.rate_limit_reset")
     ]
   end
 
   defp periodic_measurements do
     [
-      # A module, function and arguments to be invoked periodically.
-      # This function must call :telemetry.execute/3 and a metric must be added above.
-      # {RobineWeb, :count_users, []}
+      {Robine.Runtime.Measurements, :storage_pressure, []}
     ]
   end
 end

@@ -18,7 +18,8 @@ defmodule RobineWeb.RepositoryLive.Show do
        assign(socket,
          repository: repository,
          pipelines: repository_pipelines,
-         workflows: workflows
+         workflows: workflows,
+         github_preflight: :not_run
        )}
     else
       _ ->
@@ -27,6 +28,17 @@ defmodule RobineWeb.RepositoryLive.Show do
          |> put_flash(:error, "Repository not found.")
          |> push_navigate(to: ~p"/repositories")}
     end
+  end
+
+  @impl true
+  def handle_event("check-github-installation", _params, socket) do
+    result =
+      Repositories.check_github_installation(
+        %{repository_id: socket.assigns.repository.id},
+        socket.assigns.execution_context
+      )
+
+    {:noreply, assign(socket, github_preflight: result)}
   end
 
   @impl true
@@ -44,6 +56,52 @@ defmodule RobineWeb.RepositoryLive.Show do
             >Manage secrets</.link>
           </div>
         </header>
+        <section class="rounded-3xl border border-base-300 bg-base-100 p-6">
+          <div class="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <h2 class="text-xl font-semibold">GitHub installation</h2>
+              <p class="mt-1 text-sm text-base-content/60">
+                Required repository permissions: Metadata read, Contents read, Checks write.
+              </p>
+            </div>
+            <button
+              :if={@current_actor.role in [:administrator, :maintainer]}
+              id="check-github-installation"
+              phx-click="check-github-installation"
+              phx-disable-with="Checking…"
+              class="btn btn-outline btn-sm"
+            >Check permissions</button>
+          </div>
+          <p :if={@github_preflight == :not_run} class="mt-4 text-sm text-base-content/60">
+            Permission preflight has not run in this session.
+          </p>
+          <div
+            :if={match?({:ok, %{status: :ok}}, @github_preflight)}
+            class="alert alert-success mt-4"
+            role="status"
+          >
+            The installation has every required least-privilege permission.
+          </div>
+          <div
+            :if={match?({:ok, %{status: :degraded}}, @github_preflight)}
+            class="alert alert-warning mt-4 block"
+            role="alert"
+          >
+            <p class="font-semibold">Installation permissions need attention.</p>
+            <ul class="mt-2 list-disc space-y-1 pl-5">
+              <li :for={missing <- elem(@github_preflight, 1).missing}>
+                {missing.corrective_action} Current value: <code>{missing.actual}</code>.
+              </li>
+            </ul>
+          </div>
+          <div
+            :if={match?({:error, _reason}, @github_preflight)}
+            class="alert alert-error mt-4"
+            role="alert"
+          >
+            GitHub could not verify this installation. Check credentials, connectivity, and installation approval.
+          </div>
+        </section>
         <div class="grid gap-6 lg:grid-cols-2">
           <section>
             <h2 class="text-xl font-semibold">Workflows</h2><div

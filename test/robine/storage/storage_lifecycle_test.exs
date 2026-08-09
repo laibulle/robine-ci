@@ -94,6 +94,39 @@ defmodule Robine.Storage.StorageLifecycleTest do
     assert :ok = LocalBlobStore.delete(artifact.digest)
   end
 
+  test "accepts lazy content streams at the application boundary" do
+    repository_id = Ecto.UUID.generate()
+    context = Dependencies.context(%{id: "maintainer", role: :maintainer}, "streamed-artifact")
+    content_stream = Stream.map(["streamed-", "artifact"], & &1)
+
+    assert {:ok, artifact} =
+             Storage.upload_artifact(
+               %{
+                 repository_id: repository_id,
+                 attempt_id: Ecto.UUID.generate(),
+                 name: "streamed.txt",
+                 content_stream: content_stream
+               },
+               context
+             )
+
+    assert artifact.size == byte_size("streamed-artifact")
+
+    assert {:ok, %{content: "streamed-artifact"}} =
+             Storage.download_artifact(
+               %{repository_id: repository_id, artifact_id: artifact.id},
+               context
+             )
+
+    assert {:error, {:invalid_cache, :content}} =
+             Storage.save_cache(
+               %{repository_id: repository_id, key: "invalid-stream", content_stream: self()},
+               context
+             )
+
+    assert :ok = LocalBlobStore.delete(artifact.digest)
+  end
+
   test "cache miss is successful and exact-key saves replace the prior complete entry" do
     repository_id = Ecto.UUID.generate()
     context = Dependencies.context(%{id: "maintainer", role: :maintainer}, "cache")

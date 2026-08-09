@@ -4,7 +4,7 @@ defmodule Robine.Pipelines.UseCases.CreatePipeline do
   alias Robine.ExecutionContext
   alias Robine.Pipelines.Contracts.PipelineView
   alias Robine.Pipelines.Dependencies
-  alias Robine.Pipelines.Domain.{Pipeline, PipelineCreated}
+  alias Robine.Pipelines.Domain.{Pipeline, PipelineCreated, WorkflowRevision}
 
   @spec call(map(), ExecutionContext.t()) :: {:ok, PipelineView.t()} | {:error, term()}
   def call(input, %ExecutionContext{
@@ -15,10 +15,13 @@ defmodule Robine.Pipelines.UseCases.CreatePipeline do
     deps.unit_of_work.transaction(fn ->
       now = deps.clock.now()
       pipeline_id = deps.id_generator.generate()
+      jobs = Map.get(input, :jobs, %{})
 
       with {:ok, pipeline} <- Pipeline.create(input, pipeline_id, now),
+           {:ok, revision} <- workflow_revision(input, jobs, pipeline_id, now, deps),
            :ok <- deps.pipeline_repository.insert(pipeline),
-           :ok <- insert_jobs(Map.get(input, :jobs, %{}), pipeline, deps),
+           :ok <- deps.pipeline_repository.insert_revision(revision),
+           :ok <- insert_jobs(jobs, pipeline, deps),
            :ok <- deps.event_outbox.append(created_event(pipeline, deps)) do
         {:ok, PipelineView.from_domain(pipeline)}
       end
@@ -95,4 +98,39 @@ defmodule Robine.Pipelines.UseCases.CreatePipeline do
       "with" => Map.get(step, :with, Map.get(step, "with", %{}))
     }
   end
+
+  defp workflow_revision(input, jobs, pipeline_id, now, deps) do
+    graph = normalized_graph(jobs)
+
+    revision =
+      Map.get(input, :workflow_revision, %{
+        path: "generated://pipeline/#{pipeline_id}",
+        source: Jason.encode!(graph)
+      })
+
+    WorkflowRevision.new(%{
+      id: deps.id_generator.generate(),
+      pipeline_id: pipeline_id,
+      path: Map.get(revision, :path, Map.get(revision, "path")),
+      source: Map.get(revision, :source, Map.get(revision, "source")),
+      normalized_graph: graph,
+      created_at: now
+    })
+  end
+
+  defp normalized_graph(jobs) when is_map(jobs) do
+    %{
+      "jobs" =>
+        jobs
+        |> Enum.sort_by(&elem(&1, 0))
+        |> Map.new(fn {key, definition} ->
+          {to_string(key),
+           definition
+           |> normalize_execution()
+           |> Map.put("needs", Map.get(definition, :needs, Map.get(definition, "needs", [])))}
+        end)
+    }
+  end
+
+  defp normalized_graph(_jobs), do: %{"jobs" => %{}}
 end

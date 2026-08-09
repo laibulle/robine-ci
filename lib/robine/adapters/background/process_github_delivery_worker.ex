@@ -7,7 +7,6 @@ defmodule Robine.Adapters.Background.ProcessGitHubDeliveryWorker do
 
   alias Robine.Repositories
   alias Robine.Runtime.Dependencies
-  alias Robine.Adapters.Background.SyncGitHubChecksWorker
 
   @impl Oban.Worker
   def perform(%Oban.Job{args: %{"delivery_id" => delivery_id}}) do
@@ -18,19 +17,10 @@ defmodule Robine.Adapters.Background.ProcessGitHubDeliveryWorker do
       )
 
     case Repositories.process_github_delivery(%{delivery_id: delivery_id}, context) do
-      {:ok, %{pipeline_ids: pipeline_ids}} -> enqueue_checks(pipeline_ids)
+      {:ok, %{pipeline_ids: _pipeline_ids}} -> :ok
       {:ok, _result} -> :ok
       {:error, :not_found} -> {:cancel, :delivery_not_found}
       {:error, reason} -> {:error, reason}
     end
-  end
-
-  defp enqueue_checks(pipeline_ids) do
-    Enum.reduce_while(pipeline_ids, :ok, fn pipeline_id, :ok ->
-      case %{pipeline_id: pipeline_id} |> SyncGitHubChecksWorker.new() |> Oban.insert() do
-        {:ok, _job} -> {:cont, :ok}
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
-    end)
   end
 end

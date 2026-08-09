@@ -103,12 +103,12 @@ Metrics include active and queued attempts, phase duration, image pull duration,
 
 ## Acceptance criteria
 
-- [ ] Files created by one step are available to later steps in the same job.
-- [ ] Writable files from one job are unavailable to another job unless explicitly transferred.
+- [x] Files created by one step are available to later steps in the same job.
+- [x] Writable files from one job are unavailable to another job unless explicitly transferred.
 - [x] Cancellation and timeouts terminate the full container process tree within the configured grace period.
 - [x] Restart reconciliation removes or adopts every labeled orphan deterministically.
 - [x] The configured concurrency limit is respected under simultaneous dispatch.
-- [ ] Job containers cannot access the Docker socket through Robine-provided mounts.
+- [x] Job containers cannot access the Docker socket through Robine-provided mounts.
 
 ## Open questions
 

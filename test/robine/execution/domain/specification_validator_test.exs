@@ -21,6 +21,14 @@ defmodule Robine.Execution.Domain.SpecificationValidatorTest do
              specification(steps: [duplicate, duplicate]) |> SpecificationValidator.validate()
   end
 
+  test "debug inspection never renders plaintext secrets" do
+    secret = "inspection-fixture-secret"
+    rendered = inspect(specification(secrets: %{"TOKEN" => secret}))
+
+    refute rendered =~ secret
+    refute rendered =~ "TOKEN"
+  end
+
   defp specification(overrides \\ []) do
     defaults = [
       version: 1,

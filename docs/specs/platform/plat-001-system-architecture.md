@@ -5,7 +5,7 @@
 - **State:** Draft
 - **Owner:** Platform
 - **Target:** MVP
-- **Last updated:** 2026-08-08
+- **Last updated:** 2026-08-09
 
 ## Summary
 
@@ -71,6 +71,8 @@ An operator deploying Robine on a Linux Docker host and a contributor implementi
 The Phoenix application contains bounded contexts for source control, workflows, pipelines, identity, secrets, and storage. Their internal dependency rules, use cases, ports, adapters, and public facades are defined by [PLAT-002](plat-002-clean-application-architecture.md). A durable background-job mechanism handles webhook processing, reconciliation, and outbound GitHub updates. A scheduler claims ready jobs using transactional database locking and sends an execution specification to a local runner adapter.
 
 Pipeline states are `created`, `queued`, `running`, `cancelling`, and terminal states `succeeded`, `failed`, `cancelled`, or `invalid`. Job attempts distinguish command failure, cancellation, timeout, runner loss, and system failure. Retrying creates a new attempt; it never mutates the history of the previous attempt.
+
+Every pipeline transaction stores one immutable workflow revision containing the exact source path and bytes, a SHA-256 digest, and the normalized execution graph. Source-triggered pipelines provide the fetched workflow bytes from the exact commit SHA; synthetic internal pipelines receive an explicit generated revision rather than a missing reference.
 
 The runner emits ordered, sequence-numbered events. The control plane deduplicates events and persists state before broadcasting it. This protocol is implemented locally in the MVP but MUST not rely on shared mutable process state, so it can be transported remotely later.
 

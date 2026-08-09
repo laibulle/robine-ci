@@ -3,7 +3,7 @@ defmodule Robine.Adapters.Persistence.Postgres.PipelineTransactionTest do
 
   import Ecto.Query
 
-  alias Robine.Adapters.Persistence.Postgres.Schemas.{OutboxEvent, Pipeline}
+  alias Robine.Adapters.Persistence.Postgres.Schemas.{OutboxEvent, Pipeline, WorkflowRevision}
   alias Robine.Pipelines
   alias Robine.Runtime.Dependencies
   alias Robine.Repo
@@ -22,6 +22,14 @@ defmodule Robine.Adapters.Persistence.Postgres.PipelineTransactionTest do
 
     assert %OutboxEvent{event_type: "pipeline.created", aggregate_id: ^id} =
              Repo.one!(from event in OutboxEvent, where: event.aggregate_id == ^id)
+
+    assert %WorkflowRevision{pipeline_id: ^id, digest: digest, normalized_graph: %{"jobs" => %{}}} =
+             Repo.one!(from revision in WorkflowRevision, where: revision.pipeline_id == ^id)
+
+    assert byte_size(digest) == 64
+
+    assert {:ok, revision} = Pipelines.workflow_revision(%{pipeline_id: id}, context)
+    assert revision.digest == digest
 
     assert %Oban.Job{queue: "outbox", args: %{"event_id" => _event_id}} = Repo.one!(Oban.Job)
   end

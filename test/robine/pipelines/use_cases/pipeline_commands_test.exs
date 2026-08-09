@@ -14,6 +14,8 @@ defmodule Robine.Pipelines.UseCases.PipelineCommandsTest do
   defmodule FakeRepository do
     @behaviour Robine.Pipelines.Ports.PipelineRepository
     def insert(_pipeline), do: :ok
+    def insert_revision(_revision), do: :ok
+    def get_revision(_pipeline_id), do: {:error, :not_found}
 
     def get(id) do
       status = Process.get({__MODULE__, id}, :created)
@@ -41,9 +43,14 @@ defmodule Robine.Pipelines.UseCases.PipelineCommandsTest do
 
   defmodule UnusedOutbox do
     @behaviour Robine.Pipelines.Ports.EventOutbox
+    @impl true
     def append(_event), do: :ok
+    @impl true
     def get(_id), do: {:error, :not_found}
+    @impl true
     def mark_delivered(_id, _at), do: :ok
+    @impl true
+    def reconcile_pending(_limit), do: {:ok, 0}
   end
 
   defmodule Clock do

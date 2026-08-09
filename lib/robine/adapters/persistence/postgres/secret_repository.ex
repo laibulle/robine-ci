@@ -60,6 +60,17 @@ defmodule Robine.Adapters.Persistence.Postgres.SecretRepository do
   end
 
   @impl true
+  def find_instance(names) do
+    schemas =
+      Repo.all(
+        from secret in SecretSchema,
+          where: secret.scope == :instance and secret.name in ^names
+      )
+
+    {:ok, Enum.map(schemas, &to_domain/1)}
+  end
+
+  @impl true
   def list_metadata(repository_id) do
     metadata =
       Repo.all(
@@ -78,6 +89,64 @@ defmodule Robine.Adapters.Persistence.Postgres.SecretRepository do
       )
 
     {:ok, metadata}
+  end
+
+  @impl true
+  def list_for_rotation(target_version, cursor, limit) do
+    query =
+      from secret in SecretSchema,
+        where: secret.key_version != ^target_version,
+        order_by: [asc: secret.id],
+        limit: ^limit
+
+    query = if cursor, do: from(secret in query, where: secret.id > ^cursor), else: query
+    {:ok, Repo.all(query) |> Enum.map(&to_domain/1)}
+  end
+
+  @impl true
+  def rotate(secret, previous_version, audit) do
+    Repo.transaction(fn ->
+      query = from stored in SecretSchema, where: stored.id == ^secret.id, lock: "FOR UPDATE"
+
+      case Repo.one(query) do
+        nil ->
+          Repo.rollback(:not_found)
+
+        %{key_version: version} when version != previous_version ->
+          Repo.rollback(:rotation_conflict)
+
+        stored ->
+          changes =
+            Ecto.Changeset.change(stored,
+              ciphertext: secret.ciphertext,
+              nonce: secret.nonce,
+              tag: secret.tag,
+              key_version: secret.key_version
+            )
+
+          with {:ok, _stored} <- Repo.update(changes),
+               attributes = Map.merge(audit, %{target_type: "secret", target_id: secret.id}),
+               {:ok, _event} <-
+                 Repo.insert(AuditEvent.changeset(%AuditEvent{}, attributes)) do
+            :ok
+          else
+            {:error, changeset} -> Repo.rollback({:secret_rotation, changeset})
+          end
+      end
+    end)
+    |> case do
+      {:ok, :ok} ->
+        :telemetry.execute(
+          [:robine, :secrets, :rotation],
+          %{count: 1},
+          %{from_version: previous_version, to_version: secret.key_version}
+        )
+
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
   defp to_domain(schema) do

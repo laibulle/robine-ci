@@ -13,11 +13,31 @@ defmodule Robine.Secrets.Domain.RedactorTest do
     refute output =~ secret
   end
 
-  test "redacts base64 variants and rejects dangerously short values" do
-    secret = "another-secret"
-    {:ok, redactor} = Redactor.new([secret])
-    {output, redactor} = Redactor.push(redactor, "encoded=#{Base.encode64(secret)}")
-    assert output <> Redactor.finish(redactor) == "encoded=[REDACTED]"
+  test "redacts every documented encoded variant across chunk boundaries" do
+    secret = ">>>>>>>>"
+
+    for variant <- Robine.Secrets.Domain.ValuePolicy.variants(secret) do
+      split_at = max(div(byte_size(variant), 2), 1)
+      <<first::binary-size(^split_at), second::binary>> = variant
+      {:ok, redactor} = Redactor.new([secret])
+      {prefix, redactor} = Redactor.push(redactor, "encoded=#{first}")
+      {suffix, redactor} = Redactor.push(redactor, second)
+
+      assert prefix <> suffix <> Redactor.finish(redactor) == "encoded=[REDACTED]"
+    end
+  end
+
+  test "rejects values outside the masking bounds" do
     assert {:error, :secret_too_short} = Redactor.new(["short"])
+    assert {:error, :secret_too_large} = Redactor.new([:binary.copy("a", 65_537)])
+  end
+
+  test "debug inspection never renders secret patterns or buffered fragments" do
+    secret = "inspection-fixture-secret"
+    {:ok, redactor} = Redactor.new([secret])
+    {_output, redactor} = Redactor.push(redactor, "inspection-fixture-")
+
+    refute inspect(redactor) =~ secret
+    refute inspect(redactor) =~ "inspection-fixture-"
   end
 end

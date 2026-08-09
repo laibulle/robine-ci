@@ -70,9 +70,11 @@ defmodule Robine.Adapters.Execution.DockerRunnerTest do
 
   @tag :docker
   test "stops after a command failure and returns its output" do
+    attempt_id = "docker-failure-#{System.unique_integer([:positive])}"
+
     specification = %Specification{
       version: 1,
-      attempt_id: "docker-failure-#{System.unique_integer([:positive])}",
+      attempt_id: attempt_id,
       image: "postgres:18-alpine",
       workspace: "/workspace",
       shell: "/bin/sh",
@@ -89,6 +91,78 @@ defmodule Robine.Adapters.Execution.DockerRunnerTest do
     assert result.status == :failed
     assert result.reason == :command_failed
     assert [%{name: "Fail", exit_code: 7, output: "broken\n"}] = result.steps
+    assert_resources_absent(attempt_id)
+  end
+
+  @tag :docker
+  test "concurrent duplicate dispatch leaves the winning container owned and running" do
+    attempt_id = "docker-duplicate-#{System.unique_integer([:positive])}"
+
+    specification = %Specification{
+      version: 1,
+      attempt_id: attempt_id,
+      image: "alpine:3.22",
+      workspace: "/workspace",
+      shell: "/bin/sh",
+      timeout_ms: 20_000,
+      env: %{},
+      secrets: %{},
+      steps: [%Step{name: "Winner", kind: :run, value: "sleep 2; printf winner"}]
+    }
+
+    tasks =
+      for _index <- 1..2 do
+        Task.async(fn -> DockerRunner.run(specification) end)
+      end
+
+    results = Enum.map(tasks, &Task.await(&1, 10_000))
+
+    assert Enum.count(results, &match?({:ok, %{status: :succeeded}}, &1)) == 1
+    assert Enum.count(results, &match?({:error, {:docker, :duplicate_attempt}}, &1)) == 1
+
+    assert [{:ok, result}] = Enum.filter(results, &match?({:ok, _result}, &1))
+    assert [%{output: "winner"}] = result.steps
+
+    suffix =
+      :crypto.hash(:sha256, attempt_id) |> Base.encode16(case: :lower) |> binary_part(0, 20)
+
+    assert docker_status(["container", "inspect", "robine-#{suffix}"]) == 1
+    assert docker_status(["volume", "inspect", "robine-#{suffix}-workspace"]) == 1
+  end
+
+  @tag :docker
+  test "separate jobs share no writable workspace and receive no Docker socket" do
+    suffix = System.unique_integer([:positive])
+
+    first = %Specification{
+      version: 1,
+      attempt_id: "isolation-first-#{suffix}",
+      image: "alpine:3.22",
+      workspace: "/workspace",
+      shell: "/bin/sh",
+      timeout_ms: 20_000,
+      steps: [%Step{name: "Write", kind: :run, value: "printf private > private-file"}]
+    }
+
+    second = %{
+      first
+      | attempt_id: "isolation-second-#{suffix}",
+        steps: [
+          %Step{
+            name: "Inspect isolation",
+            kind: :run,
+            value: "test ! -e private-file && test ! -S /var/run/docker.sock && printf isolated"
+          }
+        ]
+    }
+
+    assert {:ok, %{status: :succeeded}} = DockerRunner.run(first)
+
+    assert {:ok, %{status: :succeeded, steps: [%{output: "isolated"}]}} =
+             DockerRunner.run(second)
+
+    assert_resources_absent(first.attempt_id)
+    assert_resources_absent(second.attempt_id)
   end
 
   @tag :docker
@@ -267,10 +341,47 @@ defmodule Robine.Adapters.Execution.DockerRunnerTest do
   end
 
   @tag :docker
-  test "reports a missing configured shell as a preparation failure" do
+  test "redacts secrets embedded in builtin diagnostics" do
+    secret = "builtin-diagnostic-secret"
+
     specification = %Specification{
       version: 1,
-      attempt_id: "docker-shell-#{System.unique_integer([:positive])}",
+      attempt_id: "docker-builtin-diagnostic-#{System.unique_integer([:positive])}",
+      image: "postgres:18-alpine",
+      workspace: "/workspace",
+      shell: "/bin/sh",
+      timeout_ms: 20_000,
+      env: %{},
+      secrets: %{"TOKEN" => secret},
+      steps: [
+        %Step{
+          name: "Restore",
+          kind: :builtin,
+          value: "cache/restore",
+          with: %{"key" => "missing", "paths" => ["deps"]}
+        }
+      ]
+    }
+
+    callback = fn
+      %{type: :builtin} -> {:error, {:storage_failure, secret}}
+      _event -> :ok
+    end
+
+    assert {:ok, result} = DockerRunner.run(specification, callback)
+    assert result.status == :failed
+    assert [%{output: output}] = result.steps
+    assert output =~ "[REDACTED]"
+    refute inspect(result) =~ secret
+  end
+
+  @tag :docker
+  test "reports a missing configured shell as a preparation failure" do
+    attempt_id = "docker-shell-#{System.unique_integer([:positive])}"
+
+    specification = %Specification{
+      version: 1,
+      attempt_id: attempt_id,
       image: "alpine:3.22",
       workspace: "/workspace",
       shell: "/bin/bash",
@@ -282,6 +393,35 @@ defmodule Robine.Adapters.Execution.DockerRunnerTest do
 
     assert {:error, {:docker, {:shell_unavailable, "/bin/bash", _reason}}} =
              DockerRunner.run(specification)
+
+    assert_resources_absent(attempt_id)
+  end
+
+  @tag :docker
+  test "rejects an unsafe source after provisioning and cleans all owned resources" do
+    attempt_id = "docker-source-failure-#{System.unique_integer([:positive])}"
+    source = Path.join(System.tmp_dir!(), attempt_id)
+    File.mkdir_p!(source)
+    File.ln_s!("/etc/passwd", Path.join(source, "escape"))
+    on_exit(fn -> File.rm_rf!(source) end)
+
+    specification = %Specification{
+      version: 1,
+      attempt_id: attempt_id,
+      image: "alpine:3.22",
+      workspace: "/workspace",
+      shell: "/bin/sh",
+      timeout_ms: 20_000,
+      source_path: source,
+      env: %{},
+      secrets: %{},
+      steps: [%Step{name: "Never", kind: :run, value: "true"}]
+    }
+
+    assert {:error, {:docker, {:unsafe_source_tree, {:unsupported_file_type, :symlink, _path}}}} =
+             DockerRunner.run(specification)
+
+    assert_resources_absent(attempt_id)
   end
 
   test "parses labeled Docker resource projections" do
@@ -407,5 +547,13 @@ defmodule Robine.Adapters.Execution.DockerRunnerTest do
   defp docker_status(arguments) do
     {_output, status} = System.cmd("docker", arguments, stderr_to_stdout: true)
     status
+  end
+
+  defp assert_resources_absent(attempt_id) do
+    suffix =
+      :crypto.hash(:sha256, attempt_id) |> Base.encode16(case: :lower) |> binary_part(0, 20)
+
+    assert docker_status(["container", "inspect", "robine-#{suffix}"]) == 1
+    assert docker_status(["volume", "inspect", "robine-#{suffix}-workspace"]) == 1
   end
 end

@@ -42,6 +42,7 @@ config :robine, Oban,
     {Oban.Plugins.Cron,
      crontab: [
        {"* * * * *", Robine.Adapters.Background.ReconcileLeasesWorker},
+       {"* * * * *", Robine.Adapters.Background.ReconcileOutboxWorker},
        {"*/5 * * * *", Robine.Adapters.Background.ReconcileGitHubChecksWorker},
        {"*/5 * * * *", Robine.Adapters.Background.ReconcileRunnerResourcesWorker},
        {"17 * * * *", Robine.Adapters.Background.PruneRetentionWorker}

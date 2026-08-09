@@ -4,7 +4,7 @@ defmodule Robine.Adapters.SourceControl.GitHubClient do
 
   @api "https://api.github.com"
   alias Robine.Adapters.Archive.SafeTar
-  alias Robine.Adapters.SourceControl.GitHubAppTokenCache
+  alias Robine.Adapters.SourceControl.{GitHubAppTokenCache, GitHubTelemetry}
 
   @impl true
   def workflow_files(repository, sha) do
@@ -78,6 +78,11 @@ defmodule Robine.Adapters.SourceControl.GitHubClient do
     end
   end
 
+  @impl true
+  def installation_permissions(repository) do
+    GitHubAppTokenCache.permissions(repository.installation_id)
+  end
+
   defp workflow_directory_url(repository),
     do: "#{@api}/repos/#{repository.owner}/#{repository.name}/contents/.robine-ci/workflows"
 
@@ -99,10 +104,14 @@ defmodule Robine.Adapters.SourceControl.GitHubClient do
 
     options = Keyword.merge([method: method, url: url, headers: headers, retry: false], options)
 
-    case Req.request(options) do
+    started = System.monotonic_time()
+    result = Req.request(options)
+    :ok = GitHubTelemetry.emit(method, started, result)
+
+    case result do
       {:ok, %{status: status} = response} when status in 200..299 -> {:ok, response}
       {:ok, %{status: 404, body: %{"message" => "Not Found"}} = response} -> {:ok, response}
-      {:ok, response} -> {:error, {:github_http, response.status, response.body}}
+      {:ok, response} -> {:error, {:github_http, response.status}}
       {:error, reason} -> {:error, {:github_transport, reason}}
     end
   end

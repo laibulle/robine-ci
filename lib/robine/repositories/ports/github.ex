@@ -6,4 +6,6 @@ defmodule Robine.Repositories.Ports.GitHub do
               {:ok, [{String.t(), binary()}]} | {:error, term()}
   @callback upsert_check(Robine.Repositories.Domain.Repository.t(), map()) ::
               {:ok, integer()} | {:error, term()}
+  @callback installation_permissions(Robine.Repositories.Domain.Repository.t()) ::
+              {:ok, map()} | {:error, term()}
 end
