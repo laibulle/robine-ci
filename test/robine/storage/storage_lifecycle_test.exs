@@ -4,6 +4,8 @@ defmodule Robine.Storage.StorageLifecycleTest do
   alias Robine.{Pipelines, Storage}
   alias Robine.Runtime.Dependencies
   alias Robine.Adapters.Storage.LocalBlobStore
+  alias Robine.Adapters.Persistence.Postgres.Schemas.StorageGcCandidate
+  alias Robine.Repo
 
   test "atomically enforces repository and instance logical quotas" do
     previous = Application.fetch_env!(:robine, :storage_quotas)
@@ -48,8 +50,11 @@ defmodule Robine.Storage.StorageLifecycleTest do
                context
              )
 
+    assert Repo.aggregate(StorageGcCandidate, :count) == 1
+
     assert :ok = LocalBlobStore.delete(first.digest)
     assert :ok = LocalBlobStore.delete(second.digest)
+    assert :ok = LocalBlobStore.delete(:crypto.hash(:sha256, "x") |> Base.encode16(case: :lower))
   end
 
   test "uploads immutable artifacts and returns digest-verified authorized content" do

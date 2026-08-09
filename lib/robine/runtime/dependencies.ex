@@ -14,6 +14,7 @@ defmodule Robine.Runtime.Dependencies do
   @spec context(ExecutionContext.actor(), String.t()) :: ExecutionContext.t()
   def context(actor, correlation_id) do
     storage_quotas = Application.fetch_env!(:robine, :storage_quotas)
+    retention = Application.fetch_env!(:robine, :retention)
 
     ExecutionContext.new(actor, correlation_id, %{
       pipelines: %PipelineDependencies{
@@ -49,7 +50,8 @@ defmodule Robine.Runtime.Dependencies do
         clock: Robine.Adapters.System.Clock,
         id_generator: Robine.Adapters.System.IdGenerator,
         instance_quota_bytes: Keyword.fetch!(storage_quotas, :instance_bytes),
-        repository_quota_bytes: Keyword.fetch!(storage_quotas, :repository_bytes)
+        repository_quota_bytes: Keyword.fetch!(storage_quotas, :repository_bytes),
+        gc_grace_seconds: Keyword.fetch!(retention, :gc_grace_seconds)
       },
       repositories: %RepositoryDependencies{
         repository: Robine.Adapters.Persistence.Postgres.GitHubRepository,
@@ -65,6 +67,7 @@ defmodule Robine.Runtime.Dependencies do
   @spec validate!() :: :ok
   def validate! do
     storage_quotas = Application.fetch_env!(:robine, :storage_quotas)
+    retention = Application.fetch_env!(:robine, :retention)
 
     context(%{id: "startup", role: :administrator}, "startup")
     |> Map.fetch!(:dependencies)
@@ -101,7 +104,8 @@ defmodule Robine.Runtime.Dependencies do
       clock: Robine.Adapters.System.Clock,
       id_generator: Robine.Adapters.System.IdGenerator,
       instance_quota_bytes: Keyword.fetch!(storage_quotas, :instance_bytes),
-      repository_quota_bytes: Keyword.fetch!(storage_quotas, :repository_bytes)
+      repository_quota_bytes: Keyword.fetch!(storage_quotas, :repository_bytes),
+      gc_grace_seconds: Keyword.fetch!(retention, :gc_grace_seconds)
     })
 
     RepositoryDependencies.validate!(%RepositoryDependencies{

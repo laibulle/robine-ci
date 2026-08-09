@@ -64,7 +64,10 @@ defmodule Robine.Adapters.Archive.SafeTar do
     end
   end
 
-  defp validate_workspace_table(entries, compressed_bytes, options) do
+  @doc false
+  def validate_workspace_table(entries, compressed_bytes, options \\ []) do
+    options = Keyword.merge(@defaults, options)
+
     Enum.reduce_while(entries, {:ok, 0, 0}, fn
       {path, type, size, _mtime, _mode, _uid, _gid}, {:ok, files, total}
       when type in [:regular, :directory] and is_integer(size) and size >= 0 ->

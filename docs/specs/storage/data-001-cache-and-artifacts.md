@@ -107,8 +107,8 @@ Metrics include logical and physical bytes, cache hit ratio, upload/download lat
 
 - [x] Cache miss does not fail a representative job.
 - [ ] Interrupted uploads never become visible as complete objects.
-- [ ] Traversal, symlink escape, archive bomb, and special-file fixtures are rejected. (The shared TAR preflight and GitHub source path are covered; cache/artifact runner built-ins remain.)
-- [ ] An artifact digest mismatch is detected before extraction.
+- [x] Traversal, symlink escape, archive bomb, and special-file fixtures are rejected for source, cache, and artifact archives.
+- [x] An artifact digest mismatch is detected before extraction.
 - [x] A failed job can be retried using retained dependency artifacts.
 - [x] When an input artifact has expired, the UI offers the smallest dependency rerun that can recreate it.
 

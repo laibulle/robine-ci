@@ -13,32 +13,25 @@ defmodule Robine.Storage.UseCases.UploadArtifact do
       })
       when role in [:administrator, :maintainer] do
     with {:ok, values} <- validate(input),
-         {:ok, blob} <- deps.blob_store.put(values.content),
-         now = DateTime.truncate(deps.clock.now(), :microsecond),
-         artifact = %Artifact{
-           id: deps.id_generator.generate(),
-           repository_id: values.repository_id,
-           attempt_id: values.attempt_id,
-           name: values.name,
-           blob_id: blob.blob_id,
-           digest: blob.digest,
-           size: blob.size,
-           created_at: now,
-           expires_at: DateTime.add(now, values.retention_seconds, :second)
-         },
-         :ok <- deps.repository.insert_artifact(artifact, quotas(deps)) do
-      {:ok,
-       struct!(
-         ArtifactMetadata,
-         Map.take(Map.from_struct(artifact), [
-           :id,
-           :name,
-           :digest,
-           :size,
-           :created_at,
-           :expires_at
-         ])
-       )}
+         {:ok, blob} <- deps.blob_store.put(values.content) do
+      now = DateTime.truncate(deps.clock.now(), :microsecond)
+
+      artifact = %Artifact{
+        id: deps.id_generator.generate(),
+        repository_id: values.repository_id,
+        attempt_id: values.attempt_id,
+        name: values.name,
+        blob_id: blob.blob_id,
+        digest: blob.digest,
+        size: blob.size,
+        created_at: now,
+        expires_at: DateTime.add(now, values.retention_seconds, :second)
+      }
+
+      case deps.repository.insert_artifact(artifact, quotas(deps)) do
+        :ok -> {:ok, metadata(artifact)}
+        {:error, reason} -> reject_blob(blob.blob_id, now, reason, deps)
+      end
     end
   end
 
@@ -49,6 +42,26 @@ defmodule Robine.Storage.UseCases.UploadArtifact do
       instance_bytes: deps.instance_quota_bytes,
       repository_bytes: deps.repository_quota_bytes
     }
+  end
+
+  defp metadata(artifact) do
+    struct!(
+      ArtifactMetadata,
+      Map.take(Map.from_struct(artifact), [
+        :id,
+        :name,
+        :digest,
+        :size,
+        :created_at,
+        :expires_at
+      ])
+    )
+  end
+
+  defp reject_blob(blob_id, now, reason, deps) do
+    not_before = DateTime.add(now, deps.gc_grace_seconds, :second)
+    _ = deps.repository.stage_blob_gc(blob_id, not_before, now)
+    {:error, reason}
   end
 
   defp validate(input) do

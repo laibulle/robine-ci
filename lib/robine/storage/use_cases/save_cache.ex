@@ -12,25 +12,25 @@ defmodule Robine.Storage.UseCases.SaveCache do
       })
       when role in [:administrator, :maintainer] do
     with {:ok, values} <- validate(input),
-         {:ok, blob} <- deps.blob_store.put(values.content),
-         now = DateTime.truncate(deps.clock.now(), :microsecond),
-         cache = %CacheEntry{
-           id: deps.id_generator.generate(),
-           repository_id: values.repository_id,
-           key: values.key,
-           blob_id: blob.blob_id,
-           digest: blob.digest,
-           size: blob.size,
-           created_at: now,
-           expires_at: DateTime.add(now, values.retention_seconds, :second),
-           last_restored_at: nil
-         },
-         :ok <- deps.repository.upsert_cache(cache, quotas(deps)) do
-      {:ok,
-       struct!(
-         CacheMetadata,
-         Map.take(Map.from_struct(cache), [:key, :digest, :size, :created_at, :expires_at])
-       )}
+         {:ok, blob} <- deps.blob_store.put(values.content) do
+      now = DateTime.truncate(deps.clock.now(), :microsecond)
+
+      cache = %CacheEntry{
+        id: deps.id_generator.generate(),
+        repository_id: values.repository_id,
+        key: values.key,
+        blob_id: blob.blob_id,
+        digest: blob.digest,
+        size: blob.size,
+        created_at: now,
+        expires_at: DateTime.add(now, values.retention_seconds, :second),
+        last_restored_at: nil
+      }
+
+      case deps.repository.upsert_cache(cache, quotas(deps)) do
+        :ok -> {:ok, metadata(cache)}
+        {:error, reason} -> reject_blob(blob.blob_id, now, reason, deps)
+      end
     end
   end
 
@@ -41,6 +41,19 @@ defmodule Robine.Storage.UseCases.SaveCache do
       instance_bytes: deps.instance_quota_bytes,
       repository_bytes: deps.repository_quota_bytes
     }
+  end
+
+  defp metadata(cache) do
+    struct!(
+      CacheMetadata,
+      Map.take(Map.from_struct(cache), [:key, :digest, :size, :created_at, :expires_at])
+    )
+  end
+
+  defp reject_blob(blob_id, now, reason, deps) do
+    not_before = DateTime.add(now, deps.gc_grace_seconds, :second)
+    _ = deps.repository.stage_blob_gc(blob_id, not_before, now)
+    {:error, reason}
   end
 
   defp validate(input) do

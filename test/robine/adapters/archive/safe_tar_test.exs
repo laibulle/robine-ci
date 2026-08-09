@@ -30,5 +30,36 @@ defmodule Robine.Adapters.Archive.SafeTarTest do
              SafeTar.validate_table(entries, 10, max_ratio: 10)
   end
 
+  test "applies the same attack policy to cache and artifact archives" do
+    assert :ok =
+             SafeTar.validate_workspace_table(
+               [entry("reports/result.xml", :regular, 100)],
+               50
+             )
+
+    for path <- ["../escape", "/absolute", "."] do
+      assert {:error, :unsafe_workspace_archive} =
+               SafeTar.validate_workspace_table([entry(path, :regular, 1)], 10)
+    end
+
+    for type <- [:symlink, :link, :char, :block, :fifo, :unknown] do
+      assert {:error, :unsupported_source_archive_entry} =
+               SafeTar.validate_workspace_table([entry("item", type, 1)], 10)
+    end
+  end
+
+  test "bounds cache and artifact file count, expanded size, and ratio" do
+    entries = [entry("a", :regular, 80), entry("b", :regular, 80)]
+
+    assert {:error, :unsafe_workspace_archive} =
+             SafeTar.validate_workspace_table(entries, 100, max_files: 1)
+
+    assert {:error, :unsafe_workspace_archive} =
+             SafeTar.validate_workspace_table(entries, 100, max_expanded_bytes: 100)
+
+    assert {:error, :unsafe_workspace_archive} =
+             SafeTar.validate_workspace_table(entries, 10, max_ratio: 10)
+  end
+
   defp entry(path, type, size), do: {String.to_charlist(path), type, size, 0, 0o644, 0, 0}
 end

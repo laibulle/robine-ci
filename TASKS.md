@@ -200,7 +200,7 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - **Depends on:** ARCH-002, DEC-003
 - [x] Implement a local storage adapter with opaque object IDs and content digests.
 - [ ] Stream into temporary objects and finalize atomically. (Temporary same-filesystem publication is atomic; streaming input remains.)
-- [ ] Enforce archive path, symlink, special-file, file-count, expanded-size, ratio, and time limits. (GitHub source TARs now receive bounded preflight before extraction; cache/artifact runner built-ins must reuse it.)
+- [x] Enforce archive path, symlink, special-file, file-count, expanded-size, ratio, and time limits for source, cache, and artifact archives.
 - [ ] Implement quotas, retention, reconciliation, and storage-pressure telemetry. (Atomic instance/repository logical quotas and hourly bounded retention with persistent, reference-safe blob GC are implemented; full filesystem reconciliation and pressure telemetry remain.)
 
 ### DATA-102 — Implement caches and artifacts

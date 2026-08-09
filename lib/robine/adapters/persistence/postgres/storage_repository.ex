@@ -2,7 +2,15 @@ defmodule Robine.Adapters.Persistence.Postgres.StorageRepository do
   @moduledoc false
   @behaviour Robine.Storage.Ports.Repository
   import Ecto.Query
-  alias Robine.Adapters.Persistence.Postgres.Schemas.{Artifact, Attempt, CacheEntry, Job}
+
+  alias Robine.Adapters.Persistence.Postgres.Schemas.{
+    Artifact,
+    Attempt,
+    CacheEntry,
+    Job,
+    StorageGcCandidate
+  }
+
   alias Robine.Repo
 
   @impl true
@@ -136,6 +144,16 @@ defmodule Robine.Adapters.Persistence.Postgres.StorageRepository do
 
   defp integer_size(%Decimal{} = size), do: Decimal.to_integer(size)
   defp integer_size(size) when is_integer(size), do: size
+
+  @impl true
+  def stage_blob_gc(blob_id, not_before, now) do
+    %StorageGcCandidate{blob_id: blob_id, not_before: not_before, inserted_at: now}
+    |> Repo.insert(on_conflict: :nothing, conflict_target: [:blob_id])
+    |> case do
+      {:ok, _candidate} -> :ok
+      {:error, changeset} -> {:error, {:blob_gc_persistence, changeset}}
+    end
+  end
 
   @impl true
   def get_cache(repository_id, key) do

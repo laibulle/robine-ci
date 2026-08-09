@@ -10,4 +10,5 @@ defmodule Robine.Storage.Ports.Repository do
   @callback get_cache(String.t(), String.t()) ::
               {:ok, CacheEntry.t()} | {:error, :not_found | term()}
   @callback touch_cache(String.t(), DateTime.t()) :: :ok | {:error, term()}
+  @callback stage_blob_gc(String.t(), DateTime.t(), DateTime.t()) :: :ok | {:error, term()}
 end
