@@ -22,15 +22,19 @@ defmodule Robine.Adapters.Security.AesGcmCipher do
       when is_binary(ciphertext) and is_binary(nonce) and byte_size(nonce) == 12 and
              is_binary(tag) and byte_size(tag) == 16 and is_integer(version) and version > 0 and
              is_binary(aad) do
-    with {:ok, key} <- key(version) do
-      case :crypto.crypto_one_time_aead(:aes_256_gcm, key, nonce, ciphertext, aad, tag, false) do
-        :error -> {:error, :authentication_failed}
-        plaintext -> {:ok, plaintext}
-      end
+    case key(version) do
+      {:ok, key} ->
+        case :crypto.crypto_one_time_aead(:aes_256_gcm, key, nonce, ciphertext, aad, tag, false) do
+          :error -> decryption_error(:authentication_failed)
+          plaintext -> {:ok, plaintext}
+        end
+
+      {:error, reason} ->
+        decryption_error(reason)
     end
   end
 
-  def decrypt(_encrypted, _aad), do: {:error, :invalid_ciphertext}
+  def decrypt(_encrypted, _aad), do: decryption_error(:invalid_ciphertext)
 
   @spec validate_configuration!() :: :ok
   def validate_configuration! do
@@ -71,5 +75,15 @@ defmodule Robine.Adapters.Security.AesGcmCipher do
       configuration when is_map(configuration) -> configuration
       _configuration -> %{}
     end
+  end
+
+  defp decryption_error(reason) do
+    :telemetry.execute(
+      [:robine, :secrets, :decryption_failure],
+      %{count: 1},
+      %{reason: reason}
+    )
+
+    {:error, reason}
   end
 end

@@ -56,6 +56,16 @@ defmodule Robine.Adapters.Persistence.Postgres.SecretRepository do
                  (secret.scope == :instance and ^repository_id in secret.allowed_repository_ids))
       )
 
+    missing_count = length(Enum.uniq(names)) - length(schemas)
+
+    if missing_count > 0 do
+      :telemetry.execute(
+        [:robine, :secrets, :missing_reference],
+        %{count: missing_count},
+        %{}
+      )
+    end
+
     {:ok, Enum.map(schemas, &to_domain/1)}
   end
 

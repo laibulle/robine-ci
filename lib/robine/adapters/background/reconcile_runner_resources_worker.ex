@@ -14,8 +14,17 @@ defmodule Robine.Adapters.Background.ReconcileRunnerResourcesWorker do
       )
 
     with {:ok, active_ids} <- Pipelines.list_active_attempt_ids(%{}, context),
-         {:ok, _result} <-
+         {:ok, result} <-
            Execution.reconcile_resources(%{active_attempt_ids: active_ids}, context) do
+      :telemetry.execute(
+        [:robine, :runner, :orphans],
+        %{
+          containers: result.containers_removed,
+          volumes: result.volumes_removed
+        },
+        %{}
+      )
+
       :ok
     end
   end

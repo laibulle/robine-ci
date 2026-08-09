@@ -6,6 +6,7 @@ defmodule RobineWeb.GitHubWebhookController do
   alias Robine.Runtime.Dependencies
 
   def create(conn, _params) do
+    started = System.monotonic_time()
     delivery_id = get_req_header(conn, "x-github-delivery") |> List.first()
     event = get_req_header(conn, "x-github-event") |> List.first()
     signature = get_req_header(conn, "x-hub-signature-256") |> List.first()
@@ -30,6 +31,12 @@ defmodule RobineWeb.GitHubWebhookController do
       outcome: outcome(result)
     })
 
+    :telemetry.execute(
+      [:robine, :github, :webhook],
+      %{count: 1, duration: System.monotonic_time() - started},
+      %{outcome: outcome(result), event: bounded_event(event)}
+    )
+
     case result do
       {:ok, :accepted} ->
         conn |> put_status(:accepted) |> json(%{status: "accepted"})
@@ -53,4 +60,9 @@ defmodule RobineWeb.GitHubWebhookController do
   defp outcome({:ok, result}), do: result
   defp outcome({:error, :invalid_signature}), do: :invalid_signature
   defp outcome({:error, _reason}), do: :error
+
+  defp bounded_event(event) when event in ["push", "pull_request", "ping"],
+    do: String.to_existing_atom(event)
+
+  defp bounded_event(_event), do: :other
 end

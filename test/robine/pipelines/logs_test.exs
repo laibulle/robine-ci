@@ -58,6 +58,7 @@ defmodule Robine.Pipelines.LogsTest do
     assert length(second.chunks) == 1
     refute second.has_more
     assert Enum.all?(first.chunks ++ second.chunks, &(&1.phase == "execution"))
+    assert Enum.all?(first.chunks ++ second.chunks, &(&1.stream == "combined"))
     assert Enum.map_join(first.chunks ++ second.chunks, & &1.content) == output
 
     assert {:ok, %{attempt: %{id: attempt_id}, job: %{id: job_id}}} =
@@ -65,5 +66,44 @@ defmodule Robine.Pipelines.LogsTest do
 
     assert attempt_id == attempt.id
     assert job_id == attempt.job_id
+  end
+
+  test "persists the runner stream channel without changing the global cursor" do
+    context = Dependencies.context(%{id: "admin", role: :administrator}, "log-channels")
+
+    assert {:ok, pipeline} =
+             Pipelines.create_pipeline(
+               %{
+                 repository_id: Ecto.UUID.generate(),
+                 workflow_name: "CI",
+                 commit_sha: String.duplicate("a", 40),
+                 jobs: %{"compile" => %{needs: []}}
+               },
+               context
+             )
+
+    assert {:ok, _queued} = Pipelines.queue_pipeline(%{pipeline_id: pipeline.id}, context)
+    assert {:ok, attempt} = Pipelines.claim_next_job(%{}, context)
+
+    assert :ok =
+             Pipelines.append_log_event(
+               %{
+                 attempt_id: attempt.id,
+                 sequence: 42,
+                 phase: :execution,
+                 stream: :stderr,
+                 step_position: 1,
+                 step_name: "Compile",
+                 status: :running,
+                 duration_ms: 8,
+                 content: "warning\n"
+               },
+               context
+             )
+
+    chunk = Repo.one!(LogChunk)
+    assert chunk.sequence == 42
+    assert chunk.stream == "stderr"
+    assert chunk.content == "warning\n"
   end
 end

@@ -82,7 +82,8 @@ defmodule Robine.Repositories.GitHubDeliveryTest do
              repository_id: ^repository_id,
              commit_sha: ^sha,
              trigger: "push",
-             actor: "github:octocat"
+             actor: "github:octocat",
+             correlation_id: "github-test"
            } =
              Repo.get!(Pipeline, pipeline_id)
 

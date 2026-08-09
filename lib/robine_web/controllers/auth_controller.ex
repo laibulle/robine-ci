@@ -12,12 +12,16 @@ defmodule RobineWeb.AuthController do
     if LoginRateLimiter.allowed?({conn.remote_ip, :local_login}) do
       case Identities.authenticate_local(%{email: email, password: password}, context(conn)) do
         {:ok, session} ->
+          identity_event(:login, %{method: :local, outcome: :success})
           signed_in(conn, session)
 
         {:error, _reason} ->
+          identity_event(:login, %{method: :local, outcome: :failure})
           conn |> put_flash(:error, "Invalid email or password.") |> redirect(to: ~p"/sign-in")
       end
     else
+      identity_event(:rate_limit, %{method: :local})
+
       conn
       |> put_status(:too_many_requests)
       |> put_flash(:error, "Too many attempts. Try again in one minute.")
@@ -40,6 +44,8 @@ defmodule RobineWeb.AuthController do
           |> redirect(external: authorization.url)
 
         {:error, _reason} ->
+          identity_event(:oidc_failure, %{phase: :authorization})
+
           conn
           |> put_flash(
             :error,
@@ -48,6 +54,8 @@ defmodule RobineWeb.AuthController do
           |> redirect(to: ~p"/sign-in")
       end
     else
+      identity_event(:rate_limit, %{method: :oidc})
+
       conn
       |> put_status(:too_many_requests)
       |> put_flash(:error, "Too many attempts. Try again in one minute.")
@@ -71,9 +79,13 @@ defmodule RobineWeb.AuthController do
 
     case result do
       {:ok, session} ->
+        identity_event(:login, %{method: :oidc, outcome: :success})
         signed_in(conn, session)
 
       {:error, _reason} ->
+        identity_event(:login, %{method: :oidc, outcome: :failure})
+        identity_event(:oidc_failure, %{phase: :callback})
+
         conn
         |> put_flash(
           :error,
@@ -97,8 +109,13 @@ defmodule RobineWeb.AuthController do
     do: conn |> put_flash(:error, "All fields are required.") |> render(:bootstrap)
 
   def delete(conn, _params) do
-    if token = get_session(conn, :session_token),
-      do: Identities.revoke_session(%{token: token}, context(conn))
+    if token = get_session(conn, :session_token) do
+      result = Identities.revoke_session(%{token: token}, context(conn))
+
+      identity_event(:session_revocation, %{
+        outcome: if(result == :ok, do: :success, else: :failure)
+      })
+    end
 
     conn |> clear_session() |> configure_session(drop: true) |> redirect(to: ~p"/sign-in")
   end
@@ -125,4 +142,8 @@ defmodule RobineWeb.AuthController do
   defp bootstrap_error(:weak_password), do: "Use at least 12 characters."
   defp bootstrap_error(_reason), do: "Setup could not be completed. Check the token and fields."
   defp oidc_enabled?, do: not is_nil(Application.get_env(:robine, :oidc_config))
+
+  defp identity_event(event, metadata) do
+    :telemetry.execute([:robine, :identity, event], %{count: 1}, metadata)
+  end
 end

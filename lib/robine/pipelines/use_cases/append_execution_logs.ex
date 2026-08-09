@@ -47,6 +47,7 @@ defmodule Robine.Pipelines.UseCases.AppendExecutionLogs do
     {:ok,
      %{
        phase: "execution",
+       stream: "combined",
        step_name: name,
        step_status: to_string(status),
        exit_code: Map.get(step, :exit_code),

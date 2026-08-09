@@ -120,6 +120,10 @@ if bootstrap_token = System.get_env("ROBINE_BOOTSTRAP_TOKEN") do
     bootstrap_expires_at: DateTime.add(DateTime.utc_now(), 900, :second)
 end
 
+if metrics_token = System.get_env("ROBINE_METRICS_TOKEN") do
+  config :robine, :metrics_token_hash, :crypto.hash(:sha256, metrics_token)
+end
+
 case {System.get_env("OIDC_ISSUER"), System.get_env("OIDC_CLIENT_ID"),
       System.get_env("OIDC_CLIENT_SECRET")} do
   {issuer, client_id, client_secret}

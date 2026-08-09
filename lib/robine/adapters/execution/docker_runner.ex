@@ -218,6 +218,7 @@ defmodule Robine.Adapters.Execution.DockerRunner do
       status: status,
       exit_code: if(status == :failed, do: 1, else: nil),
       duration_ms: System.monotonic_time(:millisecond) - started,
+      stream: :system,
       content: content
     })
   end
@@ -428,7 +429,7 @@ defmodule Robine.Adapters.Execution.DockerRunner do
            Map.values(specification.secrets),
            resource,
            cancel_requested,
-           &emit_output(on_output, step, position, started, &1, &2)
+           &emit_output(on_output, step, position, started, &1, &2, &3)
          ) do
       {:ok, output, chunk_count} ->
         duration = System.monotonic_time(:millisecond) - started
@@ -597,7 +598,7 @@ defmodule Robine.Adapters.Execution.DockerRunner do
     end
   end
 
-  defp emit_output(on_output, step, position, started, chunk, chunk_index) do
+  defp emit_output(on_output, step, position, started, chunk, chunk_index, stream) do
     on_output.(%{
       sequence: position * 1_000_000 + chunk_index,
       phase: :execution,
@@ -605,6 +606,7 @@ defmodule Robine.Adapters.Execution.DockerRunner do
       step_name: step.name,
       status: :running,
       duration_ms: System.monotonic_time(:millisecond) - started,
+      stream: stream,
       content: chunk
     })
   end
@@ -618,6 +620,7 @@ defmodule Robine.Adapters.Execution.DockerRunner do
       status: status,
       exit_code: exit_code,
       duration_ms: duration,
+      stream: :system,
       content: ""
     })
   end
@@ -634,26 +637,30 @@ defmodule Robine.Adapters.Execution.DockerRunner do
 
   defp docker_stream(args, timeout_ms, secret_values, resource, cancel_requested, on_chunk) do
     with executable when is_binary(executable) <- System.find_executable("docker"),
-         {:ok, redactor} <- Redactor.new(secret_values) do
-      port =
-        Port.open({:spawn_executable, executable}, [
-          :binary,
-          :exit_status,
-          :use_stdio,
-          :stderr_to_stdout,
-          args: args
-        ])
+         {:ok, stdout_redactor} <- Redactor.new(secret_values),
+         {:ok, stderr_redactor} <- Redactor.new(secret_values) do
+      parent = self()
+      task = Task.async(fn -> stream_command(parent, executable, args) end)
+      task_pid = task.pid
+
+      process =
+        receive do
+          {:stream_started, ^task_pid, process} -> process
+        after
+          5_000 -> raise "docker stream failed to start"
+        end
 
       deadline = System.monotonic_time(:millisecond) + timeout_ms
 
       stream_receive(
-        port,
+        task,
+        process,
         deadline,
         on_chunk,
         resource,
         cancel_requested,
         %{
-          redactor: redactor,
+          redactors: %{stdout: stdout_redactor, stderr: stderr_redactor},
           output: [],
           output_bytes: 0,
           truncated: false,
@@ -674,77 +681,142 @@ defmodule Robine.Adapters.Execution.DockerRunner do
        }}
   end
 
-  defp stream_receive(port, deadline, on_chunk, resource, cancel_requested, state) do
+  defp stream_command(parent, executable, args) do
+    {:ok, process} = Exile.Process.start_link([executable | args], stderr: :consume)
+    send(parent, {:stream_started, self(), process})
+    read_stream(process, parent)
+  end
+
+  defp read_stream(process, parent) do
+    case Exile.Process.read_any(process, 64_000) do
+      {:ok, {stream, data}} ->
+        send(parent, {:stream_data, self(), stream, IO.iodata_to_binary(data)})
+
+        receive do
+          {:stream_ack, ^parent} -> read_stream(process, parent)
+        end
+
+      :eof ->
+        {:ok, exit_status} = Exile.Process.await_exit(process, :infinity)
+        send(parent, {:stream_exit, self(), exit_status})
+
+      {:error, reason} ->
+        _ = Exile.Process.await_exit(process, 1_000)
+        send(parent, {:stream_error, self(), reason})
+    end
+  end
+
+  defp stream_receive(task, process, deadline, on_chunk, resource, cancel_requested, state) do
     remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+    task_pid = task.pid
 
     if cancel_requested.() do
-      cancel_running(port, resource, state)
+      cancel_running(task, process, resource, state)
     else
       receive do
-        {^port, {:data, data}} ->
-          {emitted, redactor} = Redactor.push(state.redactor, data)
+        {:stream_data, ^task_pid, stream, data} when stream in [:stdout, :stderr] ->
+          redactor = Map.fetch!(state.redactors, stream)
+          {emitted, redactor} = Redactor.push(redactor, data)
+          updated = %{state | redactors: Map.put(state.redactors, stream, redactor)}
 
-          case emit_stream_chunks(emitted, on_chunk, %{state | redactor: redactor}) do
+          case emit_stream_chunks(emitted, stream, on_chunk, updated) do
             {:ok, updated} ->
-              stream_receive(port, deadline, on_chunk, resource, cancel_requested, updated)
+              send(task.pid, {:stream_ack, self()})
+
+              stream_receive(
+                task,
+                process,
+                deadline,
+                on_chunk,
+                resource,
+                cancel_requested,
+                updated
+              )
 
             {:error, reason} ->
-              close_port(port, {:error, {:output_callback, reason}})
+              stop_stream(task, process)
+              {:error, {:output_callback, reason}}
           end
 
-        {^port, {:exit_status, exit_status}} ->
-          tail = Redactor.finish(state.redactor)
+        {:stream_exit, ^task_pid, exit_status} ->
+          case finish_streams(on_chunk, state) do
+            {:ok, updated} ->
+              _ = Task.await(task, 1_000)
+              stream_result(exit_status, updated)
 
-          case emit_stream_chunks(tail, on_chunk, state) do
-            {:ok, updated} -> stream_result(exit_status, updated)
-            {:error, reason} -> {:error, {:output_callback, reason}}
+            {:error, reason} ->
+              {:error, {:output_callback, reason}}
           end
+
+        {:stream_error, ^task_pid, reason} ->
+          _ = Task.await(task, 1_000)
+          {:error, %{exit_code: nil, output: inspect(reason), chunk_count: state.chunk_count}}
+
+        {:DOWN, ref, :process, _pid, reason} when ref == task.ref ->
+          {:error, %{exit_code: nil, output: inspect(reason), chunk_count: state.chunk_count}}
       after
         min(remaining, 250) ->
           if remaining <= 250,
-            do: timeout_running(port, state),
-            else: stream_receive(port, deadline, on_chunk, resource, cancel_requested, state)
+            do: timeout_running(task, process, state),
+            else:
+              stream_receive(
+                task,
+                process,
+                deadline,
+                on_chunk,
+                resource,
+                cancel_requested,
+                state
+              )
       end
     end
   end
 
-  defp cancel_running(port, resource, state) do
+  defp cancel_running(task, process, resource, state) do
     grace_ms = Application.fetch_env!(:robine, :runner_cancellation_grace_ms)
     grace_seconds = max(div(grace_ms + 999, 1_000), 1)
     _ = docker(["stop", "--time", Integer.to_string(grace_seconds), resource], grace_ms + 5_000)
+    stop_stream(task, process)
 
-    close_port(
-      port,
-      {:error,
-       %{
-         cancelled: true,
-         output: rendered_output(state) <> "\njob cancelled",
-         chunk_count: state.chunk_count
-       }}
-    )
+    {:error,
+     %{
+       cancelled: true,
+       output: rendered_output(state) <> "\njob cancelled",
+       chunk_count: state.chunk_count
+     }}
   end
 
-  defp timeout_running(port, state) do
-    close_port(
-      port,
-      {:error,
-       %{
-         exit_code: 124,
-         output: rendered_output(state) <> "\ncommand timed out",
-         chunk_count: state.chunk_count
-       }}
-    )
+  defp timeout_running(task, process, state) do
+    stop_stream(task, process)
+
+    {:error,
+     %{
+       exit_code: 124,
+       output: rendered_output(state) <> "\ncommand timed out",
+       chunk_count: state.chunk_count
+     }}
   end
 
-  defp emit_stream_chunks("", _on_chunk, state), do: {:ok, state}
+  defp finish_streams(on_chunk, state) do
+    Enum.reduce_while([:stdout, :stderr], {:ok, state}, fn stream, {:ok, current} ->
+      tail = current.redactors |> Map.fetch!(stream) |> Redactor.finish()
 
-  defp emit_stream_chunks(binary, on_chunk, state) do
+      case emit_stream_chunks(tail, stream, on_chunk, current) do
+        {:ok, updated} -> {:cont, {:ok, updated}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp emit_stream_chunks("", _stream, _on_chunk, state), do: {:ok, state}
+
+  defp emit_stream_chunks(binary, stream, on_chunk, state) do
     binary
     |> chunk_binary(64_000, [])
     |> Enum.reduce_while({:ok, state}, fn chunk, {:ok, current} ->
       index = current.chunk_count + 1
 
-      case on_chunk.(chunk, index) do
+      case on_chunk.(chunk, index, stream) do
         :ok -> {:cont, {:ok, current |> append_output(chunk) |> Map.put(:chunk_count, index)}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
@@ -799,11 +871,16 @@ defmodule Robine.Adapters.Execution.DockerRunner do
       {:error,
        %{exit_code: exit_status, output: rendered_output(state), chunk_count: state.chunk_count}}
 
-  defp close_port(port, result) do
-    Port.close(port)
-    result
-  rescue
-    _error -> result
+  defp stop_stream(task, process) do
+    _ =
+      try do
+        Exile.Process.kill(process, :sigterm)
+      catch
+        :exit, _reason -> :ok
+      end
+
+    _ = Task.shutdown(task, 1_000)
+    :ok
   end
 
   defp docker(args, timeout_ms \\ 30_000) do

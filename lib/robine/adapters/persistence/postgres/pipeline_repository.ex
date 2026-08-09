@@ -36,13 +36,35 @@ defmodule Robine.Adapters.Persistence.Postgres.PipelineRepository do
         {:error, :not_found}
 
       schema ->
-        schema
-        |> PipelineSchema.changeset(Map.from_struct(pipeline))
-        |> Repo.update()
-        |> case do
-          {:ok, _schema} -> :ok
-          {:error, changeset} -> {:error, {:persistence, changeset}}
+        result =
+          schema
+          |> PipelineSchema.changeset(Map.from_struct(pipeline))
+          |> Repo.update()
+          |> case do
+            {:ok, _schema} -> :ok
+            {:error, changeset} -> {:error, {:persistence, changeset}}
+          end
+
+        if schema.status != pipeline.status do
+          :telemetry.execute(
+            [:robine, :pipeline, :transition],
+            %{count: 1},
+            %{entity: :pipeline, outcome: if(result == :ok, do: :ok, else: :error)}
+          )
         end
+
+        if result == :ok and pipeline.status in [:succeeded, :failed, :cancelled] and
+             not is_nil(pipeline.started_at) and not is_nil(pipeline.finished_at) do
+          :telemetry.execute(
+            [:robine, :pipeline, :duration],
+            %{
+              duration: DateTime.diff(pipeline.finished_at, pipeline.started_at, :millisecond)
+            },
+            %{outcome: pipeline.status}
+          )
+        end
+
+        result
     end
   end
 
@@ -84,6 +106,7 @@ defmodule Robine.Adapters.Persistence.Postgres.PipelineRepository do
       commit_sha: schema.commit_sha,
       trigger: schema.trigger,
       actor: schema.actor,
+      correlation_id: schema.correlation_id,
       status: schema.status,
       inserted_at: schema.inserted_at,
       started_at: schema.started_at,

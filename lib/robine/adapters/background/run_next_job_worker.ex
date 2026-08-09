@@ -35,9 +35,15 @@ defmodule Robine.Adapters.Background.RunNextJobWorker do
         })
 
         execute(attempt, attempt_context)
-      {:error, :none} -> :ok
-      {:error, :capacity} -> {:snooze, 1}
-      {:error, reason} -> {:error, reason}
+
+      {:error, :none} ->
+        :ok
+
+      {:error, :capacity} ->
+        {:snooze, 1}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -45,15 +51,16 @@ defmodule Robine.Adapters.Background.RunNextJobWorker do
     with {:ok, _preparing} <- record(attempt, 1, :preparing, nil, context),
          {:ok, raw_specification} <-
            Pipelines.job_execution(%{idempotency_token: attempt.idempotency_token}, context),
-         :ok <- log_execution_start(attempt, raw_specification, context),
-         {:ok, source_path} <- materialize_source(raw_specification, context),
+         correlated_context = correlate(context, raw_specification),
+         :ok <- log_execution_start(attempt, raw_specification, correlated_context),
+         {:ok, source_path} <- materialize_source(raw_specification, correlated_context),
          {:ok, specification} <-
            Execution.build_ci_specification(
              %{persisted: raw_specification, source_path: source_path},
-             context
+             correlated_context
            ) do
       try do
-        execute_specification(attempt, raw_specification, specification, context)
+        execute_specification(attempt, raw_specification, specification, correlated_context)
       after
         cleanup_source(source_path)
       end
@@ -90,6 +97,12 @@ defmodule Robine.Adapters.Background.RunNextJobWorker do
       "runner.attempt.completed",
       execution_metadata(attempt, raw, context)
       |> Map.put(:outcome, execution_outcome(execution_result))
+    )
+
+    :telemetry.execute(
+      [:robine, :runner, :exit],
+      %{count: 1},
+      %{reason: execution_outcome(execution_result)}
     )
 
     case execution_result do
@@ -176,8 +189,52 @@ defmodule Robine.Adapters.Background.RunNextJobWorker do
   defp record_result(attempt, %{status: :cancelled}, context),
     do: record(attempt, 3, :cancelled, :cancelled, context)
 
-  defp persist_log_event(attempt_id, event, context),
-    do: Pipelines.append_log_event(Map.put(event, :attempt_id, attempt_id), context)
+  defp persist_log_event(attempt_id, event, context) do
+    result = Pipelines.append_log_event(Map.put(event, :attempt_id, attempt_id), context)
+
+    if result == :ok do
+      :telemetry.execute(
+        [:robine, :runner, :logs],
+        %{bytes: byte_size(Map.get(event, :content, ""))},
+        %{phase: Map.get(event, :phase, :execution)}
+      )
+
+      redaction_matches =
+        event
+        |> Map.get(:content, "")
+        |> :binary.matches("[REDACTED]")
+        |> length()
+
+      if redaction_matches > 0 do
+        :telemetry.execute(
+          [:robine, :secrets, :redaction, :match],
+          %{count: redaction_matches},
+          %{}
+        )
+      end
+
+      if Map.get(event, :status) in [:succeeded, :failed, :cancelled, :timed_out] do
+        :telemetry.execute(
+          [:robine, :runner, :phase],
+          %{duration: Map.get(event, :duration_ms, 0)},
+          %{
+            phase: Map.get(event, :phase, :execution),
+            outcome: Map.get(event, :status)
+          }
+        )
+
+        if Map.get(event, :phase) == :image_acquisition do
+          :telemetry.execute(
+            [:robine, :runner, :image_pull],
+            %{duration: Map.get(event, :duration_ms, 0)},
+            %{outcome: Map.get(event, :status)}
+          )
+        end
+      end
+    end
+
+    result
+  end
 
   defp cancellation_requested?(token, context) do
     case Pipelines.cancellation_requested(%{idempotency_token: token}, context) do
@@ -305,4 +362,10 @@ defmodule Robine.Adapters.Background.RunNextJobWorker do
 
   defp execution_outcome({:ok, status}), do: status
   defp execution_outcome({:error, _reason}), do: :system_failure
+
+  defp correlate(context, %{"correlation_id" => correlation_id})
+       when is_binary(correlation_id) and correlation_id != "",
+       do: %{context | correlation_id: correlation_id}
+
+  defp correlate(context, _raw), do: context
 end

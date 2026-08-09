@@ -65,6 +65,10 @@ defmodule RobineWeb.Router do
     get "/ready", HealthController, :ready
   end
 
+  scope "/", RobineWeb do
+    get "/metrics", MetricsController, :index
+  end
+
   # Other scopes may use custom stacks.
   # scope "/api", RobineWeb do
   #   pipe_through :api

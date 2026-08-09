@@ -10,6 +10,7 @@ defmodule Robine.Pipelines.Domain.Pipeline do
     :commit_sha,
     :trigger,
     :actor,
+    :correlation_id,
     :status,
     :inserted_at
   ]
@@ -20,6 +21,7 @@ defmodule Robine.Pipelines.Domain.Pipeline do
     :commit_sha,
     :trigger,
     :actor,
+    :correlation_id,
     :status,
     :inserted_at,
     :started_at,
@@ -43,6 +45,7 @@ defmodule Robine.Pipelines.Domain.Pipeline do
           commit_sha: String.t(),
           trigger: String.t(),
           actor: String.t(),
+          correlation_id: String.t(),
           status: status(),
           inserted_at: DateTime.t(),
           started_at: DateTime.t() | nil,
@@ -62,6 +65,7 @@ defmodule Robine.Pipelines.Domain.Pipeline do
          commit_sha: commit_sha,
          trigger: optional_label(input, :trigger, "manual"),
          actor: optional_label(input, :actor, "system"),
+         correlation_id: optional_label(input, :correlation_id, "unknown"),
          status: :created,
          inserted_at: DateTime.truncate(now, :microsecond),
          started_at: nil,

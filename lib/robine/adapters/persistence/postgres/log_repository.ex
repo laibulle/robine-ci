@@ -32,6 +32,7 @@ defmodule Robine.Adapters.Persistence.Postgres.LogRepository do
           select: %{
             sequence: chunk.sequence,
             phase: chunk.phase,
+            stream: chunk.stream,
             step_position: chunk.step_position,
             step_name: chunk.step_name,
             step_status: chunk.step_status,

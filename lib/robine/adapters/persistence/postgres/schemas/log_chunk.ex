@@ -8,6 +8,7 @@ defmodule Robine.Adapters.Persistence.Postgres.Schemas.LogChunk do
     field :attempt_id, :binary_id
     field :sequence, :integer
     field :phase, :string
+    field :stream, :string, default: "combined"
     field :step_position, :integer
     field :step_name, :string
     field :step_status, :string
@@ -23,6 +24,7 @@ defmodule Robine.Adapters.Persistence.Postgres.Schemas.LogChunk do
       :attempt_id,
       :sequence,
       :phase,
+      :stream,
       :step_position,
       :step_name,
       :step_status,
@@ -34,6 +36,7 @@ defmodule Robine.Adapters.Persistence.Postgres.Schemas.LogChunk do
       :attempt_id,
       :sequence,
       :phase,
+      :stream,
       :step_position,
       :step_name,
       :step_status,

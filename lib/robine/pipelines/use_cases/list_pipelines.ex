@@ -20,6 +20,7 @@ defmodule Robine.Pipelines.UseCases.ListPipelines do
            :commit_sha,
            :trigger,
            :actor,
+           :correlation_id,
            :status,
            :inserted_at,
            :started_at,

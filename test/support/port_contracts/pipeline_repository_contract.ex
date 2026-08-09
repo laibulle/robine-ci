@@ -45,6 +45,7 @@ defmodule Robine.TestSupport.PortContracts.PipelineRepositoryContract do
           commit_sha: String.duplicate("c", 40),
           trigger: "manual",
           actor: "port-contract",
+          correlation_id: "port-contract",
           status: :created,
           inserted_at: ~U[2026-08-09 12:00:00.000000Z]
         }

@@ -1,6 +1,9 @@
 defmodule RobineWeb.Telemetry do
   use Supervisor
-  import Telemetry.Metrics
+  import Telemetry.Metrics, except: [distribution: 2]
+
+  @duration_buckets [1, 5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 15_000, 30_000]
+  @byte_buckets [1_024, 4_096, 16_384, 65_536, 262_144, 1_048_576, 4_194_304, 16_777_216]
 
   def start_link(arg) do
     Supervisor.start_link(__MODULE__, arg, name: __MODULE__)
@@ -9,6 +12,8 @@ defmodule RobineWeb.Telemetry do
   @impl true
   def init(_arg) do
     children = [
+      {TelemetryMetricsPrometheus.Core,
+       metrics: metrics(), name: :robine_prometheus, start_async: false},
       # Telemetry poller will execute the given period measurements
       # every 10_000ms. Learn more here: https://telemetry-metrics.hexdocs.pm
       {:telemetry_poller, measurements: periodic_measurements(), period: 10_000}
@@ -22,64 +27,64 @@ defmodule RobineWeb.Telemetry do
   def metrics do
     [
       # Phoenix Metrics
-      summary("phoenix.endpoint.start.system_time",
+      last_value("phoenix.endpoint.start.system_time",
         unit: {:native, :millisecond}
       ),
-      summary("phoenix.endpoint.stop.duration",
+      distribution("phoenix.endpoint.stop.duration",
         unit: {:native, :millisecond}
       ),
-      summary("phoenix.router_dispatch.start.system_time",
+      last_value("phoenix.router_dispatch.start.system_time",
         tags: [:route],
         unit: {:native, :millisecond}
       ),
-      summary("phoenix.router_dispatch.exception.duration",
+      distribution("phoenix.router_dispatch.exception.duration",
         tags: [:route],
         unit: {:native, :millisecond}
       ),
-      summary("phoenix.router_dispatch.stop.duration",
+      distribution("phoenix.router_dispatch.stop.duration",
         tags: [:route],
         unit: {:native, :millisecond}
       ),
-      summary("phoenix.socket_connected.duration",
+      distribution("phoenix.socket_connected.duration",
         unit: {:native, :millisecond}
       ),
       sum("phoenix.socket_drain.count"),
-      summary("phoenix.channel_joined.duration",
+      distribution("phoenix.channel_joined.duration",
         unit: {:native, :millisecond}
       ),
-      summary("phoenix.channel_handled_in.duration",
+      distribution("phoenix.channel_handled_in.duration",
         tags: [:event],
         unit: {:native, :millisecond}
       ),
 
       # Database Metrics
-      summary("robine.repo.query.total_time",
+      distribution("robine.repo.query.total_time",
         unit: {:native, :millisecond},
         description: "The sum of the other measurements"
       ),
-      summary("robine.repo.query.decode_time",
+      distribution("robine.repo.query.decode_time",
         unit: {:native, :millisecond},
         description: "The time spent decoding the data received from the database"
       ),
-      summary("robine.repo.query.query_time",
+      distribution("robine.repo.query.query_time",
         unit: {:native, :millisecond},
         description: "The time spent executing the query"
       ),
-      summary("robine.repo.query.queue_time",
+      distribution("robine.repo.query.queue_time",
         unit: {:native, :millisecond},
         description: "The time spent waiting for a database connection"
       ),
-      summary("robine.repo.query.idle_time",
+      distribution("robine.repo.query.idle_time",
         unit: {:native, :millisecond},
         description:
           "The time the connection spent waiting before being checked out for the query"
       ),
 
       # VM Metrics
-      summary("vm.memory.total", unit: {:byte, :kilobyte}),
-      summary("vm.total_run_queue_lengths.total"),
-      summary("vm.total_run_queue_lengths.cpu"),
-      summary("vm.total_run_queue_lengths.io"),
+      last_value("vm.memory.total", unit: {:byte, :kilobyte}),
+      last_value("vm.total_run_queue_lengths.total"),
+      last_value("vm.total_run_queue_lengths.cpu"),
+      last_value("vm.total_run_queue_lengths.io"),
       counter("robine.outbox.delivery.count", tags: [:outcome]),
       sum("robine.outbox.reconciliation.count"),
       sum("robine.secrets.rotation.count", tags: [:from_version, :to_version]),
@@ -94,19 +99,109 @@ defmodule RobineWeb.Telemetry do
       last_value("robine.storage.pressure.available_bytes", tags: [:status]),
       last_value("robine.storage.pressure.used_percent", tags: [:status]),
       counter("robine.github.api.request.count", tags: [:method, :outcome, :status]),
-      summary("robine.github.api.request.duration",
+      distribution("robine.github.api.request.duration",
         tags: [:method, :outcome, :status],
         unit: {:native, :millisecond}
       ),
       last_value("robine.github.api.request.rate_limit_remaining"),
       last_value("robine.github.api.request.rate_limit_limit"),
-      last_value("robine.github.api.request.rate_limit_reset")
+      last_value("robine.github.api.request.rate_limit_reset"),
+
+      # Workflow validation
+      counter("robine.workflow.validation.count", tags: [:outcome, :schema_version]),
+      distribution("robine.workflow.validation.duration",
+        tags: [:outcome, :schema_version],
+        unit: {:native, :millisecond}
+      ),
+
+      # Durable scheduling and pipeline state
+      last_value("robine.queue.depth"),
+      last_value("robine.queue.oldest_age", unit: :second),
+      last_value("robine.pipeline.state.count", tags: [:status]),
+      last_value("robine.job.state.count", tags: [:status]),
+      counter("robine.pipeline.transition.count", tags: [:entity, :outcome]),
+      distribution("robine.pipeline.duration", tags: [:outcome], unit: :millisecond),
+      counter("robine.pipeline.retry.count", tags: [:outcome]),
+      distribution("robine.scheduler.dispatch.duration",
+        tags: [:outcome],
+        unit: {:native, :millisecond}
+      ),
+
+      # Local runner
+      last_value("robine.runner.attempts.active"),
+      last_value("robine.runner.attempts.queued"),
+      last_value("robine.runner.leases.expired"),
+      distribution("robine.runner.phase.duration", tags: [:phase, :outcome], unit: :millisecond),
+      distribution("robine.runner.image_pull.duration", tags: [:outcome], unit: :millisecond),
+      sum("robine.runner.logs.bytes", tags: [:phase]),
+      distribution("robine.runner.cancellation.duration", tags: [:outcome], unit: :millisecond),
+      counter("robine.runner.cleanup.count", tags: [:outcome]),
+      last_value("robine.runner.orphans.containers"),
+      last_value("robine.runner.orphans.volumes"),
+      counter("robine.runner.exit.count", tags: [:reason]),
+
+      # GitHub ingress and projections
+      counter("robine.github.webhook.count", tags: [:outcome, :event]),
+      distribution("robine.github.webhook.ack.duration",
+        tags: [:outcome, :event],
+        unit: {:native, :millisecond}
+      ),
+      distribution("robine.github.delivery.duration",
+        tags: [:outcome],
+        unit: {:native, :millisecond}
+      ),
+      counter("robine.github.check.reconciliation.count", tags: [:outcome]),
+
+      # Authentication and authorization
+      counter("robine.identity.login.count", tags: [:method, :outcome]),
+      counter("robine.identity.oidc.failure.count", tags: [:phase]),
+      counter("robine.identity.session.revocation.count", tags: [:outcome]),
+      counter("robine.identity.rate_limit.count", tags: [:method]),
+      counter("robine.identity.authorization.reject.count", tags: [:role, :surface]),
+
+      # Web experience
+      counter("robine.web.liveview.connection.count", tags: [:outcome]),
+      distribution("robine.web.page.duration",
+        tags: [:page, :outcome],
+        unit: {:native, :millisecond}
+      ),
+      distribution("robine.web.log_segment.duration",
+        tags: [:outcome],
+        unit: {:native, :millisecond}
+      ),
+      distribution("robine.web.payload.bytes", tags: [:page], unit: :byte),
+      counter("robine.web.action.failure.count", tags: [:action]),
+
+      # Complete storage and secret catalogue
+      counter("robine.storage.cache.request.count", tags: [:outcome]),
+      distribution("robine.storage.request.duration",
+        tags: [:operation, :outcome],
+        unit: {:native, :millisecond}
+      ),
+      counter("robine.storage.quota_denial.count", tags: [:scope]),
+      counter("robine.storage.eviction.count", tags: [:kind, :outcome]),
+      counter("robine.storage.corruption.count", tags: [:kind]),
+      counter("robine.storage.retry.count", tags: [:operation, :outcome]),
+      counter("robine.secrets.decryption_failure.count", tags: [:reason]),
+      counter("robine.secrets.missing_reference.count"),
+      sum("robine.secrets.redaction.match.count"),
+      last_value("robine.secrets.rotation.remaining")
     ]
   end
 
   defp periodic_measurements do
     [
-      {Robine.Runtime.Measurements, :storage_pressure, []}
+      {Robine.Runtime.Measurements, :storage_pressure, []},
+      {Robine.Runtime.Measurements, :operational_state, []}
     ]
+  end
+
+  defp distribution(name, options) do
+    buckets = if String.ends_with?(name, ".bytes"), do: @byte_buckets, else: @duration_buckets
+
+    Telemetry.Metrics.distribution(
+      name,
+      Keyword.put(options, :reporter_options, buckets: buckets)
+    )
   end
 end

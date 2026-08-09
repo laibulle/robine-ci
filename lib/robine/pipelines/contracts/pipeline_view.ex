@@ -10,6 +10,7 @@ defmodule Robine.Pipelines.Contracts.PipelineView do
     :commit_sha,
     :trigger,
     :actor,
+    :correlation_id,
     :status,
     :inserted_at
   ]
@@ -20,6 +21,7 @@ defmodule Robine.Pipelines.Contracts.PipelineView do
     :commit_sha,
     :trigger,
     :actor,
+    :correlation_id,
     :status,
     :inserted_at,
     :started_at,
@@ -33,6 +35,7 @@ defmodule Robine.Pipelines.Contracts.PipelineView do
           commit_sha: String.t(),
           trigger: String.t(),
           actor: String.t(),
+          correlation_id: String.t(),
           status: Pipeline.status(),
           inserted_at: DateTime.t(),
           started_at: DateTime.t() | nil,

@@ -12,6 +12,7 @@ defmodule Robine.Adapters.Persistence.Postgres.Schemas.Pipeline do
     field :commit_sha, :string
     field :trigger, :string
     field :actor, :string
+    field :correlation_id, :string
     field :status, Ecto.Enum, values: Robine.Pipelines.Domain.Pipeline.statuses()
     field :started_at, :utc_datetime_usec
     field :finished_at, :utc_datetime_usec
@@ -30,6 +31,7 @@ defmodule Robine.Adapters.Persistence.Postgres.Schemas.Pipeline do
       :commit_sha,
       :trigger,
       :actor,
+      :correlation_id,
       :status,
       :inserted_at,
       :started_at,
@@ -42,6 +44,7 @@ defmodule Robine.Adapters.Persistence.Postgres.Schemas.Pipeline do
       :commit_sha,
       :trigger,
       :actor,
+      :correlation_id,
       :status,
       :inserted_at
     ])

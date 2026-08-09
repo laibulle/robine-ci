@@ -37,9 +37,11 @@ defmodule Robine.Adapters.Persistence.Postgres.StorageRepository do
 
            cond do
              instance_usage + delta > quotas.instance_bytes ->
+               quota_denial(:instance)
                Repo.rollback({:quota_exceeded, :instance, quotas.instance_bytes})
 
              repository_usage + delta > quotas.repository_bytes ->
+               quota_denial(:repository)
                Repo.rollback({:quota_exceeded, :repository, quotas.repository_bytes})
 
              true ->
@@ -49,6 +51,10 @@ defmodule Robine.Adapters.Persistence.Postgres.StorageRepository do
       {:ok, :ok} -> :ok
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  defp quota_denial(scope) do
+    :telemetry.execute([:robine, :storage, :quota_denial], %{count: 1}, %{scope: scope})
   end
 
   @impl true
@@ -157,20 +163,39 @@ defmodule Robine.Adapters.Persistence.Postgres.StorageRepository do
 
   @impl true
   def get_cache(repository_id, key) do
-    case Repo.one(
-           from cache in CacheEntry,
-             where: cache.repository_id == ^repository_id and cache.key == ^key
-         ) do
-      nil ->
-        {:error, :not_found}
+    started = System.monotonic_time()
 
-      schema ->
-        {:ok,
-         struct!(
-           Robine.Storage.Domain.CacheEntry,
-           Map.from_struct(schema) |> Map.drop([:__meta__])
-         )}
-    end
+    result =
+      case Repo.one(
+             from cache in CacheEntry,
+               where: cache.repository_id == ^repository_id and cache.key == ^key
+           ) do
+        nil ->
+          {:error, :not_found}
+
+        schema ->
+          {:ok,
+           struct!(
+             Robine.Storage.Domain.CacheEntry,
+             Map.from_struct(schema) |> Map.drop([:__meta__])
+           )}
+      end
+
+    outcome = if match?({:ok, _cache}, result), do: :hit, else: :miss
+
+    :telemetry.execute(
+      [:robine, :storage, :cache, :request],
+      %{count: 1},
+      %{outcome: outcome}
+    )
+
+    :telemetry.execute(
+      [:robine, :storage, :request],
+      %{duration: System.monotonic_time() - started},
+      %{operation: :cache_restore, outcome: outcome}
+    )
+
+    result
   end
 
   @impl true

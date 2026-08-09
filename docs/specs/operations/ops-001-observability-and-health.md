@@ -2,10 +2,10 @@
 
 ## Status
 
-- **State:** Implementing
+- **State:** Accepted
 - **Owner:** Robine maintainers
 - **Target:** MVP
-- **Last updated:** 2026-08-08
+- **Last updated:** 2026-08-09
 
 ## Summary
 
@@ -69,6 +69,8 @@ The `Robine.Operations` facade delegates to an administrator-authorized health u
 
 The event outbox reports pending, five-minute-stale, and dead-letter counts in authenticated instance health. A minute-level reconciler recreates missing delivery jobs for every undelivered event. Delivery retries use exponential backoff capped at 30 minutes, and delivery outcomes plus reconciliation counts emit bounded `[:robine, :outbox, ...]` telemetry events.
 
+Structured event logging is owned by a single redaction-safe adapter. Its metadata allowlist contains only bounded correlation, delivery, repository, pipeline, job, attempt, runner, provider-method, state, and outcome dimensions. Unknown keys and complex values are discarded or reduced to `invalid`; URLs, payloads, commands, output, errors, repository names, commit SHAs, user email, credentials, and secret values are never accepted. A GitHub delivery correlation ID is persisted with every created pipeline and restored into runner execution context, so the webhook, durable delivery, pipeline, job, attempt, local runner, and sanitized GitHub API events can be joined after queue boundaries.
+
 ## Failure modes and recovery
 
 | Failure | Expected behavior | Recovery |
@@ -84,7 +86,9 @@ Detailed health is restricted to administrators. Public responses contain no com
 
 ## Observability
 
-The MVP MUST expose bounded metrics for HTTP failures, queue depth and age, pipeline/job outcomes and duration, runner loss, storage usage, outbox failures, GitHub rate limiting, and authentication anomalies. Structured events MUST include correlation IDs where applicable.
+The MVP exposes the `Telemetry.Metrics` catalogue in Prometheus 0.0.4 text format at `GET /metrics`. Export is disabled, and the route returns HTTP 404, unless `ROBINE_METRICS_TOKEN` is configured. An enabled endpoint requires `Authorization: Bearer <token>`, compares only SHA-256 digests in constant time, returns HTTP 401 for invalid credentials, and never caches a scrape. Operators MUST terminate TLS before exposing the endpoint outside a private network.
+
+The catalogue uses counters, gauges, and bucketed distributions with bounded labels for HTTP failures, queue depth and age, pipeline/job outcomes and duration, runner loss, storage usage, outbox failures, GitHub rate limiting, and authentication anomalies. It MUST NOT use repository names, commit SHAs, user identifiers, URLs, messages, or credentials as labels. Structured events MUST include correlation IDs where applicable.
 
 ## Acceptance criteria
 
@@ -93,12 +97,11 @@ The MVP MUST expose bounded metrics for HTTP failures, queue depth and age, pipe
 - [x] Required dependency failure produces HTTP 503.
 - [x] Administrators can inspect and refresh dependency health.
 - [x] Automated tests prove public probes do not expose component details or configured secrets.
-- [ ] All required MVP metrics have bounded labels and tests.
-- [ ] Alert and troubleshooting guidance is published.
+- [x] Structured events correlate GitHub delivery through local runner execution and reject non-allowlisted secret-bearing metadata.
+- [x] All required MVP metrics have bounded labels and tests.
+- [x] Alert and troubleshooting guidance is published.
 
-## Open questions
-
-- Select the built-in metrics export format and endpoint authentication policy.
+The initial alert catalogue and remediation procedures are published in `docs/operations/monitoring-and-troubleshooting.md`.
 
 ## Out of scope / future work
 

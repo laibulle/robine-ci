@@ -240,6 +240,42 @@ defmodule Robine.Adapters.Execution.DockerRunnerTest do
   end
 
   @tag :docker
+  test "preserves stdout and stderr as separately sequenced channels" do
+    parent = self()
+
+    specification = %Specification{
+      version: 1,
+      attempt_id: "docker-channels-#{System.unique_integer([:positive])}",
+      image: "alpine:3.22",
+      workspace: "/workspace",
+      shell: "/bin/sh",
+      timeout_ms: 20_000,
+      env: %{},
+      secrets: %{},
+      steps: [
+        %Step{
+          name: "Channels",
+          kind: :run,
+          value: "printf 'from-out\\n'; sleep 1; printf 'from-error\\n' >&2"
+        }
+      ]
+    }
+
+    assert {:ok, %{status: :succeeded}} =
+             DockerRunner.run(specification, fn event ->
+               send(parent, {:channel_event, event})
+               :ok
+             end)
+
+    events = collect_channel_events([])
+    running = Enum.filter(events, &(&1.step_name == "Channels" and &1.status == :running))
+
+    assert Enum.any?(running, &(&1.stream == :stdout and &1.content =~ "from-out"))
+    assert Enum.any?(running, &(&1.stream == :stderr and &1.content =~ "from-error"))
+    assert Enum.map(running, & &1.sequence) == Enum.sort(Enum.map(running, & &1.sequence))
+  end
+
+  @tag :docker
   test "saves and restores cache and artifact archives through the builtin callback" do
     specification = %Specification{
       version: 1,
@@ -534,6 +570,14 @@ defmodule Robine.Adapters.Execution.DockerRunnerTest do
   defp collect_stream_events(events) do
     receive do
       {:stream_event, event} -> collect_stream_events([event | events])
+    after
+      0 -> Enum.reverse(events)
+    end
+  end
+
+  defp collect_channel_events(events) do
+    receive do
+      {:channel_event, event} -> collect_channel_events([event | events])
     after
       0 -> Enum.reverse(events)
     end

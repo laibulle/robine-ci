@@ -101,6 +101,7 @@ defmodule RobineWeb.JobLive.Show do
   end
 
   defp load_new_logs(socket) do
+    started = System.monotonic_time()
     current_attempt_id = socket.assigns.attempt && socket.assigns.attempt.id
 
     socket =
@@ -113,12 +114,30 @@ defmodule RobineWeb.JobLive.Show do
            socket.assigns.execution_context
          ) do
       {:ok, page} ->
+        :telemetry.execute(
+          [:robine, :web, :log_segment],
+          %{duration: System.monotonic_time() - started},
+          %{outcome: :ok}
+        )
+
+        :telemetry.execute(
+          [:robine, :web, :payload],
+          %{bytes: Enum.reduce(page.chunks, 0, &(byte_size(&1.content) + &2))},
+          %{page: :job_logs}
+        )
+
         assign(socket,
           log_chunks: Enum.take(socket.assigns.log_chunks ++ page.chunks, -@log_window),
           log_cursor: page.next_cursor
         )
 
       {:error, _reason} ->
+        :telemetry.execute(
+          [:robine, :web, :log_segment],
+          %{duration: System.monotonic_time() - started},
+          %{outcome: :error}
+        )
+
         socket
     end
   end
@@ -175,6 +194,11 @@ defmodule RobineWeb.JobLive.Show do
   defp phase_label("execution"), do: "Execution"
   defp phase_label("cleanup"), do: "Cleanup"
   defp phase_label(phase), do: phase |> to_string() |> String.replace("_", " ")
+
+  defp stream_label("stdout"), do: "standard output"
+  defp stream_label("stderr"), do: "standard error"
+  defp stream_label("system"), do: "runner event"
+  defp stream_label(_stream), do: "combined output"
 
   @impl true
   def render(assigns) do
@@ -241,7 +265,7 @@ defmodule RobineWeb.JobLive.Show do
                 Showing at most 50 recent 64 KB segments.
               </p>
             </div>
-            <form phx-change="filter">
+            <form id="log-filter-form" phx-change="filter">
               <label class="input input-bordered flex items-center gap-2"><span class="sr-only">Search visible logs</span><.icon
                 name="hero-magnifying-glass"
                 class="size-4"
@@ -279,7 +303,11 @@ defmodule RobineWeb.JobLive.Show do
                 <pre
                   class="max-h-96 overflow-auto whitespace-pre-wrap break-words p-4 text-sm"
                   tabindex="0"
-                ><code><span :for={chunk <- group.chunks} id={"log-#{chunk.sequence}"}>{chunk.content}</span></code></pre>
+                ><code><span
+                    :for={chunk <- group.chunks}
+                    id={"log-#{chunk.sequence}"}
+                    data-stream={chunk.stream}
+                  ><span class="sr-only">{stream_label(chunk.stream)}: </span>{chunk.content}</span></code></pre>
               </details>
             </section>
           </div>

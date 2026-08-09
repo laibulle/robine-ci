@@ -28,6 +28,7 @@ defmodule Robine.Pipelines.UseCases.AppendLogEvent do
         attempt_id: attempt_id,
         sequence: sequence,
         phase: phase(input),
+        stream: stream(input),
         step_position: position,
         step_name: name,
         step_status: to_string(status),
@@ -44,6 +45,11 @@ defmodule Robine.Pipelines.UseCases.AppendLogEvent do
     do: to_string(phase)
 
   defp phase(_input), do: "execution"
+
+  defp stream(%{stream: stream}) when stream in [:stdout, :stderr, :system, :combined],
+    do: to_string(stream)
+
+  defp stream(_input), do: "combined"
 
   defp sanitize(content) do
     if String.valid?(content),

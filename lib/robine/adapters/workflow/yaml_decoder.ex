@@ -4,6 +4,20 @@ defmodule Robine.Adapters.Workflow.YamlDecoder do
 
   @impl true
   def decode(source) when is_binary(source) do
+    started = System.monotonic_time()
+
+    result =
+      try do
+        do_decode(source)
+      rescue
+        error -> {:error, %{code: "yaml.syntax", message: Exception.message(error)}}
+      end
+
+    emit_validation(result, started)
+    result
+  end
+
+  defp do_decode(source) do
     case YamlElixir.read_from_string(source) do
       {:ok, document} when is_map(document) ->
         {:ok, %{document: document, locations: locations(source)}}
@@ -22,9 +36,24 @@ defmodule Robine.Adapters.Workflow.YamlDecoder do
            column: Map.get(error, :column) || fallback_column
          }}
     end
-  rescue
-    error -> {:error, %{code: "yaml.syntax", message: Exception.message(error)}}
   end
+
+  defp emit_validation(result, started) do
+    {outcome, version} =
+      case result do
+        {:ok, %{document: document}} -> {:ok, bounded_version(document["version"])}
+        {:error, _diagnostic} -> {:error, :unknown}
+      end
+
+    :telemetry.execute(
+      [:robine, :workflow, :validation],
+      %{count: 1, duration: System.monotonic_time() - started},
+      %{outcome: outcome, schema_version: version}
+    )
+  end
+
+  defp bounded_version(version) when version in [1], do: version
+  defp bounded_version(_version), do: :unknown
 
   defp locations(source) do
     options = [detailed_constr: true, str_node_as_binary: true, keep_duplicate_keys: true]

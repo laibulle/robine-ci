@@ -21,6 +21,7 @@ defmodule Robine.Pipelines.UseCases.GetPipelineSnapshot do
          commit_sha: pipeline.commit_sha,
          trigger: pipeline.trigger,
          actor: pipeline.actor,
+         correlation_id: pipeline.correlation_id,
          status: pipeline.status,
          inserted_at: pipeline.inserted_at,
          started_at: pipeline.started_at,

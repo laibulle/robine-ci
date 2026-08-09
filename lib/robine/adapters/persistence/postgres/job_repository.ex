@@ -29,17 +29,28 @@ defmodule Robine.Adapters.Persistence.Postgres.JobRepository do
 
   @impl true
   def next_queued(global_limit, repository_limit) do
+    started = System.monotonic_time()
+
     active =
       Repo.aggregate(
         from(attempt in AttemptSchema, where: attempt.status in ^@active_attempts),
         :count
       )
 
-    if active >= global_limit do
-      {:error, :capacity}
-    else
-      find_fair_job(repository_limit)
-    end
+    result =
+      if active >= global_limit do
+        {:error, :capacity}
+      else
+        find_fair_job(repository_limit)
+      end
+
+    :telemetry.execute(
+      [:robine, :scheduler, :dispatch],
+      %{duration: System.monotonic_time() - started},
+      %{outcome: dispatch_outcome(result)}
+    )
+
+    result
   end
 
   defp find_fair_job(repository_limit) do
@@ -91,7 +102,19 @@ defmodule Robine.Adapters.Persistence.Postgres.JobRepository do
 
       schema ->
         attributes = job |> Map.from_struct() |> Map.put(:execution_spec, job.execution)
-        persist_attributes(schema, JobSchema, attributes, :job_persistence)
+        result = persist_attributes(schema, JobSchema, attributes, :job_persistence)
+        emit_transition(:job, schema.status, job.status, result)
+
+        if schema.status in [:succeeded, :failed, :cancelled, :skipped] and
+             job.status in [:queued, :blocked] do
+          :telemetry.execute(
+            [:robine, :pipeline, :retry],
+            %{count: 1},
+            %{outcome: if(result == :ok, do: :queued, else: :error)}
+          )
+        end
+
+        result
     end
   end
 
@@ -118,8 +141,13 @@ defmodule Robine.Adapters.Persistence.Postgres.JobRepository do
   @impl true
   def update_attempt(%Robine.Pipelines.Domain.Attempt{} = attempt) do
     case Repo.get(AttemptSchema, attempt.id) do
-      nil -> {:error, :not_found}
-      schema -> persist(schema, AttemptSchema, attempt, :attempt_persistence)
+      nil ->
+        {:error, :not_found}
+
+      schema ->
+        result = persist(schema, AttemptSchema, attempt, :attempt_persistence)
+        emit_transition(:attempt, schema.status, attempt.status, result)
+        result
     end
   end
 
@@ -259,5 +287,20 @@ defmodule Robine.Adapters.Persistence.Postgres.JobRepository do
       {:ok, _schema} -> :ok
       {:error, changeset} -> {:error, {error_tag, changeset}}
     end
+  end
+
+  defp dispatch_outcome({:ok, _job}), do: :claimed
+  defp dispatch_outcome({:error, :none}), do: :empty
+  defp dispatch_outcome({:error, :capacity}), do: :capacity
+  defp dispatch_outcome({:error, _reason}), do: :error
+
+  defp emit_transition(_entity, status, status, _result), do: :ok
+
+  defp emit_transition(entity, _from, _to, result) do
+    :telemetry.execute(
+      [:robine, :pipeline, :transition],
+      %{count: 1},
+      %{entity: entity, outcome: if(result == :ok, do: :ok, else: :error)}
+    )
   end
 end

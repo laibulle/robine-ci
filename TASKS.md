@@ -159,7 +159,7 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - [x] Implement fresh job containers and workspaces with sequential shared-state steps.
 - [x] Drop capabilities and exclude privileged mode, host networking, Docker socket, devices, and host-path mounts from the execution contract.
 - [x] Implement image pull, checkout, commands, timeouts, graceful/forced cancellation, and cleanup phases.
-- [ ] Stream sequence-numbered stdout/stderr with bounded memory. (Redacted combined output streams during execution with database backpressure and a 10 MB result cap; preserving stdout/stderr as separate channels remains.)
+- [x] Stream separately identified, globally sequence-numbered stdout/stderr with demand-driven backpressure, independent streaming redaction, 64 KB chunks, and a 10 MB result cap.
 - [x] Enforce global and repository concurrency and disk-pressure admission.
 - [x] Reconcile labeled orphan containers and volumes after restart.
 
@@ -331,10 +331,10 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 ### OPS-101 — Complete observability and health
 
 - **Depends on:** EXEC-103, GH-103, WEB-103
-- [ ] Implement structured redaction-safe logs and correlation across webhook, pipeline, job, attempt, runner, and GitHub delivery.
+- [x] Implement allowlisted redaction-safe structured events and persist correlation across webhook, GitHub delivery, pipeline, job, attempt, API, and local runner boundaries.
 - [x] Expose readiness/liveness and dependency health without leaking secrets.
-- [ ] Implement the metrics required by every MVP specification.
-- [ ] Document alerts for queue backlog, runner loss, storage pressure, outbox failure, GitHub degradation, and authentication anomalies.
+- [x] Implement the metrics required by every MVP specification through a token-protected Prometheus exporter with bounded-label contract tests.
+- [x] Document alerts for queue backlog, runner loss, storage pressure, outbox failure, GitHub degradation, and authentication anomalies.
 
 ### QA-101 — Verify resilience and security contracts
 

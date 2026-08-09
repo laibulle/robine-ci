@@ -51,6 +51,7 @@ defmodule RobineWeb do
   def live_view do
     quote do
       use Phoenix.LiveView
+      on_mount {RobineWeb.TelemetryHook, :default}
 
       unquote(html_helpers())
     end

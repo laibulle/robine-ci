@@ -7,10 +7,13 @@ defmodule Robine.Pipelines.UseCases.CreatePipeline do
   alias Robine.Pipelines.Domain.{Pipeline, PipelineCreated, WorkflowRevision}
 
   @spec call(map(), ExecutionContext.t()) :: {:ok, PipelineView.t()} | {:error, term()}
-  def call(input, %ExecutionContext{
-        actor: actor,
-        dependencies: %{pipelines: %Dependencies{} = deps}
-      })
+  def call(
+        input,
+        %ExecutionContext{
+          actor: actor,
+          dependencies: %{pipelines: %Dependencies{} = deps}
+        } = context
+      )
       when actor.role in [:administrator, :maintainer] do
     deps.unit_of_work.transaction(fn ->
       now = deps.clock.now()
@@ -18,6 +21,7 @@ defmodule Robine.Pipelines.UseCases.CreatePipeline do
       jobs = Map.get(input, :jobs, %{})
 
       input = Map.put_new(input, :actor, actor.id)
+      input = Map.put_new(input, :correlation_id, context.correlation_id)
 
       with {:ok, pipeline} <- Pipeline.create(input, pipeline_id, now),
            {:ok, revision} <- workflow_revision(input, jobs, pipeline_id, now, deps),

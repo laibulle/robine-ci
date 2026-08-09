@@ -26,6 +26,7 @@ config :robine, :secret_keyring,
 config :robine, :github_webhook_secret, "test-github-webhook-secret"
 config :robine, :bootstrap_token_hash, :crypto.hash(:sha256, "test-bootstrap-token")
 config :robine, :bootstrap_expires_at, ~U[2030-01-01 00:00:00Z]
+config :robine, :metrics_token_hash, :crypto.hash(:sha256, "test-metrics-token")
 
 config :argon2_elixir, t_cost: 1, m_cost: 8
 
