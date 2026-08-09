@@ -2,14 +2,14 @@
 
 ## Status
 
-- **State:** Implementing
+- **State:** Shipped
 - **Owner:** Robine maintainers
 - **Target:** Post-MVP
 - **Last updated:** 2026-08-09
 
 ## Summary
 
-Robine measures its own Elixir test coverage locally with a 75% quality gate and will publish the same durable result through CI provider checks after the local report contract is proven.
+Robine measures its own Elixir test coverage locally with a 75% quality gate and publishes the same durable result through CI provider checks.
 
 ## Problem
 
@@ -19,7 +19,7 @@ Contributors cannot currently measure coverage with one documented command, enfo
 
 - Provide one deterministic local command that prepares the test database and generates an HTML report.
 - Fail the command when total coverage is below 75%.
-- Establish a report format that can later be retained and summarized by Robine CI.
+- Retain the HTML report and summarize the measured result in Robine CI provider checks.
 
 ## Non-goals
 
@@ -36,7 +36,7 @@ A Robine contributor validating a change before pushing it to CI.
 ### Use cases
 
 1. Run `mix coverage` from a local checkout, receive a blocking pass/fail result, and open the generated HTML report.
-2. Reuse the proven report contract in a later CI publication increment.
+2. Inspect the same measured result and retained HTML report after a CI run.
 
 ## Requirements
 
@@ -90,7 +90,7 @@ The local command prints per-file and total percentages. CI retains the logs and
 - [x] `mix coverage` prepares the database and generates `cover/excoveralls.html`.
 - [x] The configured threshold is exactly 75% and is enforced with a non-zero exit below it.
 - [x] The report directory is ignored and the command is documented.
-- [ ] A real Robine CI run retains the report and publishes its summary to the provider check.
+- [x] A real Robine CI run retains the report and publishes its summary to the provider check.
 
 ## Open questions
 

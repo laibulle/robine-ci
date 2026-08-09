@@ -650,6 +650,6 @@ These items are intentionally unordered and must receive specifications before i
 
 - **Spec:** [QUAL-001](docs/specs/quality/qual-001-coverage-reporting.md)
 - **Depends on:** QUAL-101, DATA-001, GH-103
-- [~] Emit a bounded machine-readable coverage marker and retain the HTML report as an artifact; implementation is local, real CI verification pending.
-- [~] Add the total, threshold, outcome, and report name to pipeline and job provider-check summaries; real GitHub verification pending.
-- [~] Verify successful, malformed/missing marker, pagination, retry, and authorization journeys; targeted tests pass and the live installation reports `Checks: write`, real pipeline pending.
+- [x] Emit a bounded machine-readable coverage marker and retain the HTML report as an artifact.
+- [x] Add the total, threshold, outcome, and report name to pipeline and job provider-check summaries.
+- [x] Verify successful, malformed/missing marker, pagination, retry, and authorization journeys, including a live GitHub publication with `Checks: write`.
