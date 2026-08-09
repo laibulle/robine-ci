@@ -28,13 +28,10 @@ defmodule RobineWeb.PipelineLive.Index do
       <section class="space-y-8">
         <header class="flex flex-col justify-between gap-5 border-b border-base-300/70 pb-8 sm:flex-row sm:items-end">
           <div>
-            <div class="mb-4 flex items-center gap-2 text-xs font-bold uppercase tracking-[0.18em] text-primary">
-              <span class="size-1.5 rounded-full bg-primary shadow-[0_0_0_4px_color-mix(in_oklab,var(--color-primary)_15%,transparent)]"></span>
-              Live execution
-            </div><h1 class="text-4xl font-bold sm:text-5xl">
+            <div class="page-eyebrow mb-4">Live execution</div><h1 class="text-4xl font-bold sm:text-5xl">
               Pipelines
             </h1><p class="mt-3 max-w-xl text-base-content/55">
-              Every workflow run, from first trigger to final artifact.
+              Follow every run from its first trigger to the final artifact.
             </p>
           </div>
           <div class="flex items-center gap-2 rounded-xl border border-base-300/70 bg-base-100/60 px-3 py-2 text-xs text-base-content/55">
@@ -53,46 +50,40 @@ defmodule RobineWeb.PipelineLive.Index do
         >
           Connect a trusted GitHub repository and push a workflow.
         </.ui_state>
-        <div
-          :if={@pipelines != []}
-          class="surface-panel overflow-x-auto rounded-2xl"
-        >
-          <table class="table">
-            <thead>
-              <tr>
-                <th>Status</th><th>Workflow</th><th>Commit</th><th>Started</th>
-              </tr>
-            </thead>
-            <tbody id="pipelines">
-              <tr
-                :for={pipeline <- @pipelines}
-                id={"pipeline-#{pipeline.id}"}
-                class="group transition-colors hover:bg-base-200/60"
-              >
-                <td>
-                  <.status_badge status={pipeline.status} />
-                </td>
-                <td>
-                  <.link
-                    navigate={~p"/pipelines/#{pipeline.id}"}
-                    class="font-semibold text-base-content transition-colors group-hover:text-primary"
-                  >{pipeline.workflow_name}<span
-                    aria-hidden="true"
-                    class="ml-2 inline-block opacity-0 transition-all group-hover:translate-x-1 group-hover:opacity-100"
-                  >→</span></.link>
-                </td>
-                <td>
-                  <code class="rounded-md bg-base-200 px-2 py-1 text-xs">{String.slice(
-                    pipeline.commit_sha,
-                    0,
-                    8
-                  )}</code>
-                </td><td class="text-sm text-base-content/55">
-                  {Calendar.strftime(pipeline.inserted_at, "%Y-%m-%d %H:%M UTC")}
-                </td>
-              </tr>
-            </tbody>
-          </table>
+        <div :if={@pipelines != []} id="pipelines" class="grid gap-3">
+          <article
+            :for={pipeline <- @pipelines}
+            id={"pipeline-#{pipeline.id}"}
+            class="surface-panel group grid gap-4 rounded-2xl p-4 transition duration-200 hover:-translate-y-0.5 hover:border-primary/30 hover:shadow-panel sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:items-center sm:p-5"
+          >
+            <div class="grid size-11 place-items-center rounded-xl bg-base-200 text-base-content/50 transition group-hover:bg-primary/10 group-hover:text-primary">
+              <.icon name="hero-bolt" class="size-5" />
+            </div>
+            <div class="min-w-0">
+              <div class="flex flex-wrap items-center gap-2.5">
+                <.link
+                  navigate={~p"/pipelines/#{pipeline.id}"}
+                  class="truncate text-base font-semibold transition-colors group-hover:text-primary"
+                >{pipeline.workflow_name}</.link>
+                <.status_badge status={pipeline.status} size="sm" />
+              </div>
+              <div class="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-base-content/45">
+                <span class="flex items-center gap-1.5"><.icon
+                  name="hero-code-bracket"
+                  class="size-3.5"
+                /><code>{String.slice(pipeline.commit_sha, 0, 8)}</code></span>
+                <time class="flex items-center gap-1.5"><.icon name="hero-clock" class="size-3.5" />{Calendar.strftime(
+                  pipeline.inserted_at,
+                  "%Y-%m-%d · %H:%M UTC"
+                )}</time>
+              </div>
+            </div>
+            <.link
+              navigate={~p"/pipelines/#{pipeline.id}"}
+              class="hidden size-9 place-items-center rounded-full border border-base-300 text-base-content/40 transition group-hover:border-primary/30 group-hover:bg-primary group-hover:text-primary-content sm:grid"
+              aria-label={"Open #{pipeline.workflow_name}"}
+            ><.icon name="hero-arrow-right" class="size-4" /></.link>
+          </article>
         </div>
       </section>
     </Layouts.app>

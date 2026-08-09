@@ -38,17 +38,17 @@ defmodule RobineWeb.Layouts do
 
   def app(assigns) do
     ~H"""
-    <div :if={@shell} class="app-shell lg:grid lg:grid-cols-[16rem_minmax(0,1fr)]">
-      <aside class="app-sidebar sticky top-0 z-30 hidden h-screen flex-col p-4 lg:flex">
+    <div :if={@shell} class="app-shell lg:grid lg:grid-cols-[15rem_minmax(0,1fr)]">
+      <aside class="app-sidebar sticky top-0 z-30 hidden h-screen flex-col px-3 py-4 lg:flex">
         <nav class="flex h-full flex-col" aria-label="Primary navigation">
           <a
             href={if @current_actor, do: ~p"/pipelines", else: ~p"/"}
-            class="flex items-center gap-3 px-2 py-3 font-bold tracking-tight"
+            class="flex items-center gap-3 px-2 py-2 font-bold tracking-tight"
           >
-            <span class="grid size-10 place-items-center rounded-xl bg-primary text-lg text-primary-content shadow-lg shadow-primary/20">R</span>
-            <span class="leading-none">Robine <span class="text-base-content/40">CI</span></span>
+            <span class="brand-mark size-9 rounded-xl"><span class="relative z-10 text-sm font-black">R</span></span>
+            <span class="leading-none">Robine <span class="font-medium text-base-content/35">CI</span></span>
           </a>
-          <div :if={@current_actor} class="mt-8 space-y-1">
+          <div :if={@current_actor} class="mt-9 space-y-1">
             <p class="mb-3 px-3 text-[0.65rem] font-bold uppercase tracking-[0.18em] text-base-content/35">
               Workspace
             </p>
@@ -66,10 +66,19 @@ defmodule RobineWeb.Layouts do
               class="app-nav-link"
             ><.icon name="hero-adjustments-horizontal" class="size-4" /> Administration</.link>
           </div>
-          <div class="mt-auto space-y-3">
+          <div class="mt-auto space-y-3 pb-1">
             <.link :if={is_nil(@current_actor)} href={~p"/sign-in"} class="btn btn-primary w-full">Sign in</.link>
-            <div :if={@current_actor} class="rounded-2xl border border-base-300/70 bg-base-200/60 p-3">
-              <p class="truncate text-xs font-semibold">{@current_actor.email}</p>
+            <div :if={@current_actor} class="rounded-xl border border-base-300/70 bg-base-200/45 p-3">
+              <div class="flex items-center gap-2.5">
+                <span class="grid size-7 shrink-0 place-items-center rounded-full bg-primary/15 text-[0.65rem] font-black uppercase text-primary">{String.first(
+                  @current_actor.email
+                )}</span>
+                <div class="min-w-0">
+                  <p class="truncate text-xs font-semibold">{@current_actor.email}</p><p class="mt-0.5 text-[0.62rem] capitalize text-base-content/40">
+                    {@current_actor.role}
+                  </p>
+                </div>
+              </div>
               <div class="mt-3 flex items-center justify-between">
                 <.theme_toggle />
                 <.link
@@ -85,26 +94,14 @@ defmodule RobineWeb.Layouts do
       </aside>
 
       <div class="min-w-0">
-        <header class="sticky top-0 z-30 border-b border-base-300/80 bg-base-100/85 backdrop-blur-xl lg:hidden">
+        <header class="sticky top-0 z-30 border-b border-base-300/70 bg-base-100/85 backdrop-blur-xl lg:hidden">
           <div class="flex h-16 items-center justify-between px-4">
             <a
               href={if @current_actor, do: ~p"/pipelines", else: ~p"/"}
               class="flex items-center gap-2 font-bold"
-            ><span class="grid size-8 place-items-center rounded-lg bg-primary text-primary-content">R</span>
+            ><span class="brand-mark size-8 rounded-lg"><span class="relative z-10 text-xs font-black">R</span></span>
             Robine CI</a>
             <div class="flex items-center gap-1">
-              <.link
-                :if={@current_actor}
-                navigate={~p"/pipelines"}
-                class="btn btn-ghost btn-sm"
-                aria-label="Pipelines"
-              ><.icon name="hero-bolt" class="size-5" /></.link>
-              <.link
-                :if={@current_actor}
-                navigate={~p"/repositories"}
-                class="btn btn-ghost btn-sm"
-                aria-label="Repositories"
-              ><.icon name="hero-code-bracket-square" class="size-5" /></.link>
               <.theme_toggle />
               <.link :if={is_nil(@current_actor)} href={~p"/sign-in"} class="btn btn-primary btn-sm">Sign in</.link>
             </div>
@@ -112,12 +109,38 @@ defmodule RobineWeb.Layouts do
         </header>
 
         <div id="page-loading-status" class="sr-only" aria-live="polite"></div>
-        <main id="main-content" class="px-4 py-8 sm:px-8 sm:py-12 xl:px-14">
-          <div class="mx-auto max-w-7xl space-y-4">
+        <main id="main-content" class="px-4 pb-28 pt-8 sm:px-8 sm:py-12 xl:px-14">
+          <div class="mx-auto max-w-6xl space-y-4">
             {render_slot(@inner_block)}
           </div>
         </main>
       </div>
+
+      <nav
+        :if={@current_actor}
+        class="app-mobile-nav fixed inset-x-3 bottom-3 z-40 grid grid-cols-3 rounded-2xl border border-base-300/80 bg-base-100/95 p-1.5 backdrop-blur-xl lg:hidden"
+        aria-label="Mobile navigation"
+      >
+        <.link
+          navigate={~p"/pipelines"}
+          class="flex flex-col items-center gap-1 rounded-xl px-3 py-2 text-[0.65rem] font-bold text-base-content/60 transition hover:bg-base-200 hover:text-base-content"
+        ><.icon name="hero-bolt" class="size-5" />Pipelines</.link>
+        <.link
+          navigate={~p"/repositories"}
+          class="flex flex-col items-center gap-1 rounded-xl px-3 py-2 text-[0.65rem] font-bold text-base-content/60 transition hover:bg-base-200 hover:text-base-content"
+        ><.icon name="hero-code-bracket-square" class="size-5" />Repositories</.link>
+        <.link
+          :if={@current_actor.role == :administrator}
+          navigate={~p"/admin"}
+          class="flex flex-col items-center gap-1 rounded-xl px-3 py-2 text-[0.65rem] font-bold text-base-content/60 transition hover:bg-base-200 hover:text-base-content"
+        ><.icon name="hero-adjustments-horizontal" class="size-5" />Admin</.link>
+        <.link
+          :if={@current_actor.role != :administrator}
+          href={~p"/sign-out"}
+          method="delete"
+          class="flex flex-col items-center gap-1 rounded-xl px-3 py-2 text-[0.65rem] font-bold text-base-content/60 transition hover:bg-base-200 hover:text-base-content"
+        ><.icon name="hero-arrow-right-start-on-rectangle" class="size-5" />Sign out</.link>
+      </nav>
     </div>
 
     <main :if={!@shell} id="main-content" class="min-h-screen px-4 py-6 sm:px-6 sm:py-8 lg:px-8">

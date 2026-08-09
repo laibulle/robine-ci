@@ -124,7 +124,7 @@ defmodule RobineWeb.AuthController do
     conn
     |> put_session(:session_token, session.token)
     |> configure_session(renew: true)
-    |> redirect(to: ~p"/")
+    |> redirect(to: ~p"/pipelines")
   end
 
   defp context(conn),

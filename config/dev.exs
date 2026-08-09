@@ -1,5 +1,11 @@
 import Config
 
+# Stable local-only credential for the first-run setup screen. Production
+# continues to require ROBINE_BOOTSTRAP_TOKEN at runtime.
+config :robine,
+  bootstrap_token_hash: :crypto.hash(:sha256, "dev-bootstrap-token"),
+  bootstrap_expires_at: ~U[2100-01-01 00:00:00Z]
+
 # Fixed development-only key. Runtime environment keys still override this value.
 config :robine, :secret_keyring,
   current_version: 1,

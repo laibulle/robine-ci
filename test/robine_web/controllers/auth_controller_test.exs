@@ -30,9 +30,12 @@ defmodule RobineWeb.AuthControllerTest do
         "password" => "a secure password"
       })
 
-    assert redirected_to(conn) == ~p"/"
+    assert redirected_to(conn) == ~p"/pipelines"
     assert token = get_session(conn, :session_token)
     assert Repo.aggregate(Session, :count) == 1
+
+    home = conn |> recycle() |> get(~p"/") |> html_response(200) |> LazyHTML.from_fragment()
+    assert home |> LazyHTML.query("a[href='/pipelines']") |> Enum.any?()
 
     conn = delete(recycle(conn), ~p"/sign-out")
     assert redirected_to(conn) == ~p"/sign-in"
@@ -109,7 +112,7 @@ defmodule RobineWeb.AuthControllerTest do
         "password" => "a secure password"
       })
 
-    assert redirected_to(recovery_conn) == ~p"/"
+    assert redirected_to(recovery_conn) == ~p"/pipelines"
     assert get_session(recovery_conn, :session_token)
     assert Repo.aggregate(Session, :count) == baseline_sessions + 1
     assert {:ok, _view, html} = live(recovery_conn, ~p"/admin")
