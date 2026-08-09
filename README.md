@@ -1,5 +1,6 @@
 # Robine CI
 
+[![build](https://ci.base59.dev/badges/github/laibulle/robine-ci/build.svg)](https://ci.base59.dev/repositories)
 [![coverage](https://ci.base59.dev/badges/github/laibulle/robine-ci/coverage.svg)](https://ci.base59.dev/repositories)
 
 Robine CI is an open-source, self-hosted continuous integration service built with Elixir and Phoenix. It targets explicitly trusted GitHub, GitLab, and Forgejo repositories and executes jobs in isolated local or outbound-only remote Docker runners.

@@ -55,6 +55,11 @@ defmodule Robine.Repositories do
   @spec latest_coverage(map(), ExecutionContext.t()) :: {:ok, map()} | {:error, term()}
   defdelegate latest_coverage(input, context), to: UseCases.GetLatestCoverage, as: :call
 
+  @spec latest_build_status(map(), ExecutionContext.t()) :: {:ok, map()} | {:error, term()}
+  defdelegate latest_build_status(input, context),
+    to: UseCases.GetLatestBuildStatus,
+    as: :call
+
   @spec fetch_source(map(), ExecutionContext.t()) :: {:ok, map()} | {:error, term()}
   defdelegate fetch_source(input, context), to: UseCases.FetchSource, as: :call
 

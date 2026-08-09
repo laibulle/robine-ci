@@ -97,6 +97,7 @@ defmodule RobineWeb.Router do
 
   scope "/", RobineWeb do
     get "/badges/:provider/:owner/:repository/coverage.svg", CoverageBadgeController, :show
+    get "/badges/:provider/:owner/:repository/build.svg", BuildBadgeController, :show
     get "/metrics", MetricsController, :index
   end
 

@@ -50,6 +50,7 @@ A Robine contributor validating a change before pushing it to CI.
 - **FR-6:** Robine MUST add a valid retained marker to the pipeline and job provider-check summaries without exposing provider credentials to the job.
 - **FR-7:** Provider-check summaries MUST link to an authenticated retained report download.
 - **FR-8:** Every trusted repository MUST expose a stable public SVG badge containing only its latest retained percentage.
+- **FR-9:** Every trusted repository MUST expose a stable public SVG build badge reflecting its newest pipeline, including active states.
 
 ### UX requirements
 
@@ -95,6 +96,7 @@ The local command prints per-file and total percentages. CI retains the logs and
 - [x] The report directory is ignored and the command is documented.
 - [x] A real Robine CI run retains the report and publishes its summary to the provider check.
 - [x] Checks link to the retained archive and the repository exposes a stable coverage badge URL.
+- [x] The repository exposes a stable build-status badge URL.
 
 ## Open questions
 
