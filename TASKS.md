@@ -163,6 +163,8 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - [x] Stream separately identified, globally sequence-numbered stdout/stderr with demand-driven backpressure, independent streaming redaction, 64 KB chunks, and a 10 MB result cap.
 - [x] Support an attempt-scoped, allowlisted Docker-in-Docker service without exposing the runner host Docker socket.
 - [x] Enforce global and repository concurrency and disk-pressure admission.
+- [x] Give development self-hosted jobs a 16 GiB memory ceiling while retaining the 4 GiB production default.
+- [x] Surface disk-pressure admission separately from runner-label placement and use environment-appropriate development/test thresholds.
 - [x] Reconcile labeled orphan containers and volumes after restart.
 
 ### EXEC-103 — Connect scheduler to local runner

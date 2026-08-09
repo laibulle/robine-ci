@@ -5,10 +5,16 @@ defmodule Robine.Adapters.System.DiskAdmission do
   @impl true
   def check do
     policy = Application.fetch_env!(:robine, :runner_admission)
+    configured_max = Keyword.fetch!(policy, :max_used_percent)
+
+    max_used_percent =
+      if Application.get_env(:robine, :dev_routes, false),
+        do: max(configured_max, 98),
+        else: configured_max
 
     with {:ok, capacity} <- capacity() do
       if capacity.available_bytes >= Keyword.fetch!(policy, :min_free_bytes) and
-           capacity.used_percent <= Keyword.fetch!(policy, :max_used_percent),
+           capacity.used_percent <= max_used_percent,
          do: :ok,
          else: {:error, :disk_pressure}
     else

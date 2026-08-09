@@ -87,7 +87,7 @@ Workflow validation defaults to 256 KiB, 64 jobs, 128 steps per job, 512 total s
 
 Runner admission requires at least 2 GiB free and at most 95% filesystem usage by default. Configure `ROBINE_RUNNER_MIN_FREE_BYTES` and `ROBINE_RUNNER_MAX_USED_PERCENT` for the host. Robine reconciles only Docker resources carrying its `io.robine.attempt` label.
 
-Each job is limited to 2 vCPU, 4 GiB RAM without additional swap, and 512 processes by default. Configure `ROBINE_RUNNER_CPU_MILLIS`, `ROBINE_RUNNER_MEMORY_BYTES`, and `ROBINE_RUNNER_PIDS_LIMIT` to match the host.
+Each job is limited to 2 vCPU, 4 GiB RAM without additional swap, and 512 processes by default. Development uses 16 GiB RAM by default for the self-hosted CI workload. Configure `ROBINE_RUNNER_CPU_MILLIS`, `ROBINE_RUNNER_MEMORY_BYTES`, and `ROBINE_RUNNER_PIDS_LIMIT` to match the host.
 
 Live cancellation polls durable state every 250 ms and gives the container five seconds to stop before Docker forces termination. Override the grace with `ROBINE_RUNNER_CANCELLATION_GRACE_MS`.
 

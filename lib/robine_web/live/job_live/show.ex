@@ -124,9 +124,21 @@ defmodule RobineWeb.JobLive.Show do
   end
 
   defp placement(%{status: :queued, runs_on: labels}, context) do
-    case Runners.explain_capacity(%{labels: labels}, context) do
-      {:ok, explanation} -> explanation
-      {:error, _reason} -> nil
+    case Pipelines.dispatch_admission(%{}, context) do
+      {:ok, :available} ->
+        case Runners.explain_capacity(%{labels: labels}, context) do
+          {:ok, explanation} -> explanation
+          {:error, _reason} -> nil
+        end
+
+      {:ok, {:blocked, :disk_pressure}} ->
+        %{status: :disk_pressure, requested_labels: labels, matching_runners: 0}
+
+      {:ok, {:blocked, _reason}} ->
+        %{status: :admission_blocked, requested_labels: labels, matching_runners: 0}
+
+      {:error, _reason} ->
+        nil
     end
   end
 
@@ -137,6 +149,13 @@ defmodule RobineWeb.JobLive.Show do
   defp placement_message(:draining), do: "Matching runners are draining and accept no new work."
   defp placement_message(:busy), do: "Every matching runner is currently at capacity."
   defp placement_message(:available), do: "Compatible capacity is available; dispatch is pending."
+
+  defp placement_message(:disk_pressure),
+    do:
+      "Local dispatch is paused to protect the host because storage usage is above its configured safety threshold."
+
+  defp placement_message(:admission_blocked),
+    do: "Local dispatch is temporarily paused by the runner admission policy."
 
   defp load_new_logs(socket) do
     started = System.monotonic_time()

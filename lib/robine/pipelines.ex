@@ -58,6 +58,10 @@ defmodule Robine.Pipelines do
   @spec list_job_logs(map(), ExecutionContext.t()) :: {:ok, map()} | {:error, term()}
   defdelegate list_job_logs(input, context), to: UseCases.ListJobLogs, as: :call
 
+  @spec dispatch_admission(map(), ExecutionContext.t()) ::
+          {:ok, :available | {:blocked, term()}} | {:error, term()}
+  defdelegate dispatch_admission(input, context), to: UseCases.CheckDispatchAdmission, as: :call
+
   @spec retry_job(map(), ExecutionContext.t()) :: {:ok, map()} | {:error, term()}
   defdelegate retry_job(input, context), to: UseCases.RetryJob, as: :call
 

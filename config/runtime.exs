@@ -86,13 +86,26 @@ config :robine, :workflow_limits,
   max_total_steps: positive_integer.("ROBINE_WORKFLOW_MAX_TOTAL_STEPS", 512),
   max_graph_depth: positive_integer.("ROBINE_WORKFLOW_MAX_GRAPH_DEPTH", 16)
 
+runner_max_used_default =
+  case config_env() do
+    :prod -> 95
+    :dev -> 98
+    :test -> 100
+  end
+
 config :robine, :runner_admission,
   min_free_bytes: positive_integer.("ROBINE_RUNNER_MIN_FREE_BYTES", 2_147_483_648),
-  max_used_percent: percentage.("ROBINE_RUNNER_MAX_USED_PERCENT", 95)
+  max_used_percent: percentage.("ROBINE_RUNNER_MAX_USED_PERCENT", runner_max_used_default)
+
+runner_memory_default =
+  case config_env() do
+    :dev -> 17_179_869_184
+    _other -> 4_294_967_296
+  end
 
 config :robine, :runner_resources,
   cpu_millis: positive_integer.("ROBINE_RUNNER_CPU_MILLIS", 2_000),
-  memory_bytes: positive_integer.("ROBINE_RUNNER_MEMORY_BYTES", 4_294_967_296),
+  memory_bytes: positive_integer.("ROBINE_RUNNER_MEMORY_BYTES", runner_memory_default),
   pids_limit: positive_integer.("ROBINE_RUNNER_PIDS_LIMIT", 512)
 
 config :robine, :runner_control,
