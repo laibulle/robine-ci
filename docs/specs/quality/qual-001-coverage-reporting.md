@@ -48,12 +48,15 @@ A Robine contributor validating a change before pushing it to CI.
 - **FR-4:** Coverage publication MUST consume the same measurement contract in CI.
 - **FR-5:** A completed coverage run MUST emit one bounded marker containing the total, threshold, and retained report name.
 - **FR-6:** Robine MUST add a valid retained marker to the pipeline and job provider-check summaries without exposing provider credentials to the job.
+- **FR-7:** Provider-check summaries MUST link to an authenticated retained report download.
+- **FR-8:** Every trusted repository MUST expose a stable public SVG badge containing only its latest retained percentage.
 
 ### UX requirements
 
 - **UX-1:** Contributor documentation MUST state the command, threshold, and report path.
 - **UX-2:** The terminal MUST show total and per-file coverage.
 - **UX-3:** Provider checks MUST show the measured percentage, threshold, gate outcome, and retained report name.
+- **UX-4:** The README badge URL MUST remain stable across pipelines and commits.
 
 ### Operational requirements
 
@@ -65,7 +68,7 @@ A Robine contributor validating a change before pushing it to CI.
 
 ExCoveralls runs as a test-only dependency through the `coverage` Mix alias. `coveralls.json` owns the 75% global threshold, treats modules with no relevant executable lines as covered, and limits the metric to application code by excluding test-support fixtures and release-oriented Mix tasks. The alias creates and migrates the test database before invoking the complete suite with `coveralls.html --raise`. The generated `cover/excoveralls.html` report remains ignored locally.
 
-The self-hosted workflow runs formatting and warning checks before the same coverage alias. It emits `ROBINE_COVERAGE total=<percentage> threshold=75 report=coverage-report`, then uploads `cover/` as a 14-day artifact even after an ordinary coverage failure. The repositories context parses only this bounded marker from at most 50 pages of retained job logs and enriches provider-neutral pipeline and job summaries. GitHub publication uses the existing GitHub App installation token in the control plane and its `Checks: write` permission; no token enters the execution container.
+The self-hosted workflow runs formatting and warning checks before the same coverage alias. It emits `ROBINE_COVERAGE total=<percentage> threshold=75 report=coverage-report`, then uploads `cover/` as a 14-day artifact even after an ordinary coverage failure. The repositories context parses only this bounded marker from at most 50 pages of retained job logs and enriches provider-neutral pipeline and job summaries with an authenticated artifact download link. A public, cacheable SVG badge resolves a trusted repository by provider and owner/name and exposes only the latest retained percentage. GitHub publication uses the existing GitHub App installation token in the control plane and its `Checks: write` permission; no token enters the execution container.
 
 ## Failure modes and recovery
 
@@ -91,6 +94,7 @@ The local command prints per-file and total percentages. CI retains the logs and
 - [x] The configured threshold is exactly 75% and is enforced with a non-zero exit below it.
 - [x] The report directory is ignored and the command is documented.
 - [x] A real Robine CI run retains the report and publishes its summary to the provider check.
+- [x] Checks link to the retained archive and the repository exposes a stable coverage badge URL.
 
 ## Open questions
 
@@ -100,4 +104,4 @@ The local command prints per-file and total percentages. CI retains the logs and
 
 - Coverage deltas against the default branch.
 - Per-file gates and source annotations.
-- README badges and hosted coverage integrations.
+- Hosted coverage integrations.

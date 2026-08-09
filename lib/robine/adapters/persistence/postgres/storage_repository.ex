@@ -73,6 +73,22 @@ defmodule Robine.Adapters.Persistence.Postgres.StorageRepository do
   end
 
   @impl true
+  def get_job_artifact(job_id, name) do
+    case Repo.one(
+           from artifact in Artifact,
+             join: attempt in Attempt,
+             on: attempt.id == artifact.attempt_id,
+             where: attempt.job_id == ^job_id and artifact.name == ^name,
+             order_by: [desc: attempt.number],
+             limit: 1,
+             select: artifact
+         ) do
+      nil -> {:error, :not_found}
+      schema -> {:ok, artifact_domain(schema)}
+    end
+  end
+
+  @impl true
   def get_dependency_artifact(pipeline_id, job_key, name) do
     case Repo.one(
            from artifact in Artifact,

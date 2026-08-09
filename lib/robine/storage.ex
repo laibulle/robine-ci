@@ -10,6 +10,12 @@ defmodule Robine.Storage do
   @spec download_artifact(map(), ExecutionContext.t()) :: {:ok, Download.t()} | {:error, term()}
   defdelegate download_artifact(input, context), to: UseCases.DownloadArtifact, as: :call
 
+  @spec download_job_artifact(map(), ExecutionContext.t()) ::
+          {:ok, Download.t()} | {:error, term()}
+  defdelegate download_job_artifact(input, context),
+    to: UseCases.DownloadJobArtifact,
+    as: :call
+
   @spec download_dependency_artifact(map(), ExecutionContext.t()) ::
           {:ok, Download.t()} | {:error, term()}
   defdelegate download_dependency_artifact(input, context),

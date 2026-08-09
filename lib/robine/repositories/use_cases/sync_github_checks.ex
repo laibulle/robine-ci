@@ -81,7 +81,7 @@ defmodule Robine.Repositories.UseCases.SyncGitHubChecks do
           snapshot.commit_sha,
           snapshot.status,
           "#{public_url}/pipelines/#{snapshot.id}",
-          pipeline_summary(snapshot, coverage_by_job),
+          pipeline_summary(snapshot, coverage_by_job, public_url),
           "pipeline:#{snapshot.id}"
         )
     }
@@ -97,13 +97,13 @@ defmodule Robine.Repositories.UseCases.SyncGitHubChecks do
 
   defp pipeline_status_summary(%{status: status}), do: "Pipeline is #{status}."
 
-  defp pipeline_summary(snapshot, coverage_by_job) do
+  defp pipeline_summary(snapshot, coverage_by_job, public_url) do
     coverage =
       snapshot.jobs
-      |> Enum.map(fn job -> {job.job_key, Map.get(coverage_by_job, job.id)} end)
-      |> Enum.reject(fn {_job_key, report} -> is_nil(report) end)
+      |> Enum.map(fn job -> {job, Map.get(coverage_by_job, job.id)} end)
+      |> Enum.reject(fn {_job, report} -> is_nil(report) end)
 
-    append_pipeline_coverage(pipeline_status_summary(snapshot), coverage)
+    append_pipeline_coverage(pipeline_status_summary(snapshot), coverage, snapshot.id, public_url)
   end
 
   defp job_check(snapshot, job, coverage, public_url) do
@@ -117,7 +117,7 @@ defmodule Robine.Repositories.UseCases.SyncGitHubChecks do
           snapshot.commit_sha,
           job.status,
           "#{public_url}/pipelines/#{snapshot.id}/jobs/#{job.id}",
-          job_summary(job, coverage),
+          job_summary(snapshot, job, coverage, public_url),
           "job:#{job.id}"
         )
     }
@@ -132,29 +132,38 @@ defmodule Robine.Repositories.UseCases.SyncGitHubChecks do
 
   defp job_status_summary(job), do: "Job is #{job.status}"
 
-  defp job_summary(job, coverage) do
-    append_coverage(job_status_summary(job), coverage)
+  defp job_summary(snapshot, job, coverage, public_url) do
+    append_coverage(job_status_summary(job), coverage, snapshot.id, job.id, public_url)
   end
 
-  defp append_pipeline_coverage(summary, []), do: summary
+  defp append_pipeline_coverage(summary, [], _pipeline_id, _public_url), do: summary
 
-  defp append_pipeline_coverage(summary, coverage) do
+  defp append_pipeline_coverage(summary, coverage, pipeline_id, public_url) do
     rows =
-      Enum.map_join(coverage, "\n", fn {job_key, report} ->
-        "- `#{job_key}`: **#{report.total}%** (threshold #{report.threshold}%)"
+      Enum.map_join(coverage, "\n", fn {job, report} ->
+        url = artifact_url(public_url, pipeline_id, job.id, report.report)
+
+        "- `#{job.job_key}`: **#{report.total}%** (threshold #{report.threshold}%) · " <>
+          "[Download report](#{url})"
       end)
 
     summary <> "\n\n### Coverage\n" <> rows
   end
 
-  defp append_coverage(summary, nil), do: summary
+  defp append_coverage(summary, nil, _pipeline_id, _job_id, _public_url), do: summary
 
-  defp append_coverage(summary, report) do
+  defp append_coverage(summary, report, pipeline_id, job_id, public_url) do
     outcome = if report.total_value >= report.threshold_value, do: "passed", else: "failed"
+    url = artifact_url(public_url, pipeline_id, job_id, report.report)
 
     summary <>
       "\n\nCoverage: **#{report.total}%** · threshold #{report.threshold}% · #{outcome}. " <>
-      "Report artifact: `#{report.report}`."
+      "[Download `#{report.report}`](#{url})."
+  end
+
+  defp artifact_url(public_url, pipeline_id, job_id, report) do
+    encoded_report = URI.encode(report, &URI.char_unreserved?/1)
+    "#{public_url}/pipelines/#{pipeline_id}/jobs/#{job_id}/artifacts/#{encoded_report}"
   end
 
   defp coverage_for_job(%{id: job_id, status: status}, context)

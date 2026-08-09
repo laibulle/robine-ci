@@ -38,6 +38,7 @@ defmodule RobineWeb.Router do
     get "/setup", AuthController, :bootstrap
     post "/setup", AuthController, :create_bootstrap
     get "/pipelines/:id/jobs/:job_id/logs", JobLogController, :download
+    get "/pipelines/:id/jobs/:job_id/artifacts/:name", JobArtifactController, :download
 
     live_session :authenticated,
       on_mount: [{RobineWeb.UserAuth, :require_authenticated}] do
@@ -95,6 +96,7 @@ defmodule RobineWeb.Router do
   end
 
   scope "/", RobineWeb do
+    get "/badges/:provider/:owner/:repository/coverage.svg", CoverageBadgeController, :show
     get "/metrics", MetricsController, :index
   end
 

@@ -52,6 +52,9 @@ defmodule Robine.Repositories do
           {:ok, non_neg_integer()} | {:error, term()}
   defdelegate sync_github_checks(input, context), to: UseCases.SyncGitHubChecks, as: :call
 
+  @spec latest_coverage(map(), ExecutionContext.t()) :: {:ok, map()} | {:error, term()}
+  defdelegate latest_coverage(input, context), to: UseCases.GetLatestCoverage, as: :call
+
   @spec fetch_source(map(), ExecutionContext.t()) :: {:ok, map()} | {:error, term()}
   defdelegate fetch_source(input, context), to: UseCases.FetchSource, as: :call
 

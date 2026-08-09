@@ -754,6 +754,7 @@ defmodule Robine.Repositories.GitHubDeliveryTest do
 
     assert pipeline_summary =~ "### Coverage"
     assert pipeline_summary =~ "**75.3%** (threshold 75%)"
+    assert pipeline_summary =~ "[Download report](http://localhost:4004/pipelines/"
 
     assert_receive {:upsert_check, "acme/widget",
                     %{
@@ -762,7 +763,7 @@ defmodule Robine.Repositories.GitHubDeliveryTest do
                     }}
 
     assert job_summary =~ "Coverage: **75.3%**"
-    assert job_summary =~ "Report artifact: `coverage-report`"
+    assert job_summary =~ "[Download `coverage-report`](http://localhost:4004/pipelines/"
   end
 
   test "projects skipped jobs as distinct neutral checks" do

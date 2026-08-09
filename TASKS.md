@@ -653,3 +653,4 @@ These items are intentionally unordered and must receive specifications before i
 - [x] Emit a bounded machine-readable coverage marker and retain the HTML report as an artifact.
 - [x] Add the total, threshold, outcome, and report name to pipeline and job provider-check summaries.
 - [x] Verify successful, malformed/missing marker, pagination, retry, and authorization journeys, including a live GitHub publication with `Checks: write`.
+- [x] Expose authenticated report downloads from provider checks and a stable public repository coverage badge.

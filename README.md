@@ -1,5 +1,7 @@
 # Robine CI
 
+[![coverage](https://ci.base59.dev/badges/github/laibulle/robine-ci/coverage.svg)](https://ci.base59.dev/repositories)
+
 Robine CI is an open-source, self-hosted continuous integration service built with Elixir and Phoenix. It targets explicitly trusted GitHub, GitLab, and Forgejo repositories and executes jobs in isolated local or outbound-only remote Docker runners.
 
 The project is under active development. The product contract is documented in [the specification index](docs/specs/README.md), implementation work is tracked in [TASKS.md](TASKS.md), and contributors must follow [AGENTS.md](AGENTS.md).
@@ -79,9 +81,11 @@ mix coverage
 
 The command fails below 75% total coverage and writes the browsable report to
 `cover/excoveralls.html`. The self-hosted workflow runs the same command, retains `cover/` as the
-`coverage-report` artifact for 14 days, and publishes the measured percentage and threshold in the
-provider pipeline and job checks. The metric covers application code; test-support fixtures and
-release-oriented Mix tasks are excluded. Jobs never receive a provider token for this projection.
+`coverage-report` artifact for 14 days, and publishes the measured percentage, threshold, and a
+direct authenticated download link in the provider pipeline and job checks. A stable SVG badge is
+available at `/badges/:provider/:owner/:repository/coverage.svg`; it exposes only the latest retained
+percentage. The metric covers application code; test-support fixtures and release-oriented Mix tasks
+are excluded. Jobs never receive a provider token for this projection.
 
 Open [http://localhost:4004](http://localhost:4004).
 
