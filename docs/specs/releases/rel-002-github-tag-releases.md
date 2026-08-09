@@ -2,7 +2,7 @@
 
 ## Status
 
-- **State:** Implementing
+- **State:** Shipped
 - **Owner:** Robine maintainers
 - **Target:** Post-MVP
 - **Last updated:** 2026-08-09
@@ -60,7 +60,7 @@ A Robine maintainer publishing a versioned GitHub release.
 
 ## Proposed design
 
-The authenticated push normalizer distinguishes `refs/tags/*` from branches and stores the tag in immutable pipeline inputs. A dedicated workflow packages the CLI and runner into `dist/`, then uploads that directory as the `github-release` artifact. Terminal check synchronization downloads the digest-verified retained artifact through the Storage facade and calls a provider capability using the GitHub App installation token. GitHub release creation requests generated notes; asset publication attaches the immutable Robine artifact archive. Existing matching releases and assets are treated as success.
+The authenticated push normalizer distinguishes `refs/tags/*` from branches, resolves annotated tags to `head_commit.id`, and stores the tag in immutable pipeline inputs. A dedicated workflow packages the CLI and runner into `dist/`, then uploads that directory as the `github-release` artifact. Terminal projection publishes the release before checks so an already-retained payload remains recoverable even when a legacy tag pipeline used an object SHA. It downloads the digest-verified retained artifact through the Storage facade and calls a provider capability using the GitHub App installation token. GitHub release creation requests generated notes; asset publication attaches the immutable Robine artifact archive. Existing matching releases and assets are treated as success.
 
 ## Failure modes and recovery
 
@@ -84,7 +84,7 @@ Pipeline logs retain package generation and upload output. GitHub API telemetry 
 - [x] Branch and tag filters select only their matching push kind.
 - [x] A successful tag workflow retains a `github-release` payload.
 - [x] Publication is strict, credential-isolated, and idempotent in tests.
-- [ ] A real tag creates a GitHub Release and attached payload after Contents write is approved.
+- [x] A real annotated tag creates a GitHub Release and attached payload after Contents write is approved.
 
 ## Open questions
 

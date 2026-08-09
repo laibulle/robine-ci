@@ -432,14 +432,16 @@ defmodule Robine.Repositories.GitHubDeliveryTest do
     context = context_with_fake_github()
     repository = register(context, 43_434_344)
     sha = String.duplicate("a", 40)
+    tag_object_sha = String.duplicate("f", 40)
 
     accept(
       "tag-release-delivery",
       "push",
       %{
         "repository" => %{"id" => repository.provider_id},
-        "after" => sha,
+        "after" => tag_object_sha,
         "ref" => "refs/tags/v0.1.0",
+        "head_commit" => %{"id" => sha},
         "sender" => %{"login" => "octocat"}
       },
       context
@@ -453,6 +455,7 @@ defmodule Robine.Repositories.GitHubDeliveryTest do
 
     pipeline = Repo.get!(Pipeline, pipeline_id)
     assert pipeline.trigger == "tag"
+    assert pipeline.commit_sha == sha
     assert pipeline.inputs == %{"tag" => "v0.1.0"}
 
     pipeline

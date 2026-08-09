@@ -30,7 +30,7 @@ defmodule Robine.Repositories.UseCases.ProcessGitHubDelivery do
       {:ok, %{pipeline_ids: pipeline_ids, commit_sha: event.sha, provider: delivery.provider}}
     else
       {:ignore, reason} ->
-        :ok = deps.repository.finish_delivery(id, :ignored, deps.clock.now(), to_string(reason))
+        :ok = deps.repository.finish_delivery(id, :ignored, deps.clock.now(), inspect(reason))
         {:ok, %{ignored: reason}}
 
       false ->

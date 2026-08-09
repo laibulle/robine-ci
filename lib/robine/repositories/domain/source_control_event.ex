@@ -39,7 +39,14 @@ defmodule Robine.Repositories.Domain.SourceControlEvent do
          } = payload
        )
        when is_integer(repository_id) and is_binary(sha),
-       do: event(:tag, repository_id, sha, tag, actor(:github, payload))
+       do:
+         event(
+           :tag,
+           repository_id,
+           tag_commit_sha(payload, sha),
+           tag,
+           actor(:github, payload)
+         )
 
   defp github("pull_request", %{"action" => action}) when action not in @github_pull_actions,
     do: {:ignore, :pull_request_action}
@@ -153,6 +160,12 @@ defmodule Robine.Repositories.Domain.SourceControlEvent do
     do: "#{provider}:#{String.slice(value, 0, 240)}"
 
   defp actor_value(provider, _value), do: "#{provider}:unknown"
+
+  defp tag_commit_sha(%{"head_commit" => %{"id" => commit_sha}}, _tag_object_sha)
+       when is_binary(commit_sha),
+       do: commit_sha
+
+  defp tag_commit_sha(_payload, tag_object_sha), do: tag_object_sha
 
   defp draft_title?(value) when is_binary(value),
     do: String.starts_with?(String.downcase(value), ["draft:", "wip:"])

@@ -31,14 +31,14 @@ defmodule Robine.Repositories.UseCases.SyncGitHubChecks do
           )
       ]
 
-      with {:ok, count} <-
+      with :ok <- maybe_publish_release(repository, snapshot, deps, context),
+           {:ok, count} <-
              Enum.reduce_while(checks, {:ok, 0}, fn check, {:ok, count} ->
                case sync_one(repository, check, deps) do
                  :ok -> {:cont, {:ok, count + 1}}
                  {:error, reason} -> {:halt, {:error, reason}}
                end
-             end),
-           :ok <- maybe_publish_release(repository, snapshot, deps, context) do
+             end) do
         {:ok, count}
       end
     end

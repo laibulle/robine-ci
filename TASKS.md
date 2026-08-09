@@ -381,7 +381,7 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - [x] Normalize exact tag pushes and support distinct `push.tags` glob filters.
 - [x] Add a tag-only workflow that retains CLI and runner release outputs as `github-release`.
 - [x] Publish the retained payload idempotently with the control-plane installation token.
-- [ ] Approve `Contents: write` on the live GitHub App and verify a real tagged release.
+- [x] Approve `Contents: write` on the live GitHub App and verify an annotated tag release with its retained 13.1 MB payload.
 
 ## Phase 9 — Remote runners
 

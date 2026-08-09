@@ -221,7 +221,6 @@ defmodule Robine.Adapters.SourceControl.GitHubClient do
         case request(:post, create_url, token,
                json: %{
                  tag_name: release.tag,
-                 target_commitish: release.sha,
                  name: release.tag,
                  generate_release_notes: true
                }
@@ -247,7 +246,9 @@ defmodule Robine.Adapters.SourceControl.GitHubClient do
       case request(:post, url, token,
              params: [name: release.asset_name],
              body: release.content,
-             headers: github_headers(token, "application/octet-stream")
+             headers:
+               github_headers(token, "application/vnd.github+json") ++
+                 [{"content-type", "application/octet-stream"}]
            ) do
         {:ok, _response} -> :ok
         {:error, _reason} = error -> error
@@ -274,10 +275,17 @@ defmodule Robine.Adapters.SourceControl.GitHubClient do
     :ok = GitHubTelemetry.emit(method, started, result)
 
     case result do
-      {:ok, %{status: status} = response} when status in 200..299 -> {:ok, response}
-      {:ok, %{status: 404, body: %{"message" => "Not Found"}} = response} -> {:ok, response}
-      {:ok, response} -> {:error, {:github_http, response.status}}
-      {:error, reason} -> {:error, {:github_transport, reason}}
+      {:ok, %{status: status} = response} when status in 200..299 ->
+        {:ok, response}
+
+      {:ok, %{status: 404, body: %{"message" => "Not Found"}} = response} ->
+        {:ok, response}
+
+      {:ok, response} ->
+        {:error, {:github_http, response.status, github_error_message(response.body)}}
+
+      {:error, reason} ->
+        {:error, {:github_transport, reason}}
     end
   end
 
@@ -289,4 +297,7 @@ defmodule Robine.Adapters.SourceControl.GitHubClient do
       {"user-agent", "Robine-CI"}
     ]
   end
+
+  defp github_error_message(%{"message" => message}) when is_binary(message), do: message
+  defp github_error_message(_body), do: "GitHub request failed"
 end
