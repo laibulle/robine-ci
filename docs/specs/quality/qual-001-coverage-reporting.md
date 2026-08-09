@@ -63,7 +63,7 @@ A Robine contributor validating a change before pushing it to CI.
 
 ## Proposed design
 
-ExCoveralls runs as a test-only dependency through the `coverage` Mix alias. `coveralls.json` owns the 75% global threshold and treats modules with no relevant executable lines as covered. The alias creates and migrates the test database before invoking the complete suite with `coveralls.html --raise`. The generated `cover/excoveralls.html` report remains ignored locally.
+ExCoveralls runs as a test-only dependency through the `coverage` Mix alias. `coveralls.json` owns the 75% global threshold, treats modules with no relevant executable lines as covered, and limits the metric to application code by excluding test-support fixtures and release-oriented Mix tasks. The alias creates and migrates the test database before invoking the complete suite with `coveralls.html --raise`. The generated `cover/excoveralls.html` report remains ignored locally.
 
 The self-hosted workflow runs formatting and warning checks before the same coverage alias. It emits `ROBINE_COVERAGE total=<percentage> threshold=75 report=coverage-report`, then uploads `cover/` as a 14-day artifact even after an ordinary coverage failure. The repositories context parses only this bounded marker from at most 50 pages of retained job logs and enriches provider-neutral pipeline and job summaries. GitHub publication uses the existing GitHub App installation token in the control plane and its `Checks: write` permission; no token enters the execution container.
 

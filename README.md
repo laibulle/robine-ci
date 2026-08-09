@@ -80,7 +80,8 @@ mix coverage
 The command fails below 75% total coverage and writes the browsable report to
 `cover/excoveralls.html`. The self-hosted workflow runs the same command, retains `cover/` as the
 `coverage-report` artifact for 14 days, and publishes the measured percentage and threshold in the
-provider pipeline and job checks. Jobs never receive a provider token for this projection.
+provider pipeline and job checks. The metric covers application code; test-support fixtures and
+release-oriented Mix tasks are excluded. Jobs never receive a provider token for this projection.
 
 Open [http://localhost:4004](http://localhost:4004).
 
