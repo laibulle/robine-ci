@@ -1,7 +1,13 @@
 defmodule Robine.Adapters.SourceControl.ProviderClientsTest do
   use Robine.DataCase, async: false
 
-  alias Robine.Adapters.SourceControl.{ForgejoClient, GitLabClient, ProviderCredentials}
+  alias Robine.Adapters.SourceControl.{
+    ForgejoClient,
+    GitLabClient,
+    ProviderCredentials,
+    ProviderRegistry
+  }
+
   alias Robine.Repositories.Domain.Repository
   alias Robine.{Secrets}
   alias Robine.Runtime.Dependencies
@@ -53,6 +59,21 @@ defmodule Robine.Adapters.SourceControl.ProviderClientsTest do
     end)
 
     :ok
+  end
+
+  test "provider registry loads a configured adapter before capability detection" do
+    previous = Application.fetch_env!(:robine, :github_adapter)
+    adapter = Robine.Test.UnloadedSourceControlAdapter
+    Application.put_env(:robine, :github_adapter, adapter)
+
+    on_exit(fn -> Application.put_env(:robine, :github_adapter, previous) end)
+
+    :code.purge(adapter)
+    :code.delete(adapter)
+    refute Code.loaded?(adapter)
+
+    assert {:ok, [%{full_name: "acme/widget"}]} = ProviderRegistry.available_repositories()
+    assert Code.loaded?(adapter)
   end
 
   test "GitLab reads workflow files and the default head only at the requested exact SHA" do

@@ -26,6 +26,7 @@ defmodule Robine.Adapters.SourceControl.ProviderRegistry do
   def available_repositories(provider, provider_instance)
       when provider in [:github, :gitlab, :forgejo] and is_binary(provider_instance) do
     with {:ok, adapter} <- adapter(provider, provider_instance),
+         true <- Code.ensure_loaded?(adapter),
          true <- function_exported?(adapter, :available_repositories, 0) do
       adapter.available_repositories()
     else
