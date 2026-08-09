@@ -13,19 +13,14 @@ defmodule Robine.Adapters.Runner.ReverseProxySmokeTest do
   alias Robine.{Pipelines, Repo, Runners}
 
   @moduletag :docker
+  @caddy_executable System.find_executable("caddy")
 
-  setup tags do
-    case System.find_executable("caddy") do
-      nil ->
-        {:skip, "Caddy is required for the reverse-proxy smoke test"}
+  if is_nil(@caddy_executable) do
+    @moduletag skip: "Caddy is required for the reverse-proxy smoke test"
+  end
 
-      executable ->
-        if tags[:s3_journey] == true and not docker_image_present?(MinioServer.image()) do
-          [skip: "the pinned MinIO integration image is not installed"]
-        else
-          {:ok, caddy: executable}
-        end
-    end
+  setup do
+    {:ok, caddy: @caddy_executable}
   end
 
   test "an outbound-only runner survives a control-plane restart behind a real reverse proxy", %{
@@ -213,7 +208,20 @@ defmodule Robine.Adapters.Runner.ReverseProxySmokeTest do
                    5_000
   end
 
+  @minio_image_available match?(
+                           {_output, 0},
+                           System.cmd(
+                             "docker",
+                             ["image", "inspect", MinioServer.image()],
+                             stderr_to_stdout: true
+                           )
+                         )
+
   @tag :s3_journey
+  if not @minio_image_available do
+    @tag skip: "the pinned MinIO integration image is not installed"
+  end
+
   test "remote jobs publish and restore S3-backed caches and artifacts without bucket credentials",
        %{
          caddy: caddy
@@ -499,12 +507,5 @@ defmodule Robine.Adapters.Runner.ReverseProxySmokeTest do
       access_key_id: Keyword.fetch!(config, :access_key_id),
       secret_access_key: Keyword.fetch!(config, :secret_access_key)
     ]
-  end
-
-  defp docker_image_present?(image) do
-    match?(
-      {_output, 0},
-      System.cmd("docker", ["image", "inspect", image], stderr_to_stdout: true)
-    )
   end
 end
