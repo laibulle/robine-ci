@@ -19,6 +19,7 @@ Robine CI is licensed under AGPL-3.0-or-later. It incorporates or depends on the
 | esbuild | 0.10.0 | MIT | https://github.com/phoenixframework/esbuild |
 | ex_aws | 2.7.0 | MIT | https://github.com/ex-aws/ex_aws |
 | ex_aws_s3 | 2.5.9 | MIT | https://github.com/ex-aws/ex_aws_s3 |
+| excoveralls | 0.18.5 | MIT | https://github.com/parroty/excoveralls |
 | exile | 0.14.0 | Apache-2.0 | https://github.com/akash-akya/exile |
 | expo | 1.1.1 | Apache-2.0 | https://github.com/elixir-gettext/expo |
 | file_system | 1.1.1 | Apache-2.0 | https://github.com/falood/file_system |

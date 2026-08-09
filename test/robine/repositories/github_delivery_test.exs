@@ -7,9 +7,11 @@ defmodule Robine.Repositories.GitHubDeliveryTest do
 
   alias Robine.Adapters.Persistence.Postgres.Schemas.{
     AuditEvent,
+    Attempt,
     GitHubCheck,
     GitHubDelivery,
     Job,
+    LogChunk,
     Pipeline,
     WorkflowRevision
   }
@@ -679,6 +681,88 @@ defmodule Robine.Repositories.GitHubDeliveryTest do
     assert pipeline_url == "http://localhost:4004/pipelines/#{pipeline_id}"
     assert job_external_id == "job:#{job.id}"
     assert job_url == "http://localhost:4004/pipelines/#{pipeline_id}/jobs/#{job.id}"
+  end
+
+  test "projects a retained coverage marker into pipeline and job check summaries" do
+    context = context_with_fake_github()
+    provider_id = 62_626_262
+    _repository = register(context, provider_id)
+
+    accept(
+      "coverage-check-delivery",
+      "push",
+      %{
+        "repository" => %{"id" => provider_id},
+        "after" => String.duplicate("5", 40),
+        "ref" => "refs/heads/main"
+      },
+      context
+    )
+
+    assert {:ok, %{pipeline_ids: [pipeline_id]}} =
+             Repositories.process_github_delivery(
+               %{delivery_id: "coverage-check-delivery"},
+               context
+             )
+
+    job = Repo.one!(from job in Job, where: job.pipeline_id == ^pipeline_id)
+    now = DateTime.utc_now()
+    attempt_id = Ecto.UUID.generate()
+
+    Repo.update_all(from(pipeline in Pipeline, where: pipeline.id == ^pipeline_id),
+      set: [status: :succeeded, started_at: now, finished_at: now]
+    )
+
+    Repo.update_all(from(stored_job in Job, where: stored_job.id == ^job.id),
+      set: [status: :succeeded]
+    )
+
+    %Attempt{}
+    |> Attempt.changeset(%{
+      id: attempt_id,
+      job_id: job.id,
+      number: 1,
+      idempotency_token: Ecto.UUID.generate(),
+      status: :succeeded,
+      lease_expires_at: DateTime.add(now, 60, :second),
+      last_sequence: 1
+    })
+    |> Repo.insert!()
+
+    %LogChunk{}
+    |> LogChunk.changeset(%{
+      attempt_id: attempt_id,
+      sequence: 1,
+      phase: "execution",
+      stream: "stdout",
+      step_position: 4,
+      step_name: "Run project verification and coverage",
+      step_status: "succeeded",
+      exit_code: 0,
+      duration_ms: 1,
+      content: "ROBINE_COVERAGE total=75.3 threshold=75 report=coverage-report\n"
+    })
+    |> Repo.insert!()
+
+    assert {:ok, 2} = Repositories.sync_github_checks(%{pipeline_id: pipeline_id}, context)
+
+    assert_receive {:upsert_check, "acme/widget",
+                    %{
+                      external_id: "pipeline:" <> ^pipeline_id,
+                      output: %{summary: pipeline_summary}
+                    }}
+
+    assert pipeline_summary =~ "### Coverage"
+    assert pipeline_summary =~ "**75.3%** (threshold 75%)"
+
+    assert_receive {:upsert_check, "acme/widget",
+                    %{
+                      external_id: "job:" <> _job_id,
+                      output: %{summary: job_summary}
+                    }}
+
+    assert job_summary =~ "Coverage: **75.3%**"
+    assert job_summary =~ "Report artifact: `coverage-report`"
   end
 
   test "projects skipped jobs as distinct neutral checks" do

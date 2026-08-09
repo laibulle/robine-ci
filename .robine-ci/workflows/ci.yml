@@ -10,6 +10,7 @@ on:
 jobs:
   verify:
     image: elixir@sha256:7ee41a9a8a8427dbd40c9133ee5b9047f585b58db4968fd675fbcd9498e3b22e
+    shell: /bin/bash
     timeout: 20m
     env:
       MIX_ENV: test
@@ -57,8 +58,30 @@ jobs:
           paths: [deps]
       - name: Install dependencies
         run: mix deps.get
-      - name: Run project precommit
-        run: mix precommit
+      - name: Run project verification and coverage
+        run: |
+          set -euo pipefail
+          mix format --check-formatted
+          mix compile --warnings-as-errors
+
+          set +e
+          mix coverage | tee /tmp/robine-coverage.log
+          coverage_status=${PIPESTATUS[0]}
+          set -e
+
+          coverage_total=$(awk '/^\[TOTAL\]/{gsub(/%/, "", $2); print $2}' /tmp/robine-coverage.log | tail -1)
+          if [[ -n "${coverage_total}" ]]; then
+            printf 'ROBINE_COVERAGE total=%s threshold=75 report=coverage-report\n' "${coverage_total}"
+          fi
+
+          exit "${coverage_status}"
+      - name: Upload coverage report
+        if: always
+        uses: artifacts/upload
+        with:
+          name: coverage-report
+          paths: [cover]
+          retention-days: 14
       - name: Save Mix cache
         uses: cache/save
         with:

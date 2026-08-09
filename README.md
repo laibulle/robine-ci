@@ -71,6 +71,17 @@ Start Phoenix:
 mix phx.server
 ```
 
+Run the complete test suite with local coverage enforcement:
+
+```bash
+mix coverage
+```
+
+The command fails below 75% total coverage and writes the browsable report to
+`cover/excoveralls.html`. The self-hosted workflow runs the same command, retains `cover/` as the
+`coverage-report` artifact for 14 days, and publishes the measured percentage and threshold in the
+provider pipeline and job checks. Jobs never receive a provider token for this projection.
+
 Open [http://localhost:4004](http://localhost:4004).
 
 For development, visit `/setup` and use `development-bootstrap-token` unless `ROBINE_BOOTSTRAP_TOKEN` was provided. Production requires a fresh token at startup; it expires after 15 minutes and cannot be reused after the first account is created.

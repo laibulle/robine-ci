@@ -49,3 +49,4 @@ New specifications MUST start from [TEMPLATE.md](TEMPLATE.md). A feature is not 
 | Workflows | [WF-005 scheduled workflows](workflows/wf-005-scheduled-workflows.md) | Durable UTC cron scheduling with exact-SHA execution |
 | Workflows | [WF-006 reusable workflows](workflows/wf-006-reusable-workflows.md) | Exact-revision local includes with typed call inputs |
 | Source control | [SCM-001 GitLab and Forgejo integration](source-control/scm-001-gitlab-forgejo-integration.md) | Provider-neutral exact-SHA integration and status projection |
+| Quality | [QUAL-001 coverage reporting](quality/qual-001-coverage-reporting.md) | Local coverage enforcement and future provider publication |

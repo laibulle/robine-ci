@@ -635,3 +635,21 @@ These items are intentionally unordered and must receive specifications before i
 - [x] Add provider-aware setup, discovery, repository health, webhook routes, and corrective guidance.
 - [x] Prove identity separation, redirect/size bounds, outage reconciliation, manual/schedule/reusable/local/remote parity, and migrations.
 - [x] Run architecture checks, security audits, pinned Forgejo 16.0.2 and GitLab CE 19.2.1 integration smokes, server/CLI/runner release smokes, and full QA (355 tests; heavyweight GitLab smoke verified separately).
+
+## Phase 17 — Coverage reporting
+
+### QUAL-101 — Establish the local coverage contract
+
+- **Spec:** [QUAL-001](docs/specs/quality/qual-001-coverage-reporting.md)
+- **Depends on:** BOOT-001
+- [x] Add a test-only coverage reporter and one `mix coverage` command that prepares the database.
+- [x] Enforce a 75% global threshold and generate an ignored HTML report.
+- [x] Document the local workflow and verify it against the complete suite.
+
+### QUAL-102 — Publish coverage through Robine CI
+
+- **Spec:** [QUAL-001](docs/specs/quality/qual-001-coverage-reporting.md)
+- **Depends on:** QUAL-101, DATA-001, GH-103
+- [~] Emit a bounded machine-readable coverage marker and retain the HTML report as an artifact; implementation is local, real CI verification pending.
+- [~] Add the total, threshold, outcome, and report name to pipeline and job provider-check summaries; real GitHub verification pending.
+- [~] Verify successful, malformed/missing marker, pagination, retry, and authorization journeys; targeted tests pass and the live installation reports `Checks: write`, real pipeline pending.

@@ -65,6 +65,7 @@ A repository administrator installing the Robine GitHub App and contributors rea
 - **UX-3:** GitHub check summaries MUST identify the failed job and step and link directly to its logs.
 - **UX-4:** Instance administration MUST provide a resumable, ordered GitHub App assistant covering app creation, least-privilege permissions and events, write-only credentials, connection verification, and repository installation.
 - **UX-5:** The assistant MUST provide copyable instance-specific URLs and MUST distinguish actions performed in GitHub from actions performed in Robine.
+- **UX-6:** A job that emits a valid retained coverage marker MUST show its total, threshold, outcome, and report artifact name in pipeline and job check summaries.
 
 ### Operational requirements
 
@@ -80,7 +81,7 @@ Installation access-token responses supply the effective permission projection c
 
 The repository selection UI discovers active installations and all paginated repositories directly through GitHub App credentials. Selecting a repository sends only an untrusted candidate tuple; the application rediscovers current App access and requires an exact repository ID, installation ID, and full-name match before creating the trusted-repository record. Suspended installations are excluded and discovery failures never fall back to browser-supplied metadata.
 
-Checks are projections of Robine state rather than the source of truth. Delivery failures never roll back local pipeline state. A reconciliation job repairs stale or missing checks.
+Checks are projections of Robine state rather than the source of truth. Delivery failures never roll back local pipeline state. A reconciliation job repairs stale or missing checks. Completed jobs may enrich their summaries from a bounded validated coverage marker in retained logs; malformed or missing markers never block the ordinary status projection.
 
 ## Failure modes and recovery
 

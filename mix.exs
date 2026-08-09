@@ -12,7 +12,8 @@ defmodule Robine.MixProject do
       deps: deps(),
       escript: escript_config(),
       compilers: [:phoenix_live_view] ++ Mix.compilers(),
-      listeners: [Phoenix.CodeReloader]
+      listeners: [Phoenix.CodeReloader],
+      test_coverage: [tool: ExCoveralls]
     ]
   end
 
@@ -30,6 +31,7 @@ defmodule Robine.MixProject do
     [
       preferred_envs: [
         precommit: :test,
+        coverage: :test,
         qa: :test,
         verify: :test,
         "robine.cli_release_smoke": :test,
@@ -104,6 +106,7 @@ defmodule Robine.MixProject do
       {:websockex, "~> 0.5.1"},
       {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false},
       {:sobelow, "~> 0.14", only: [:dev, :test], runtime: false},
+      {:excoveralls, "~> 0.18.5", only: :test},
       {:telemetry_metrics, "~> 1.0"},
       {:telemetry_metrics_prometheus_core, "~> 1.0"},
       {:telemetry_poller, "~> 1.0"},
@@ -126,6 +129,7 @@ defmodule Robine.MixProject do
       "ecto.setup": ["ecto.create", "ecto.migrate", "run priv/repo/seeds.exs"],
       "ecto.reset": ["ecto.drop", "ecto.setup"],
       test: ["ecto.create --quiet", "ecto.migrate --quiet", "test"],
+      coverage: ["ecto.create --quiet", "ecto.migrate --quiet", "coveralls.html --raise"],
       "assets.setup": ["tailwind.install --if-missing", "esbuild.install --if-missing"],
       "assets.build": ["compile", "tailwind robine", "esbuild robine"],
       "assets.deploy": [
