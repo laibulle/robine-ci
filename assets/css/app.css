@@ -196,6 +196,13 @@
       0 18px 48px color-mix(in oklab, var(--color-base-content) 5%, transparent);
   }
 
+  .login-grid {
+    background-image:
+      linear-gradient(color-mix(in oklab, white 38%, transparent) 1px, transparent 1px),
+      linear-gradient(90deg, color-mix(in oklab, white 38%, transparent) 1px, transparent 1px);
+    background-size: 40px 40px;
+  }
+
   .table :where(th) {
     color: color-mix(in oklab, var(--color-base-content) 48%, transparent);
     font-size: 0.68rem;

@@ -32,12 +32,13 @@ defmodule RobineWeb.Layouts do
     doc: "the current [scope](https://phoenix.hexdocs.pm/scopes.html)"
 
   attr :current_actor, :map, default: nil
+  attr :shell, :boolean, default: true, doc: "renders the authenticated application chrome"
 
   slot :inner_block, required: true
 
   def app(assigns) do
     ~H"""
-    <div class="app-shell lg:grid lg:grid-cols-[16rem_minmax(0,1fr)]">
+    <div :if={@shell} class="app-shell lg:grid lg:grid-cols-[16rem_minmax(0,1fr)]">
       <aside class="app-sidebar sticky top-0 z-30 hidden h-screen flex-col p-4 lg:flex">
         <nav class="flex h-full flex-col" aria-label="Primary navigation">
           <a
@@ -118,6 +119,10 @@ defmodule RobineWeb.Layouts do
         </main>
       </div>
     </div>
+
+    <main :if={!@shell} id="main-content" class="min-h-screen px-4 py-6 sm:px-6 sm:py-8 lg:px-8">
+      {render_slot(@inner_block)}
+    </main>
 
     <.flash_group flash={@flash} />
     """

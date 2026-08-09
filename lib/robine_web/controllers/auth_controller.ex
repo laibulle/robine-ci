@@ -5,7 +5,7 @@ defmodule RobineWeb.AuthController do
   alias Robine.Runtime.Dependencies
   alias RobineWeb.LoginRateLimiter
 
-  def new(conn, _params), do: render(conn, :new, oidc_enabled: oidc_enabled?())
+  def new(conn, _params), do: render_sign_in(conn)
   def bootstrap(conn, _params), do: render(conn, :bootstrap)
 
   def create(conn, %{"email" => email, "password" => password}) do
@@ -25,7 +25,7 @@ defmodule RobineWeb.AuthController do
       conn
       |> put_status(:too_many_requests)
       |> put_flash(:error, "Too many attempts. Try again in one minute.")
-      |> render(:new, oidc_enabled: oidc_enabled?())
+      |> render_sign_in()
     end
   end
 
@@ -33,7 +33,7 @@ defmodule RobineWeb.AuthController do
     do:
       conn
       |> put_flash(:error, "Email and password are required.")
-      |> render(:new, oidc_enabled: oidc_enabled?())
+      |> render_sign_in()
 
   def oidc(conn, _params) do
     if LoginRateLimiter.allowed?({conn.remote_ip, :oidc_login}) do
@@ -59,7 +59,7 @@ defmodule RobineWeb.AuthController do
       conn
       |> put_status(:too_many_requests)
       |> put_flash(:error, "Too many attempts. Try again in one minute.")
-      |> render(:new, oidc_enabled: oidc_enabled?())
+      |> render_sign_in()
     end
   end
 
@@ -142,6 +142,13 @@ defmodule RobineWeb.AuthController do
   defp bootstrap_error(:weak_password), do: "Use at least 12 characters."
   defp bootstrap_error(_reason), do: "Setup could not be completed. Check the token and fields."
   defp oidc_enabled?, do: not is_nil(Application.get_env(:robine, :oidc_config))
+
+  defp render_sign_in(conn) do
+    render(conn, :new,
+      oidc_enabled: oidc_enabled?(),
+      form: Phoenix.Component.to_form(%{"email" => "", "password" => ""})
+    )
+  end
 
   defp identity_event(event, metadata) do
     :telemetry.execute([:robine, :identity, event], %{count: 1}, metadata)

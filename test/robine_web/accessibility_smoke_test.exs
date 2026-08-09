@@ -43,8 +43,8 @@ defmodule RobineWeb.AccessibilitySmokeTest do
     assert count(document, "main") == 1, "#{journey} must expose exactly one main landmark"
     assert count(document, "h1") == 1, "#{journey} must expose exactly one page heading"
 
-    assert count(document, "nav[aria-label]") == 1,
-           "#{journey} primary navigation must have an accessible name"
+    assert count(document, "nav:not([aria-label])") == 0,
+           "#{journey} navigation landmarks must have an accessible name"
 
     ids = LazyHTML.attribute(LazyHTML.query(document, "[id]"), "id")
     assert length(ids) == length(Enum.uniq(ids)), "#{journey} contains duplicate element IDs"
