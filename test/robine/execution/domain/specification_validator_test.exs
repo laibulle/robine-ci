@@ -51,6 +51,19 @@ defmodule Robine.Execution.Domain.SpecificationValidatorTest do
              specification(services: [invalid]) |> SpecificationValidator.validate()
   end
 
+  test "restricts privileged execution to an official Docker-in-Docker service" do
+    dind = %Service{id: "docker", image: "docker:28-dind-rootless", privileged: true}
+    assert :ok = specification(services: [dind]) |> SpecificationValidator.validate()
+
+    assert {:error, {:invalid_specification, :services}} =
+             specification(services: [%{dind | id: "database"}])
+             |> SpecificationValidator.validate()
+
+    assert {:error, {:invalid_specification, :services}} =
+             specification(services: [%{dind | image: "example.com/docker:dind"}])
+             |> SpecificationValidator.validate()
+  end
+
   defp specification(overrides \\ []) do
     defaults = [
       version: 1,

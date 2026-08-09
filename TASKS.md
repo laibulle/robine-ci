@@ -160,6 +160,7 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - [x] Drop capabilities and exclude privileged mode, host networking, Docker socket, devices, and host-path mounts from the execution contract.
 - [x] Implement image pull, checkout, commands, timeouts, graceful/forced cancellation, and cleanup phases.
 - [x] Stream separately identified, globally sequence-numbered stdout/stderr with demand-driven backpressure, independent streaming redaction, 64 KB chunks, and a 10 MB result cap.
+- [x] Support an attempt-scoped, allowlisted Docker-in-Docker service without exposing the runner host Docker socket.
 - [x] Enforce global and repository concurrency and disk-pressure admission.
 - [x] Reconcile labeled orphan containers and volumes after restart.
 
@@ -321,6 +322,7 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - **Spec:** [WEB-001](docs/specs/web/web-001-pipeline-experience.md)
 - **Depends on:** WEB-102, SEC-102
 - [x] Persist and request logs by sequence cursor.
+- [x] Push newly persisted stdout/stderr segments to connected job views with polling fallback, and provide authorized retained combined/stdout/stderr file downloads.
 - [x] Reconnect without duplicate or missing chunks.
 - [x] Group persisted logs explicitly by runner phase and step with accessible expand/collapse, bounded search, and stable phase/step/segment deep links.
 - [x] Sanitize ANSI output before HTML rendering.

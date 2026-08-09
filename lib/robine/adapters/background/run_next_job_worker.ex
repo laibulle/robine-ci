@@ -233,6 +233,12 @@ defmodule Robine.Adapters.Background.RunNextJobWorker do
     result = Pipelines.append_log_event(Map.put(event, :attempt_id, attempt_id), context)
 
     if result == :ok do
+      Phoenix.PubSub.broadcast(
+        Robine.PubSub,
+        "attempt-logs:#{attempt_id}",
+        {:log_appended, attempt_id}
+      )
+
       :telemetry.execute(
         [:robine, :runner, :logs],
         %{bytes: byte_size(Map.get(event, :content, ""))},

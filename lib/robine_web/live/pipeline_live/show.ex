@@ -152,14 +152,14 @@ defmodule RobineWeb.PipelineLive.Show do
           >
             <li
               :for={job <- @pipeline.jobs}
-              class="rounded-2xl border border-base-300 bg-base-100 p-5"
+              id={"pipeline-job-#{job.id}"}
             >
-              <div class="flex items-center justify-between gap-4">
+              <.link
+                navigate={~p"/pipelines/#{@pipeline.id}/jobs/#{job.id}"}
+                class="group flex items-center justify-between gap-4 rounded-2xl border border-base-300 bg-base-100 p-5 transition duration-200 hover:-translate-y-0.5 hover:border-primary/35 hover:shadow-lg hover:shadow-primary/5 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-primary"
+              >
                 <div>
-                  <.link
-                    navigate={~p"/pipelines/#{@pipeline.id}/jobs/#{job.id}"}
-                    class="font-semibold link link-hover"
-                  >{job.job_key}</.link><p class="mt-1 text-sm text-base-content/60">
+                  <span class="font-semibold group-hover:text-primary">{job.job_key}</span><p class="mt-1 text-sm text-base-content/60">
                     {if job.needs == [],
                       do: "No dependencies",
                       else: "Needs: #{Enum.join(job.needs, ", ")}"}
@@ -184,8 +184,11 @@ defmodule RobineWeb.PipelineLive.Show do
                   >
                     Reason: {label(job.result_reason)}
                   </p>
+                  <span class="mt-3 inline-flex items-center justify-end gap-1.5 text-xs font-semibold text-primary opacity-70 transition group-hover:opacity-100">
+                    View logs and details <.icon name="hero-arrow-right" class="size-3.5" />
+                  </span>
                 </div>
-              </div>
+              </.link>
             </li>
           </ol>
         </div>

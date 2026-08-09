@@ -84,6 +84,7 @@ defmodule Robine.Execution.UseCases.BuildCiSpecification do
   defp resolve_service(raw, secret_values) when is_map(raw) do
     with id when is_binary(id) <- raw["id"],
          image when is_binary(image) <- raw["image"],
+         privileged when is_boolean(privileged) <- raw["privileged"] || false,
          env when is_map(env) <- raw["env"] || %{},
          secret_names when is_map(secret_names) <- raw["secret_env"] || %{},
          {:ok, secret_env} <- resolve_service_secrets(secret_names, secret_values),
@@ -93,6 +94,7 @@ defmodule Robine.Execution.UseCases.BuildCiSpecification do
        %Service{
          id: id,
          image: image,
+         privileged: privileged,
          user: raw["user"],
          env: env,
          secret_env: secret_env,

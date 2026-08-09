@@ -409,6 +409,11 @@ defmodule Robine.Adapters.Execution.DockerRunner do
   defp create_service(specification, service, name, network) do
     environment = Map.merge(service.env, service.secret_env)
 
+    security_args =
+      if service.privileged,
+        do: ["--privileged"],
+        else: ["--cap-drop", "ALL", "--security-opt", "no-new-privileges"]
+
     args =
       [
         "create",
@@ -418,10 +423,7 @@ defmodule Robine.Adapters.Execution.DockerRunner do
         label(specification),
         "--label",
         "#{@service_label}=#{service.id}",
-        "--cap-drop",
-        "ALL",
-        "--security-opt",
-        "no-new-privileges",
+        security_args,
         resource_limit_args(),
         "--network",
         network,

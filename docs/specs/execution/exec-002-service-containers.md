@@ -25,7 +25,7 @@ Integration tests commonly require databases, queues, and other network services
 ## Non-goals
 
 - Docker Compose compatibility or arbitrary Compose files.
-- Host-port publication, privileged services, host networking, devices, host paths, or Docker socket access.
+- Host-port publication, arbitrary privileged services, host networking, devices, host paths, or Docker socket access.
 - Kubernetes pods, sidecar injection, service discovery outside one job attempt, or cross-job services.
 - Claiming Docker isolates hostile repository code.
 
@@ -57,6 +57,8 @@ A developer or startup team running trusted integration tests against disposable
 - **FR-8:** Service environment secret mappings MUST reference names declared by the job. Plaintext values MUST exist only in the in-memory execution contract and Docker create request.
 - **FR-9:** Cancellation, timeout, normal completion, runner restart, and preparation failure MUST remove all attempt-owned job/service containers, volumes, and networks idempotently.
 - **FR-10:** CLI, local control-plane execution, and remote-runner execution MUST consume the same normalized service contract.
+- **FR-11:** A service MAY request `privileged: true` only when its identifier is exactly `docker` and its image is an official `docker:*dind*` image. This exception MUST NOT make the job container privileged or expose the runner host Docker socket.
+- **FR-12:** A privileged DinD service MUST remain attempt-scoped, use the attempt network, inherit resource ceilings and ownership labels, and be removed by normal cleanup and orphan reconciliation.
 
 ### UX requirements
 
@@ -69,7 +71,7 @@ A developer or startup team running trusted integration tests against disposable
 
 - **OR-1:** Service count MUST be at most eight; environment entries at most 64; command arguments at most 32 and 4 KiB each; readiness ports 1 through 65535; startup timeout 1 through 120 seconds.
 - **OR-2:** Readiness polling MUST use capped intervals, a total deadline, and no unbounded task, socket, response, or log accumulation.
-- **OR-3:** Service containers MUST inherit dropped capabilities, `no-new-privileges`, process/memory/CPU ceilings, and attempt ownership labels. They MUST NOT receive the job workspace by default.
+- **OR-3:** Ordinary service containers MUST inherit dropped capabilities and `no-new-privileges`; all services, including the narrowly allowed DinD service, inherit process/memory/CPU ceilings and attempt ownership labels. They MUST NOT receive the job workspace by default.
 - **OR-4:** Preparation diagnostics MAY retain at most 64 KiB per failed service and MUST pass through the same streaming secret redactor before persistence.
 - **OR-5:** Orphan reconciliation MUST identify attempt networks and service containers exclusively through Robine-owned labels and MUST never remove unlabeled resources.
 
@@ -103,6 +105,23 @@ jobs:
 The Docker adapter creates one labeled network named from the opaque attempt identifier, starts labeled service containers with network aliases, observes readiness from the runner host against the container's network address, then starts the job container on the same network. It never binds `-p`/`--publish`. Cleanup removes the job container, service containers, workspace volume, and finally the network. Restart reconciliation extends the existing label-owned resource scan to networks and services.
 
 TCP readiness is intentionally the first contract. Arbitrary shell probes would require every image to contain a shell and would execute another repository-controlled language; HTTP semantics and Docker-native health checks can be added later without changing service identity or lifecycle.
+
+Docker-dependent jobs use an isolated daemon rather than the runner host socket:
+
+```yaml
+env:
+  DOCKER_HOST: tcp://docker:2375
+  DOCKER_TLS_CERTDIR: ""
+services:
+  docker:
+    image: docker:28-dind
+    privileged: true
+    env: {DOCKER_TLS_CERTDIR: ""}
+    command: ["--tls=false"]
+    readiness: {tcp: 2375, timeout: 60s}
+```
+
+The job image must contain the Docker CLI. The daemon is reachable only over the private attempt network and is destroyed with that attempt.
 
 A pinned Redis service uses the same contract:
 

@@ -108,6 +108,12 @@ defmodule RobineWeb.RunnerChannel do
   def handle_in("log_event", payload, socket) do
     with {:ok, input} <- log_event_input(payload),
          :ok <- Pipelines.append_log_event(input, context(socket)) do
+      Phoenix.PubSub.broadcast(
+        Robine.PubSub,
+        "attempt-logs:#{input.attempt_id}",
+        {:log_appended, input.attempt_id}
+      )
+
       {:reply, {:ok, %{sequence: input.sequence}}, socket}
     else
       {:error, _reason} -> {:reply, {:error, %{code: "invalid_log_event"}}, socket}

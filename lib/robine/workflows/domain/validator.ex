@@ -15,7 +15,7 @@ defmodule Robine.Workflows.Domain.Validator do
   @root_keys ~w(version name on jobs)
   @job_keys ~w(image needs steps timeout shell env secrets services runs-on if strategy)
   @strategy_keys ~w(matrix)
-  @service_keys ~w(image user env secret-env command readiness)
+  @service_keys ~w(image user env secret-env command readiness privileged)
   @readiness_keys ~w(tcp timeout)
   @step_keys ~w(name run uses with if)
   @dispatch_keys ~w(inputs)
@@ -778,6 +778,7 @@ defmodule Robine.Workflows.Domain.Validator do
 
     with [] <- errors,
          {:ok, image} <- nonempty_string(definition, "image", path ++ ["image"]),
+         {:ok, privileged} <- service_privileged(definition, service_id, image, path),
          {:ok, user} <- service_user(definition, path),
          {:ok, env} <- service_env(definition, path),
          {:ok, secret_env} <- service_secret_env(definition, path, declared_secrets),
@@ -787,6 +788,7 @@ defmodule Robine.Workflows.Domain.Validator do
        %Service{
          id: service_id,
          image: image,
+         privileged: privileged,
          user: user,
          env: env,
          secret_env: secret_env,
@@ -810,6 +812,36 @@ defmodule Robine.Workflows.Domain.Validator do
          to_string(service_id)
        ])
      ]}
+  end
+
+  defp service_privileged(definition, service_id, image, path) do
+    case Map.get(definition, "privileged", false) do
+      false ->
+        {:ok, false}
+
+      true ->
+        if service_id == "docker" and official_dind_image?(image),
+          do: {:ok, true},
+          else:
+            {:error,
+             Diagnostic.error(
+               "service.privileged",
+               "privileged services are restricted to a docker service using an official docker:*dind* image",
+               path ++ ["privileged"]
+             )}
+
+      _invalid ->
+        {:error,
+         Diagnostic.error(
+           "service.privileged",
+           "privileged must be a boolean",
+           path ++ ["privileged"]
+         )}
+    end
+  end
+
+  defp official_dind_image?(image) do
+    Regex.match?(~r/\Adocker:[a-zA-Z0-9._-]*dind(?:-rootless)?\z/, image)
   end
 
   defp service_user(definition, path) do

@@ -188,6 +188,7 @@ defmodule Robine.Pipelines.UseCases.CreatePipeline do
     %{
       "id" => Map.get(service, :id, Map.get(service, "id")),
       "image" => Map.get(service, :image, Map.get(service, "image")),
+      "privileged" => Map.get(service, :privileged, Map.get(service, "privileged", false)),
       "user" => Map.get(service, :user, Map.get(service, "user")),
       "env" => Map.get(service, :env, Map.get(service, "env", %{})),
       "secret_env" => Map.get(service, :secret_env, Map.get(service, "secret_env", %{})),

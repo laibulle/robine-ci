@@ -3,12 +3,22 @@ defmodule Robine.Execution.Contracts.Service do
 
   @derive {Inspect, except: [:secret_env]}
   @enforce_keys [:id, :image]
-  defstruct [:id, :image, :user, :readiness, env: %{}, secret_env: %{}, command: []]
+  defstruct [
+    :id,
+    :image,
+    :user,
+    :readiness,
+    privileged: false,
+    env: %{},
+    secret_env: %{},
+    command: []
+  ]
 
   @type t :: %__MODULE__{
           id: String.t(),
           image: String.t(),
           user: String.t() | nil,
+          privileged: boolean(),
           env: %{optional(String.t()) => String.t()},
           secret_env: %{optional(String.t()) => String.t()},
           command: [String.t()],

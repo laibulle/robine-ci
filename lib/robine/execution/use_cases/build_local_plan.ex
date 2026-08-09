@@ -139,6 +139,7 @@ defmodule Robine.Execution.UseCases.BuildLocalPlan do
           execution = %Service{
             id: service.id,
             image: service.image,
+            privileged: service.privileged,
             user: service.user,
             env: service.env,
             secret_env: secret_env,

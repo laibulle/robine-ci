@@ -37,6 +37,7 @@ defmodule RobineWeb.Router do
     get "/auth/oidc/callback", AuthController, :oidc_callback
     get "/setup", AuthController, :bootstrap
     post "/setup", AuthController, :create_bootstrap
+    get "/pipelines/:id/jobs/:job_id/logs", JobLogController, :download
 
     live_session :authenticated,
       on_mount: [{RobineWeb.UserAuth, :require_authenticated}] do

@@ -82,6 +82,7 @@ defmodule Robine.Execution.Domain.SpecificationValidator do
 
   defp valid_service?(%Service{} = service) do
     service.id =~ ~r/\A[a-z][a-z0-9_-]{0,62}\z/ and nonempty_string?(service.image) and
+      valid_service_privilege?(service) and
       valid_service_user?(service.user) and
       valid_service_map?(service.env) and valid_service_map?(service.secret_env) and
       is_list(service.command) and length(service.command) <= 32 and
@@ -90,6 +91,13 @@ defmodule Robine.Execution.Domain.SpecificationValidator do
   end
 
   defp valid_service?(_service), do: false
+
+  defp valid_service_privilege?(%Service{privileged: false}), do: true
+
+  defp valid_service_privilege?(%Service{id: "docker", image: image, privileged: true}),
+    do: Regex.match?(~r/\Adocker:[a-zA-Z0-9._-]*dind(?:-rootless)?\z/, image)
+
+  defp valid_service_privilege?(_service), do: false
 
   defp valid_service_user?(nil), do: true
 

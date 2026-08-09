@@ -15,6 +15,7 @@ defmodule RobineWeb.JobLive.Show do
        log_chunks: [],
        log_cursor: 0,
        attempt_id: nil,
+       live_log_refresh_scheduled?: false,
        query: ""
      )
      |> load()}
@@ -24,6 +25,25 @@ defmodule RobineWeb.JobLive.Show do
   def handle_info(:refresh_logs, socket) do
     Process.send_after(self(), :refresh_logs, 1_000)
     {:noreply, load(socket)}
+  end
+
+  def handle_info({:log_appended, attempt_id}, socket)
+      when attempt_id == socket.assigns.attempt_id do
+    if socket.assigns.live_log_refresh_scheduled? do
+      {:noreply, socket}
+    else
+      Process.send_after(self(), :refresh_live_logs, 25)
+      {:noreply, assign(socket, live_log_refresh_scheduled?: true)}
+    end
+  end
+
+  def handle_info({:log_appended, _attempt_id}, socket), do: {:noreply, socket}
+
+  def handle_info(:refresh_live_logs, socket) do
+    {:noreply,
+     socket
+     |> assign(live_log_refresh_scheduled?: false)
+     |> load_new_logs()}
   end
 
   @impl true
@@ -122,10 +142,7 @@ defmodule RobineWeb.JobLive.Show do
     started = System.monotonic_time()
     current_attempt_id = socket.assigns.attempt && socket.assigns.attempt.id
 
-    socket =
-      if current_attempt_id != socket.assigns.attempt_id,
-        do: assign(socket, attempt_id: current_attempt_id, log_chunks: [], log_cursor: 0),
-        else: socket
+    socket = subscribe_to_attempt(socket, current_attempt_id)
 
     case Pipelines.list_job_logs(
            %{job_id: socket.assigns.job_id, after: socket.assigns.log_cursor, limit: @log_window},
@@ -157,6 +174,25 @@ defmodule RobineWeb.JobLive.Show do
         )
 
         socket
+    end
+  end
+
+  defp subscribe_to_attempt(socket, current_attempt_id) do
+    if current_attempt_id != socket.assigns.attempt_id do
+      if connected?(socket) and socket.assigns.attempt_id,
+        do: Phoenix.PubSub.unsubscribe(Robine.PubSub, "attempt-logs:#{socket.assigns.attempt_id}")
+
+      if connected?(socket) and current_attempt_id,
+        do: Phoenix.PubSub.subscribe(Robine.PubSub, "attempt-logs:#{current_attempt_id}")
+
+      assign(socket,
+        attempt_id: current_attempt_id,
+        log_chunks: [],
+        log_cursor: 0,
+        live_log_refresh_scheduled?: false
+      )
+    else
+      socket
     end
   end
 
@@ -331,15 +367,34 @@ defmodule RobineWeb.JobLive.Show do
           :if={@log_chunks == []}
           class="rounded-3xl border border-dashed border-base-300 p-10 text-center"
         >
+          <span
+            :if={@job.status in [:preparing, :running]}
+            id="live-log-status"
+            role="status"
+            class="mb-4 inline-flex items-center gap-2 rounded-full border border-success/25 bg-success/10 px-2.5 py-1 text-xs font-semibold text-success"
+          >
+            <span class="size-1.5 animate-pulse rounded-full bg-success"></span>Live
+          </span>
           <h2 class="text-xl font-semibold">No retained log segments yet</h2><p class="mt-2 text-base-content/60">
-            Logs will appear here by phase and step as the runner persists them.
+            Waiting for stdout and stderr from the runner.
           </p>
         </div>
         <section :if={@log_chunks != []} class="space-y-4" aria-label="Job logs">
           <div class="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <h2 class="text-xl font-semibold">Logs</h2><p class="text-sm text-base-content/60">
-                Showing at most 50 recent 64 KB segments.
+              <div class="flex items-center gap-3">
+                <h2 class="text-xl font-semibold">Logs</h2>
+                <span
+                  :if={@job.status in [:preparing, :running]}
+                  id="live-log-status"
+                  role="status"
+                  class="inline-flex items-center gap-2 rounded-full border border-success/25 bg-success/10 px-2.5 py-1 text-xs font-semibold text-success"
+                >
+                  <span class="size-1.5 animate-pulse rounded-full bg-success"></span>Live
+                </span>
+              </div>
+              <p class="text-sm text-base-content/60">
+                Streaming stdout and stderr. Showing at most 50 recent 64 KB segments.
               </p>
             </div>
             <form id="log-filter-form" phx-change="filter">
@@ -354,6 +409,29 @@ defmodule RobineWeb.JobLive.Show do
                 phx-debounce="150"
               /></label>
             </form>
+          </div>
+          <div id="log-downloads" class="flex flex-wrap items-center gap-2">
+            <span class="mr-1 text-xs font-semibold uppercase tracking-wider text-base-content/45">
+              Download retained logs
+            </span>
+            <.link
+              href={~p"/pipelines/#{@pipeline_id}/jobs/#{@job_id}/logs"}
+              class="btn btn-sm btn-ghost border border-base-300"
+            >
+              <.icon name="hero-arrow-down-tray" class="size-4" /> Combined
+            </.link>
+            <.link
+              href={~p"/pipelines/#{@pipeline_id}/jobs/#{@job_id}/logs?stream=stdout"}
+              class="btn btn-sm btn-ghost border border-base-300"
+            >
+              stdout
+            </.link>
+            <.link
+              href={~p"/pipelines/#{@pipeline_id}/jobs/#{@job_id}/logs?stream=stderr"}
+              class="btn btn-sm btn-ghost border border-base-300"
+            >
+              stderr
+            </.link>
           </div>
           <div id="log-segments" class="space-y-6">
             <section
@@ -384,7 +462,14 @@ defmodule RobineWeb.JobLive.Show do
                     :for={chunk <- group.chunks}
                     id={"log-#{chunk.sequence}"}
                     data-stream={chunk.stream}
-                  ><span class="sr-only">{stream_label(chunk.stream)}: </span>{chunk.content}</span></code></pre>
+                  ><span class="sr-only">{stream_label(chunk.stream)}: </span><span
+                      :if={chunk.stream in ["stderr", "system"]}
+                      aria-hidden="true"
+                      class={[
+                        "mr-2 select-none font-semibold",
+                        if(chunk.stream == "stderr", do: "text-error", else: "text-info")
+                      ]}
+                    >[{chunk.stream}]</span>{chunk.content}</span></code></pre>
               </details>
             </section>
           </div>

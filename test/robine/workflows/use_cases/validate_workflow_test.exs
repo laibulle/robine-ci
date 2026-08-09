@@ -337,6 +337,40 @@ defmodule Robine.Workflows.UseCases.ValidateWorkflowTest do
     end
   end
 
+  test "allows only the official attempt-scoped Docker-in-Docker service to be privileged" do
+    valid = """
+    version: 1
+    name: DinD
+    on: {push: {}}
+    jobs:
+      test:
+        image: elixir:1.20
+        services:
+          docker:
+            image: docker:28-dind-rootless
+            privileged: true
+            readiness: {tcp: 2375, timeout: 60s}
+        steps: [{run: docker info}]
+    """
+
+    assert {:ok, workflow, _warnings} = validate(valid)
+    assert workflow.jobs["test"].services["docker"].privileged
+
+    for {service_id, image} <- [
+          {"postgres", "docker:28-dind-rootless"},
+          {"docker", "attacker.example/dind:latest"},
+          {"docker", "postgres:18-alpine"}
+        ] do
+      invalid =
+        valid
+        |> String.replace("      docker:", "      #{service_id}:")
+        |> String.replace("docker:28-dind-rootless", image)
+
+      assert {:error, diagnostics} = validate(invalid)
+      assert Enum.any?(diagnostics, &(&1.code == "service.privileged"))
+    end
+  end
+
   test "normalizes fixed job and step conditions" do
     yaml = """
     version: 1

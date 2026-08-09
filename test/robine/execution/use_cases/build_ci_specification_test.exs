@@ -14,6 +14,15 @@ defmodule Robine.Execution.UseCases.BuildCiSpecificationTest do
       "secret_names" => ["TEST_DB_PASSWORD"],
       "resolved_secrets" => %{"TEST_DB_PASSWORD" => secret},
       "services" => %{
+        "docker" => %{
+          "id" => "docker",
+          "image" => "docker:28-dind",
+          "privileged" => true,
+          "env" => %{"DOCKER_TLS_CERTDIR" => ""},
+          "secret_env" => %{},
+          "command" => [],
+          "readiness" => %{"tcp" => 2375, "timeout_ms" => 60_000}
+        },
         "postgres" => %{
           "id" => "postgres",
           "image" => "postgres:18-alpine",
@@ -33,10 +42,12 @@ defmodule Robine.Execution.UseCases.BuildCiSpecificationTest do
     assert {:ok, specification} =
              Execution.build_ci_specification(%{persisted: persisted, source_path: nil}, context)
 
-    assert [service] = specification.services
-    assert service.secret_env == %{"POSTGRES_PASSWORD" => secret}
+    assert [docker, postgres] = specification.services
+    assert docker.privileged
+    assert docker.secret_env == %{}
+    assert postgres.secret_env == %{"POSTGRES_PASSWORD" => secret}
     refute inspect(specification) =~ secret
-    refute inspect(service) =~ secret
+    refute inspect(postgres) =~ secret
   end
 
   test "fails safely when persisted service secret metadata is inconsistent" do

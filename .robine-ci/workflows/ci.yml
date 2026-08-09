@@ -16,7 +16,18 @@ jobs:
       ERL_FLAGS: "+S 4:4"
       MAKEFLAGS: "-j4"
       ROBINE_TEST_DATABASE_HOST: postgres
+      DOCKER_HOST: tcp://docker:2375
+      DOCKER_TLS_CERTDIR: ""
     services:
+      docker:
+        image: docker:28-dind
+        privileged: true
+        env:
+          DOCKER_TLS_CERTDIR: ""
+        command: ["--tls=false"]
+        readiness:
+          tcp: 2375
+          timeout: 60s
       postgres:
         image: postgres:18-alpine
         user: postgres
@@ -31,7 +42,7 @@ jobs:
       - name: Checkout
         uses: checkout
       - name: Prepare Mix tooling
-        run: mix local.hex --force && mix local.rebar --force
+        run: apt-get update && apt-get install -y --no-install-recommends docker.io && rm -rf /var/lib/apt/lists/* && mix local.hex --force && mix local.rebar --force
       - name: Restore Mix cache
         uses: cache/restore
         with:

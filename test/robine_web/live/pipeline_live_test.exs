@@ -301,6 +301,78 @@ defmodule RobineWeb.PipelineLiveTest do
     assert has_element?(job_view, "pre code", "robine run 'test[otp=27]'")
   end
 
+  test "streams newly persisted stderr into a running job", %{conn: conn} do
+    conn = signed_in_conn(conn)
+    context = Dependencies.context(%{id: "admin", role: :administrator}, "live-job-logs")
+
+    assert {:ok, pipeline} =
+             Pipelines.create_pipeline(
+               %{
+                 repository_id: Ecto.UUID.generate(),
+                 workflow_name: "Live logs",
+                 commit_sha: String.duplicate("a", 40),
+                 jobs: %{"test" => %{needs: []}}
+               },
+               context
+             )
+
+    assert {:ok, _queued} = Pipelines.queue_pipeline(%{pipeline_id: pipeline.id}, context)
+    assert {:ok, attempt} = Pipelines.claim_next_job(%{}, context)
+
+    assert {:ok, _attempt} =
+             Pipelines.record_runner_event(
+               %{idempotency_token: attempt.idempotency_token, sequence: 1, status: :preparing},
+               context
+             )
+
+    assert {:ok, _attempt} =
+             Pipelines.record_runner_event(
+               %{idempotency_token: attempt.idempotency_token, sequence: 2, status: :running},
+               context
+             )
+
+    snapshot = Pipelines.pipeline_snapshot(%{pipeline_id: pipeline.id}, context) |> elem(1)
+    job = hd(snapshot.jobs)
+    assert {:ok, view, _html} = live(conn, ~p"/pipelines/#{pipeline.id}/jobs/#{job.id}")
+    assert has_element?(view, "#live-log-status")
+
+    assert :ok =
+             Pipelines.append_log_event(
+               %{
+                 attempt_id: attempt.id,
+                 sequence: 1,
+                 phase: :execution,
+                 step_position: 1,
+                 step_name: "Test",
+                 status: :running,
+                 duration_ms: 0,
+                 stream: :stderr,
+                 content: "compilation failed\n"
+               },
+               context
+             )
+
+    Phoenix.PubSub.broadcast(
+      Robine.PubSub,
+      "attempt-logs:#{attempt.id}",
+      {:log_appended, attempt.id}
+    )
+
+    send(view.pid, :refresh_live_logs)
+    assert render(view) =~ "compilation failed"
+    assert has_element?(view, "[data-stream='stderr']")
+    assert has_element?(view, "[data-stream='stderr'] .text-error", "[stderr]")
+    assert has_element?(view, "#log-downloads a[href*='stream=stderr']")
+
+    download_conn =
+      get(conn, ~p"/pipelines/#{pipeline.id}/jobs/#{job.id}/logs?stream=stderr")
+
+    assert response(download_conn, 200) == "compilation failed\n"
+
+    assert get_resp_header(download_conn, "content-disposition") ==
+             [~s(attachment; filename="test-attempt-logs-stderr.log")]
+  end
+
   defp signed_in_conn(conn) do
     post(conn, ~p"/setup", %{
       "token" => "test-bootstrap-token",
