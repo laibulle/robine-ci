@@ -25,7 +25,11 @@ defmodule RobineWeb.PipelineLiveTest do
                  jobs: %{"build" => %{needs: []}, "test" => %{needs: ["build"]}},
                  workflow_revision: %{
                    path: ".robine-ci/workflows/ci.yml",
-                   source: "version: 1\nname: CI\n"
+                   source: "version: 1\nname: CI\n",
+                   sources: %{
+                     ".robine-ci/workflows/quality.yml" =>
+                       "version: 1\nname: Quality\non: {workflow_call: {}}\n"
+                   }
                  }
                },
                context
@@ -50,6 +54,14 @@ defmodule RobineWeb.PipelineLiveTest do
     assert has_element?(revision_view, "#workflow-revision-source", "version: 1")
     assert has_element?(revision_view, "#workflow-revision-digest")
     assert has_element?(revision_view, "#workflow-revision-graph", "build")
+
+    assert has_element?(
+             revision_view,
+             "#included-workflow-revisions",
+             ".robine-ci/workflows/quality.yml"
+           )
+
+    assert render(revision_view) =~ "workflow_call"
 
     assert {:ok, _job_view, job_html} = live(conn, ~p"/pipelines/#{pipeline.id}/jobs/#{job.id}")
     assert job_html =~ "robine run test"
@@ -82,6 +94,35 @@ defmodule RobineWeb.PipelineLiveTest do
 
     assert {:ok, snapshot} = Pipelines.pipeline_snapshot(%{pipeline_id: pipeline.id}, context)
     assert snapshot.status == :created
+  end
+
+  test "shows the intended UTC occurrence for a scheduled pipeline", %{conn: conn} do
+    conn = signed_in_conn(conn)
+    context = Dependencies.context(%{id: "system:scheduler", role: :administrator}, "schedule-ui")
+    scheduled_for = ~U[2026-08-09 02:00:00Z]
+
+    assert {:ok, pipeline} =
+             Pipelines.create_pipeline(
+               %{
+                 repository_id: Ecto.UUID.generate(),
+                 workflow_name: "Nightly",
+                 commit_sha: String.duplicate("8", 40),
+                 trigger: :schedule,
+                 scheduled_for: scheduled_for,
+                 jobs: %{"nightly" => %{needs: []}}
+               },
+               context
+             )
+
+    assert {:ok, view, html} = live(conn, ~p"/pipelines/#{pipeline.id}")
+
+    assert has_element?(
+             view,
+             "#scheduled-for time[datetime='2026-08-09T02:00:00.000000Z']"
+           )
+
+    assert html =~ "Intended schedule"
+    assert html =~ "schedule"
   end
 
   test "shows trigger, actor, duration, runner phase, and infrastructure failure", %{conn: conn} do
@@ -173,6 +214,91 @@ defmodule RobineWeb.PipelineLiveTest do
     assert job_html =~ ~s(id="phase-image_acquisition")
     assert job_html =~ ~s(id="phase-execution")
     assert job_html =~ ~s(id="step-1")
+  end
+
+  test "explains a skipped job's fixed condition", %{conn: conn} do
+    conn = signed_in_conn(conn)
+    context = Dependencies.context(%{id: "admin", role: :administrator}, "skipped-job-live")
+
+    assert {:ok, pipeline} =
+             Pipelines.create_pipeline(
+               %{
+                 repository_id: Ecto.UUID.generate(),
+                 workflow_name: "Conditional CI",
+                 commit_sha: String.duplicate("c", 40),
+                 jobs: %{
+                   "build" => %{needs: []},
+                   "publish" => %{needs: ["build"], condition: :success}
+                 }
+               },
+               context
+             )
+
+    assert {:ok, _} = Pipelines.queue_pipeline(%{pipeline_id: pipeline.id}, context)
+    assert {:ok, attempt} = Pipelines.claim_next_job(%{}, context)
+
+    for {sequence, status, reason} <- [
+          {1, :preparing, nil},
+          {2, :running, nil},
+          {3, :failed, :command_failed}
+        ] do
+      assert {:ok, _} =
+               Pipelines.record_runner_event(
+                 %{
+                   idempotency_token: attempt.idempotency_token,
+                   sequence: sequence,
+                   status: status,
+                   reason: reason
+                 },
+                 context
+               )
+    end
+
+    snapshot = Pipelines.pipeline_snapshot(%{pipeline_id: pipeline.id}, context) |> elem(1)
+    publish = Enum.find(snapshot.jobs, &(&1.job_key == "publish"))
+    assert publish.status == :skipped
+
+    assert {:ok, view, html} = live(conn, ~p"/pipelines/#{pipeline.id}/jobs/#{publish.id}")
+    assert has_element?(view, "#condition-explanation", "Condition did not match")
+    assert html =~ "if: success"
+  end
+
+  test "shows immutable matrix values on pipeline and job views", %{conn: conn} do
+    conn = signed_in_conn(conn)
+    context = Dependencies.context(%{id: "admin", role: :administrator}, "matrix-live")
+
+    matrix_job = %Robine.Workflows.Domain.Job{
+      id: "test[otp=27]",
+      base_id: "test",
+      matrix_values: %{"otp" => "27"},
+      image: "alpine:3.22",
+      env: %{"ROBINE_MATRIX_OTP" => "27"},
+      needs: [],
+      steps: [%Robine.Workflows.Domain.Step{name: "Test", kind: :run, value: "true"}]
+    }
+
+    assert {:ok, pipeline} =
+             Pipelines.create_pipeline(
+               %{
+                 repository_id: Ecto.UUID.generate(),
+                 workflow_name: "Matrix UI",
+                 commit_sha: String.duplicate("9", 40),
+                 jobs: %{matrix_job.id => matrix_job}
+               },
+               context
+             )
+
+    assert {:ok, pipeline_view, _html} = live(conn, ~p"/pipelines/#{pipeline.id}")
+    assert has_element?(pipeline_view, ".badge", "otp=27")
+
+    snapshot = Pipelines.pipeline_snapshot(%{pipeline_id: pipeline.id}, context) |> elem(1)
+    job = hd(snapshot.jobs)
+    assert job.base_id == "test"
+    assert job.matrix_values == %{"otp" => "27"}
+
+    assert {:ok, job_view, _html} = live(conn, ~p"/pipelines/#{pipeline.id}/jobs/#{job.id}")
+    assert has_element?(job_view, "#matrix-values", "otp=27")
+    assert has_element?(job_view, "pre code", "robine run 'test[otp=27]'")
   end
 
   defp signed_in_conn(conn) do

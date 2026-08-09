@@ -1,6 +1,6 @@
 defmodule Robine.Adapters.SourceControl.GitHubClient do
   @moduledoc false
-  @behaviour Robine.Repositories.Ports.GitHub
+  @behaviour Robine.Repositories.Ports.SourceControl
 
   @api "https://api.github.com"
   alias Robine.Adapters.Archive.SafeTar
@@ -36,6 +36,27 @@ defmodule Robine.Adapters.SourceControl.GitHubClient do
       %{"message" => "Not Found"} -> {:ok, []}
       {:error, _reason} = error -> error
       other -> {:error, {:unexpected_github_response, other}}
+    end
+  end
+
+  @impl true
+  def default_branch_head(repository) do
+    with {:ok, token} <- token(repository),
+         {:ok, %{body: %{"default_branch" => branch}}} when is_binary(branch) <-
+           request(:get, "#{@api}/repos/#{repository.full_name}", token, []),
+         {:ok, %{body: %{"sha" => sha}}} when is_binary(sha) <-
+           request(
+             :get,
+             "#{@api}/repos/#{repository.full_name}/commits/#{URI.encode(branch)}",
+             token,
+             []
+           ),
+         true <- Regex.match?(~r/\A[0-9a-f]{40}\z/, sha) do
+      {:ok, %{branch: branch, sha: sha}}
+    else
+      false -> {:error, :invalid_default_branch_head}
+      {:error, _reason} = error -> error
+      _other -> {:error, :invalid_default_branch_head}
     end
   end
 

@@ -22,7 +22,14 @@ defmodule Robine.Repositories.UseCases.RegisterGitHubRepository do
              })
            ),
          :ok <- deps.repository.upsert_repository(repository) do
-      {:ok, %RepositoryView{id: repository.id, full_name: repository.full_name, trusted: true}}
+      {:ok,
+       %RepositoryView{
+         id: repository.id,
+         provider: repository.provider,
+         provider_instance: repository.provider_instance,
+         full_name: repository.full_name,
+         trusted: true
+       }}
     end
   end
 
@@ -38,6 +45,8 @@ defmodule Robine.Repositories.UseCases.RegisterGitHubRepository do
       when is_integer(provider_id) and is_integer(installation_id) and owner != "" and name != "" ->
         {:ok,
          %{
+           provider: :github,
+           provider_instance: "default",
            provider_id: provider_id,
            installation_id: installation_id,
            owner: owner,

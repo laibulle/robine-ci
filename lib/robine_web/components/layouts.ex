@@ -37,46 +37,87 @@ defmodule RobineWeb.Layouts do
 
   def app(assigns) do
     ~H"""
-    <header class="sticky top-0 z-30 border-b border-base-300 bg-base-100/90 backdrop-blur">
-      <nav class="navbar mx-auto max-w-7xl px-4 sm:px-6" aria-label="Primary navigation">
-        <div class="flex-1 gap-8">
+    <div class="app-shell lg:grid lg:grid-cols-[16rem_minmax(0,1fr)]">
+      <aside class="app-sidebar sticky top-0 z-30 hidden h-screen flex-col p-4 lg:flex">
+        <nav class="flex h-full flex-col" aria-label="Primary navigation">
           <a
             href={if @current_actor, do: ~p"/pipelines", else: ~p"/"}
-            class="flex items-center gap-3 font-bold tracking-tight"
+            class="flex items-center gap-3 px-2 py-3 font-bold tracking-tight"
           >
-            <span class="grid size-9 place-items-center rounded-xl bg-primary text-lg text-primary-content">R</span>
-            <span>Robine CI</span>
+            <span class="grid size-10 place-items-center rounded-xl bg-primary text-lg text-primary-content shadow-lg shadow-primary/20">R</span>
+            <span class="leading-none">Robine <span class="text-base-content/40">CI</span></span>
           </a>
-          <div :if={@current_actor} class="hidden items-center gap-1 md:flex">
-            <.link navigate={~p"/pipelines"} class="btn btn-ghost btn-sm">Pipelines</.link>
-            <.link navigate={~p"/repositories"} class="btn btn-ghost btn-sm">Repositories</.link>
+          <div :if={@current_actor} class="mt-8 space-y-1">
+            <p class="mb-3 px-3 text-[0.65rem] font-bold uppercase tracking-[0.18em] text-base-content/35">
+              Workspace
+            </p>
+            <.link navigate={~p"/pipelines"} class="app-nav-link"><.icon
+              name="hero-bolt"
+              class="size-4"
+            /> Pipelines</.link>
+            <.link navigate={~p"/repositories"} class="app-nav-link"><.icon
+              name="hero-code-bracket-square"
+              class="size-4"
+            /> Repositories</.link>
             <.link
               :if={@current_actor.role == :administrator}
               navigate={~p"/admin"}
-              class="btn btn-ghost btn-sm"
-            >Administration</.link>
+              class="app-nav-link"
+            ><.icon name="hero-adjustments-horizontal" class="size-4" /> Administration</.link>
           </div>
-        </div>
-        <div class="flex-none gap-2">
-          <span :if={@current_actor} class="hidden text-sm text-base-content/60 sm:block">{@current_actor.email}</span>
-          <.theme_toggle />
-          <.link
-            :if={@current_actor}
-            href={~p"/sign-out"}
-            method="delete"
-            class="btn btn-ghost btn-sm"
-          >Sign out</.link>
-          <.link :if={is_nil(@current_actor)} href={~p"/sign-in"} class="btn btn-primary btn-sm">Sign in</.link>
-        </div>
-      </nav>
-    </header>
+          <div class="mt-auto space-y-3">
+            <.link :if={is_nil(@current_actor)} href={~p"/sign-in"} class="btn btn-primary w-full">Sign in</.link>
+            <div :if={@current_actor} class="rounded-2xl border border-base-300/70 bg-base-200/60 p-3">
+              <p class="truncate text-xs font-semibold">{@current_actor.email}</p>
+              <div class="mt-3 flex items-center justify-between">
+                <.theme_toggle />
+                <.link
+                  href={~p"/sign-out"}
+                  method="delete"
+                  class="btn btn-ghost btn-xs"
+                  aria-label="Sign out"
+                ><.icon name="hero-arrow-right-start-on-rectangle" class="size-4" /></.link>
+              </div>
+            </div>
+          </div>
+        </nav>
+      </aside>
 
-    <div id="page-loading-status" class="sr-only" aria-live="polite"></div>
-    <main id="main-content" class="px-4 py-10 sm:px-6 lg:px-8">
-      <div class="mx-auto max-w-7xl space-y-4">
-        {render_slot(@inner_block)}
+      <div class="min-w-0">
+        <header class="sticky top-0 z-30 border-b border-base-300/80 bg-base-100/85 backdrop-blur-xl lg:hidden">
+          <div class="flex h-16 items-center justify-between px-4">
+            <a
+              href={if @current_actor, do: ~p"/pipelines", else: ~p"/"}
+              class="flex items-center gap-2 font-bold"
+            ><span class="grid size-8 place-items-center rounded-lg bg-primary text-primary-content">R</span>
+            Robine CI</a>
+            <div class="flex items-center gap-1">
+              <.link
+                :if={@current_actor}
+                navigate={~p"/pipelines"}
+                class="btn btn-ghost btn-sm"
+                aria-label="Pipelines"
+              ><.icon name="hero-bolt" class="size-5" /></.link>
+              <.link
+                :if={@current_actor}
+                navigate={~p"/repositories"}
+                class="btn btn-ghost btn-sm"
+                aria-label="Repositories"
+              ><.icon name="hero-code-bracket-square" class="size-5" /></.link>
+              <.theme_toggle />
+              <.link :if={is_nil(@current_actor)} href={~p"/sign-in"} class="btn btn-primary btn-sm">Sign in</.link>
+            </div>
+          </div>
+        </header>
+
+        <div id="page-loading-status" class="sr-only" aria-live="polite"></div>
+        <main id="main-content" class="px-4 py-8 sm:px-8 sm:py-12 xl:px-14">
+          <div class="mx-auto max-w-7xl space-y-4">
+            {render_slot(@inner_block)}
+          </div>
+        </main>
       </div>
-    </main>
+    </div>
 
     <.flash_group flash={@flash} />
     """
@@ -138,11 +179,11 @@ defmodule RobineWeb.Layouts do
   """
   def theme_toggle(assigns) do
     ~H"""
-    <div class="card relative flex flex-row items-center border-2 border-base-300 bg-base-300 rounded-full">
+    <div class="relative flex flex-row items-center rounded-full border border-base-300 bg-base-300/70 p-0.5">
       <div class="absolute w-1/3 h-full rounded-full border-1 border-base-200 bg-base-100 brightness-200 left-0 [[data-theme=light]_&]:left-1/3 [[data-theme=dark]_&]:left-2/3 [[data-theme-source=system]_&]:!left-0 transition-[left]" />
 
       <button
-        class="flex p-2 cursor-pointer w-1/3"
+        class="relative z-10 flex w-1/3 cursor-pointer p-1.5"
         type="button"
         aria-label="Use system theme"
         phx-click={JS.dispatch("phx:set-theme")}
@@ -152,7 +193,7 @@ defmodule RobineWeb.Layouts do
       </button>
 
       <button
-        class="flex p-2 cursor-pointer w-1/3"
+        class="relative z-10 flex w-1/3 cursor-pointer p-1.5"
         type="button"
         aria-label="Use light theme"
         phx-click={JS.dispatch("phx:set-theme")}
@@ -162,7 +203,7 @@ defmodule RobineWeb.Layouts do
       </button>
 
       <button
-        class="flex p-2 cursor-pointer w-1/3"
+        class="relative z-10 flex w-1/3 cursor-pointer p-1.5"
         type="button"
         aria-label="Use dark theme"
         phx-click={JS.dispatch("phx:set-theme")}

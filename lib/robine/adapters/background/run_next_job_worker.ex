@@ -3,10 +3,12 @@ defmodule Robine.Adapters.Background.RunNextJobWorker do
   use Oban.Worker, queue: :default, max_attempts: 3, unique: [period: 5]
 
   alias Robine.Execution
+  alias Robine.Adapters.Runner.RemoteJobOffer
   alias Robine.Adapters.Background.RunnerControl
   alias Robine.Observability.Log
   alias Robine.Pipelines
   alias Robine.Repositories
+  alias Robine.Runners
   alias Robine.Runtime.Dependencies
   alias Robine.Storage
 
@@ -20,6 +22,13 @@ defmodule Robine.Adapters.Background.RunNextJobWorker do
 
     runner_control = Application.fetch_env!(:robine, :runner_control)
 
+    case dispatch_remote(context, runner_control) do
+      :local -> claim_local(context, runner_control)
+      result -> result
+    end
+  end
+
+  defp claim_local(context, runner_control) do
     case Pipelines.claim_next_job(
            %{lease_seconds: Keyword.fetch!(runner_control, :lease_seconds)},
            context
@@ -44,6 +53,37 @@ defmodule Robine.Adapters.Background.RunNextJobWorker do
 
       {:error, reason} ->
         {:error, reason}
+    end
+  end
+
+  defp dispatch_remote(context, runner_control) do
+    with {:ok, runner} <- Runners.select_available(%{}, context),
+         {:ok, attempt} <-
+           Pipelines.claim_next_job(
+             %{
+               runner_id: runner.id,
+               lease_seconds: Keyword.fetch!(runner_control, :lease_seconds)
+             },
+             context
+           ),
+         runner_context =
+           Dependencies.context(
+             %{id: runner.id, role: :runner},
+             "attempt:#{attempt.id}"
+           ),
+         {:ok, offer} <- RemoteJobOffer.build(attempt.id, runner_context),
+         :ok <-
+           Phoenix.PubSub.broadcast(
+             Robine.PubSub,
+             "runner:#{runner.id}",
+             {:job_offer, offer}
+           ) do
+      :ok
+    else
+      {:error, :none} -> :local
+      {:error, :runner_unavailable} -> :local
+      {:error, :capacity} -> {:snooze, 1}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -213,7 +253,7 @@ defmodule Robine.Adapters.Background.RunNextJobWorker do
         )
       end
 
-      if Map.get(event, :status) in [:succeeded, :failed, :cancelled, :timed_out] do
+      if Map.get(event, :status) in [:succeeded, :failed, :cancelled, :timed_out, :skipped] do
         :telemetry.execute(
           [:robine, :runner, :phase],
           %{duration: Map.get(event, :duration_ms, 0)},

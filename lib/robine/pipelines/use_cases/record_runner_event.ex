@@ -20,24 +20,107 @@ defmodule Robine.Pipelines.UseCases.RecordRunnerEvent do
              is_atom(repository) do
     deps.unit_of_work.transaction(fn ->
       with {:ok, attempt} <- repository.get_attempt_by_token(token),
-           {:ok, updated_attempt} <-
-             Attempt.record_event(attempt, sequence, status, Map.get(input, :reason)) do
-        if updated_attempt == attempt do
-          {:ok, attempt}
-        else
-          with :ok <- repository.update_attempt(updated_attempt),
-               :ok <- reconcile_job(updated_attempt, repository),
-               {:ok, pipeline_id} <- reconcile_graph(updated_attempt.job_id, deps),
-               :ok <- maybe_project(attempt, updated_attempt, pipeline_id, deps),
-               {:ok, persisted_attempt} <- repository.get_attempt_by_token(token) do
-            {:ok, persisted_attempt}
-          end
-        end
+           {:ok, updated_attempt} <- apply_event(attempt, input, deps) do
+        {:ok, updated_attempt}
+      end
+    end)
+  end
+
+  def call(
+        %{
+          idempotency_token: token,
+          message_id: message_id,
+          sequence: sequence,
+          status: status
+        } = input,
+        %ExecutionContext{
+          actor: %{id: runner_id, role: :runner},
+          dependencies: %{pipelines: %Dependencies{job_repository: repository} = deps}
+        }
+      )
+      when is_binary(token) and is_binary(message_id) and byte_size(message_id) in 1..128 and
+             is_integer(sequence) and sequence > 0 and status in @attempt_statuses and
+             is_atom(repository) do
+    deps.unit_of_work.transaction(fn ->
+      with {:ok, attempt} <- repository.get_attempt_by_token_for_update(token),
+           :ok <- authorize_runner(attempt, runner_id),
+           {:ok, outcome} <- remote_event_outcome(attempt, input, runner_id, deps) do
+        {:ok, outcome}
       end
     end)
   end
 
   def call(_input, %ExecutionContext{}), do: {:error, {:invalid_runner_event, :shape}}
+
+  defp remote_event_outcome(attempt, input, runner_id, deps) do
+    case deps.job_repository.get_runner_event(runner_id, input.message_id) do
+      {:ok, receipt} ->
+        if same_message?(receipt, attempt, input),
+          do: {:ok, attempt},
+          else: {:error, :message_id_conflict}
+
+      {:error, :not_found} ->
+        if input.sequence <= attempt.last_sequence do
+          {:error, {:stale_event_sequence, attempt.last_sequence, input.sequence}}
+        else
+          with {:ok, updated} <- apply_event(attempt, input, deps),
+               :ok <-
+                 deps.job_repository.insert_runner_event(%{
+                   id: deps.id_generator.generate(),
+                   runner_id: runner_id,
+                   message_id: input.message_id,
+                   attempt_id: attempt.id,
+                   sequence: input.sequence,
+                   status: input.status,
+                   reason: Map.get(input, :reason),
+                   inserted_at: deps.clock.now()
+                 }) do
+            {:ok, updated}
+          end
+        end
+    end
+  end
+
+  defp apply_event(attempt, input, deps) do
+    repository = deps.job_repository
+
+    with {:ok, updated_attempt} <-
+           Attempt.record_event(
+             attempt,
+             input.sequence,
+             input.status,
+             Map.get(input, :reason)
+           ) do
+      if updated_attempt == attempt do
+        {:ok, attempt}
+      else
+        with :ok <- repository.update_attempt(updated_attempt),
+             :ok <- lock_job_graph(updated_attempt.job_id, repository),
+             :ok <- reconcile_job(updated_attempt, repository),
+             {:ok, pipeline_id} <- reconcile_graph(updated_attempt.job_id, deps),
+             :ok <- maybe_project(attempt, updated_attempt, pipeline_id, deps),
+             {:ok, persisted_attempt} <-
+               repository.get_attempt_by_token(updated_attempt.idempotency_token) do
+          {:ok, persisted_attempt}
+        end
+      end
+    end
+  end
+
+  defp authorize_runner(%Attempt{runner_id: runner_id}, runner_id), do: :ok
+  defp authorize_runner(%Attempt{}, _runner_id), do: {:error, :attempt_not_assigned_to_runner}
+
+  defp same_message?(receipt, attempt, input) do
+    receipt.attempt_id == attempt.id and receipt.sequence == input.sequence and
+      receipt.status == input.status and receipt.reason == Map.get(input, :reason)
+  end
+
+  defp lock_job_graph(job_id, repository) do
+    with {:ok, job} <- repository.get_job(job_id),
+         {:ok, _locked_jobs} <- repository.list_jobs_for_update(job.pipeline_id) do
+      :ok
+    end
+  end
 
   defp reconcile_job(%Attempt{status: status} = attempt, repository)
        when status in @terminal_attempts do
@@ -66,16 +149,40 @@ defmodule Robine.Pipelines.UseCases.RecordRunnerEvent do
   end
 
   defp release_jobs(jobs, repository) do
+    with {:ok, released_jobs} <- release_until_stable(jobs) do
+      jobs
+      |> Enum.zip(released_jobs)
+      |> Enum.reduce_while(:ok, fn {job, released}, :ok ->
+        case persist_if_changed(job, released, repository) do
+          :ok -> {:cont, :ok}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+      end)
+    end
+  end
+
+  defp release_until_stable(jobs) do
     statuses = Map.new(jobs, &{&1.job_key, &1.status})
 
-    Enum.reduce_while(jobs, :ok, fn job, :ok ->
-      with {:ok, released} <- Job.release(job, statuses),
-           :ok <- persist_if_changed(job, released, repository) do
-        {:cont, :ok}
-      else
+    Enum.reduce_while(jobs, {:ok, []}, fn job, {:ok, released} ->
+      case Job.release(job, statuses) do
+        {:ok, updated} -> {:cont, {:ok, [updated | released]}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
+    |> case do
+      {:ok, reversed} ->
+        released = Enum.reverse(reversed)
+
+        if released == jobs do
+          {:ok, released}
+        else
+          release_until_stable(released)
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
   defp persist_if_changed(value, value, _repository), do: :ok

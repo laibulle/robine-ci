@@ -2,7 +2,7 @@
 
 ## Status
 
-- **State:** Accepted
+- **State:** Shipped
 - **Owner:** Developer Experience
 - **Target:** MVP
 - **Last updated:** 2026-08-09

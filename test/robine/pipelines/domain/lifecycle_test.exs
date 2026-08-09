@@ -44,20 +44,64 @@ defmodule Robine.Pipelines.Domain.LifecycleTest do
     assert completed.finished_at == finished_at
   end
 
-  test "jobs release only after dependencies succeed and skip after dependency failure" do
-    assert {:ok, blocked} =
-             Job.new(%{
-               id: "job",
-               pipeline_id: "pipeline",
-               job_key: "test",
-               needs: ["build"],
-               position: 1
+  test "jobs wait for every dependency before evaluating their condition" do
+    blocked = conditional_job("success")
+
+    assert {:ok, %{status: :blocked}} =
+             Job.release(blocked, %{"build" => :failed, "lint" => :running})
+
+    assert {:ok, %{status: :queued}} =
+             Job.release(blocked, %{"build" => :succeeded, "lint" => :succeeded})
+
+    assert {:ok, %{status: :skipped}} =
+             Job.release(blocked, %{"build" => :succeeded, "lint" => :failed})
+  end
+
+  test "failure and always conditions use dependency terminal outcomes" do
+    statuses = %{"build" => :failed, "lint" => :skipped}
+
+    assert {:ok, %{status: :queued}} = Job.release(conditional_job("failure"), statuses)
+    assert {:ok, %{status: :queued}} = Job.release(conditional_job("always"), statuses)
+
+    assert {:ok, %{status: :skipped}} =
+             Job.release(conditional_job("failure"), %{
+               "build" => :succeeded,
+               "lint" => :skipped
              })
 
-    assert blocked.status == :blocked
-    assert {:ok, %{status: :blocked}} = Job.release(blocked, %{"build" => :running})
-    assert {:ok, %{status: :queued}} = Job.release(blocked, %{"build" => :succeeded})
-    assert {:ok, %{status: :skipped}} = Job.release(blocked, %{"build" => :failed})
+    assert {:ok, %{status: :queued}} =
+             Job.release(conditional_job("always"), %{
+               "build" => :succeeded,
+               "lint" => :skipped
+             })
+  end
+
+  test "a cancelled dependency suppresses every condition" do
+    statuses = %{"build" => :cancelled, "lint" => :failed}
+
+    for condition <- ["success", "failure", "always"] do
+      assert {:ok, %{status: :skipped}} =
+               Job.release(conditional_job(condition), statuses)
+    end
+  end
+
+  test "job condition evaluation is idempotent after release" do
+    assert {:ok, queued} =
+             Job.release(conditional_job("always"), %{
+               "build" => :failed,
+               "lint" => :skipped
+             })
+
+    assert {:ok, ^queued} =
+             Job.release(queued, %{"build" => :succeeded, "lint" => :succeeded})
+  end
+
+  test "job construction rejects unknown and independent failure conditions" do
+    assert {:error, {:invalid_job_condition, "sometimes"}} =
+             Job.new(job_input(["build"], "sometimes"))
+
+    assert {:error, {:invalid_job_condition, "failure"}} =
+             Job.new(job_input([], "failure"))
   end
 
   test "attempt events are ordered, idempotent, and classify failures" do
@@ -133,6 +177,22 @@ defmodule Robine.Pipelines.Domain.LifecycleTest do
       status: status,
       needs: [],
       position: 0
+    }
+  end
+
+  defp conditional_job(condition) do
+    assert {:ok, job} = Job.new(job_input(["build", "lint"], condition))
+    job
+  end
+
+  defp job_input(needs, condition) do
+    %{
+      id: "conditional-job",
+      pipeline_id: "pipeline",
+      job_key: "test",
+      needs: needs,
+      position: 1,
+      execution: %{"condition" => condition}
     }
   end
 end

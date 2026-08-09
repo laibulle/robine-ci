@@ -1,0 +1,10 @@
+version: 1
+name: Invalid schedule
+on:
+  schedule:
+    - cron: "61 25 * * MON"
+jobs:
+  maintenance:
+    image: alpine:3.22
+    steps:
+      - run: echo maintenance

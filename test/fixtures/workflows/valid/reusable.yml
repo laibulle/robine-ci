@@ -1,0 +1,14 @@
+version: 1
+name: Reusable quality
+on:
+  workflow_call:
+    inputs:
+      runtime:
+        type: choice
+        required: true
+        options: ["3.21", "3.22"]
+jobs:
+  test:
+    image: alpine:3.22
+    steps:
+      - run: echo reusable

@@ -15,11 +15,11 @@ defmodule Robine.Adapters.Background.ProcessGitHubDeliveryWorker do
 
     context =
       Dependencies.context(
-        %{id: "system:github-delivery", role: :administrator},
-        "github:#{delivery_id}"
+        %{id: "system:source-control-delivery", role: :administrator},
+        "source-control:#{delivery_id}"
       )
 
-    Log.event(:info, "github.delivery.processing", %{
+    Log.event(:info, "source_control.delivery.processing", %{
       correlation_id: context.correlation_id,
       delivery_id: delivery_id,
       outcome: :started
@@ -29,9 +29,9 @@ defmodule Robine.Adapters.Background.ProcessGitHubDeliveryWorker do
 
     worker_result =
       case result do
-        {:ok, %{pipeline_ids: pipeline_ids}} ->
+        {:ok, %{pipeline_ids: pipeline_ids} = completed} ->
           Enum.each(pipeline_ids, fn pipeline_id ->
-            Log.event(:info, "github.delivery.pipeline_created", %{
+            Log.event(:info, "source_control.delivery.pipeline_created", %{
               correlation_id: context.correlation_id,
               delivery_id: delivery_id,
               pipeline_id: pipeline_id,
@@ -39,19 +39,19 @@ defmodule Robine.Adapters.Background.ProcessGitHubDeliveryWorker do
             })
           end)
 
-          :ok
+          {:ok, Map.get(completed, :provider, :unknown)}
 
         {:ok, ignored} ->
-          Log.event(:info, "github.delivery.completed", %{
+          Log.event(:info, "source_control.delivery.completed", %{
             correlation_id: context.correlation_id,
             delivery_id: delivery_id,
             outcome: if(Map.has_key?(ignored, :ignored), do: :ignored, else: :ok)
           })
 
-          :ok
+          {:ok, Map.get(ignored, :provider, :unknown)}
 
         {:error, :not_found} ->
-          Log.event(:warning, "github.delivery.completed", %{
+          Log.event(:warning, "source_control.delivery.completed", %{
             correlation_id: context.correlation_id,
             delivery_id: delivery_id,
             outcome: :not_found
@@ -60,7 +60,7 @@ defmodule Robine.Adapters.Background.ProcessGitHubDeliveryWorker do
           {:cancel, :delivery_not_found}
 
         {:error, reason} ->
-          Log.event(:error, "github.delivery.completed", %{
+          Log.event(:error, "source_control.delivery.completed", %{
             correlation_id: context.correlation_id,
             delivery_id: delivery_id,
             outcome: :error
@@ -69,16 +69,33 @@ defmodule Robine.Adapters.Background.ProcessGitHubDeliveryWorker do
           {:error, reason}
       end
 
+    provider = worker_provider(worker_result)
+
     :telemetry.execute(
-      [:robine, :github, :delivery],
+      [:robine, :source_control, :delivery],
       %{count: 1, duration: System.monotonic_time() - started},
-      %{outcome: delivery_outcome(worker_result)}
+      %{provider: provider, outcome: delivery_outcome(worker_result)}
     )
 
-    worker_result
+    if provider == :github do
+      :telemetry.execute(
+        [:robine, :github, :delivery],
+        %{count: 1, duration: System.monotonic_time() - started},
+        %{outcome: delivery_outcome(worker_result)}
+      )
+    end
+
+    normalize_worker_result(worker_result)
   end
 
-  defp delivery_outcome(:ok), do: :ok
+  defp delivery_outcome({:ok, _provider}), do: :ok
   defp delivery_outcome({:cancel, _reason}), do: :cancelled
   defp delivery_outcome({:error, _reason}), do: :error
+
+  defp worker_provider({:ok, provider}) when provider in [:github, :gitlab, :forgejo],
+    do: provider
+
+  defp worker_provider(_result), do: :unknown
+  defp normalize_worker_result({:ok, _provider}), do: :ok
+  defp normalize_worker_result(result), do: result
 end

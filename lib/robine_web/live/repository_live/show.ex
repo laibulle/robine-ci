@@ -19,7 +19,17 @@ defmodule RobineWeb.RepositoryLive.Show do
          repository: repository,
          pipelines: repository_pipelines,
          workflows: workflows,
-         github_preflight: :not_run
+         github_preflight: :not_run,
+         manual_state: :not_run,
+         manual_head: nil,
+         manual_workflows: [],
+         manual_request_ids: %{},
+         manual_error: nil,
+         manual_input_errors: %{},
+         schedule_state: :not_run,
+         schedule_head: nil,
+         scheduled_workflows: [],
+         schedule_error: nil
        )}
     else
       _ ->
@@ -48,6 +58,131 @@ defmodule RobineWeb.RepositoryLive.Show do
     end
   end
 
+  def handle_event("check-source-control-connection", _params, socket) do
+    result =
+      Repositories.check_source_control_connection(
+        %{repository_id: socket.assigns.repository.id},
+        socket.assigns.execution_context
+      )
+
+    case result do
+      {:error, :forbidden} ->
+        {:noreply,
+         put_flash(socket, :error, "You do not have permission to check provider access.")}
+
+      result ->
+        {:noreply, assign(socket, github_preflight: result)}
+    end
+  end
+
+  def handle_event("discover-manual-workflows", _params, socket) do
+    case Repositories.list_manual_workflows(
+           %{repository_id: socket.assigns.repository.id},
+           socket.assigns.execution_context
+         ) do
+      {:ok, discovery} ->
+        request_ids = Map.new(discovery.workflows, &{&1.path, Ecto.UUID.generate()})
+
+        {:noreply,
+         assign(socket,
+           manual_state: :ready,
+           manual_head: %{branch: discovery.branch, commit_sha: discovery.commit_sha},
+           manual_workflows: discovery.workflows,
+           manual_request_ids: request_ids,
+           manual_error: nil,
+           manual_input_errors: %{}
+         )}
+
+      {:error, _reason} ->
+        {:noreply,
+         assign(socket,
+           manual_state: :error,
+           manual_head: nil,
+           manual_workflows: [],
+           manual_error: "The source-control provider could not load manually enabled workflows.",
+           manual_input_errors: %{}
+         )}
+    end
+  end
+
+  def handle_event("launch-manual-workflow", params, socket) do
+    input = %{
+      repository_id: socket.assigns.repository.id,
+      workflow_path: params["workflow_path"],
+      request_id: params["request_id"],
+      inputs: Map.get(params, "inputs", %{})
+    }
+
+    case Repositories.launch_manual_workflow(input, socket.assigns.execution_context) do
+      {:ok, %{pipeline: pipeline}} ->
+        {:noreply,
+         socket
+         |> put_flash(:info, "Manual workflow queued at an immutable Git revision.")
+         |> push_navigate(to: ~p"/pipelines/#{pipeline.id}")}
+
+      {:error, :forbidden} ->
+        {:noreply, put_flash(socket, :error, "You do not have permission to launch workflows.")}
+
+      {:error, {:manual_input, id, reason}} ->
+        {:noreply,
+         assign(socket,
+           manual_error: nil,
+           manual_input_errors: %{id => "This input is #{manual_input_error(reason)}."}
+         )}
+
+      {:error, {:manual_inputs_undeclared, _names}} ->
+        {:noreply,
+         assign(socket,
+           manual_error: "The submitted form contains undeclared inputs.",
+           manual_input_errors: %{}
+         )}
+
+      {:error, _reason} ->
+        {:noreply,
+         assign(socket,
+           manual_error:
+             "The workflow changed or the source-control provider is unavailable. Refresh and retry.",
+           manual_input_errors: %{}
+         )}
+    end
+  end
+
+  def handle_event("discover-scheduled-workflows", _params, socket) do
+    case Repositories.list_scheduled_workflows(
+           %{repository_id: socket.assigns.repository.id},
+           socket.assigns.execution_context
+         ) do
+      {:ok, discovery} ->
+        {:noreply,
+         assign(socket,
+           schedule_state: :ready,
+           schedule_head: %{branch: discovery.branch, commit_sha: discovery.commit_sha},
+           scheduled_workflows: discovery.workflows,
+           schedule_error: nil
+         )}
+
+      {:error, _reason} ->
+        {:noreply,
+         assign(socket,
+           schedule_state: :error,
+           schedule_head: nil,
+           scheduled_workflows: [],
+           schedule_error: "The source-control provider could not load scheduled workflows."
+         )}
+    end
+  end
+
+  defp manual_input_error(:required), do: "required"
+  defp manual_input_error(:invalid_choice), do: "not an allowed choice"
+  defp manual_input_error(:invalid_boolean), do: "not a boolean"
+  defp manual_input_error(_reason), do: "invalid"
+
+  defp manual_form_id(path), do: "manual-workflow-#{:erlang.phash2(path)}"
+
+  defp provider_label(:github), do: "GitHub"
+  defp provider_label(:gitlab), do: "GitLab"
+  defp provider_label(:forgejo), do: "Forgejo"
+
   @impl true
   def render(assigns) do
     ~H"""
@@ -66,18 +201,36 @@ defmodule RobineWeb.RepositoryLive.Show do
         <section class="rounded-3xl border border-base-300 bg-base-100 p-6">
           <div class="flex flex-wrap items-start justify-between gap-4">
             <div>
-              <h2 class="text-xl font-semibold">GitHub installation</h2>
+              <h2 class="text-xl font-semibold">
+                {provider_label(@repository.provider)} integration
+              </h2>
               <p class="mt-1 text-sm text-base-content/60">
-                Required repository permissions: Metadata read, Contents read, Checks write.
+                {if @repository.provider == :github,
+                  do: "Required repository permissions: Metadata read, Contents read, Checks write.",
+                  else:
+                    "Verify repository read access and commit-status write access at the configured provider origin."}
               </p>
             </div>
             <button
-              :if={@current_actor.role in [:administrator, :maintainer]}
+              :if={
+                @repository.provider == :github and
+                  @current_actor.role in [:administrator, :maintainer]
+              }
               id="check-github-installation"
               phx-click="check-github-installation"
               phx-disable-with="Checking…"
               class="btn btn-outline btn-sm"
             >Check permissions</button>
+            <button
+              :if={
+                @repository.provider in [:gitlab, :forgejo] and
+                  @current_actor.role in [:administrator, :maintainer]
+              }
+              id="check-source-control-connection"
+              phx-click="check-source-control-connection"
+              phx-disable-with="Checking…"
+              class="btn btn-outline btn-sm"
+            >Check connection</button>
           </div>
           <p :if={@github_preflight == :not_run} class="mt-4 text-sm text-base-content/60">
             Permission preflight has not run in this session.
@@ -87,7 +240,7 @@ defmodule RobineWeb.RepositoryLive.Show do
             class="alert alert-success mt-4"
             role="status"
           >
-            The installation has every required least-privilege permission.
+            The configured provider connection has the required repository access.
           </div>
           <div
             :if={match?({:ok, %{status: :degraded}}, @github_preflight)}
@@ -106,8 +259,167 @@ defmodule RobineWeb.RepositoryLive.Show do
             class="alert alert-error mt-4"
             role="alert"
           >
-            GitHub could not verify this installation. Check credentials, connectivity, and installation approval.
+            {provider_label(@repository.provider)} could not verify this repository. Check credentials, connectivity, and provider access.
           </div>
+        </section>
+        <section class="rounded-3xl border border-base-300 bg-base-100 p-6">
+          <div class="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <h2 class="text-xl font-semibold">Run a workflow</h2>
+              <p class="mt-1 text-sm text-base-content/60">
+                Load declarations from the exact default-branch head. Inputs are non-secret and retained.
+              </p>
+            </div>
+            <button
+              id="discover-manual-workflows"
+              phx-click="discover-manual-workflows"
+              phx-disable-with="Loading…"
+              class="btn btn-outline btn-sm"
+            >Load manual workflows</button>
+          </div>
+          <p :if={@manual_state == :not_run} class="mt-4 text-sm text-base-content/60">
+            No source-control request has been made in this session.
+          </p>
+          <div :if={@manual_state == :error} class="alert alert-error mt-4" role="alert">
+            {@manual_error}
+          </div>
+          <div :if={@manual_head} id="manual-workflow-head" class="mt-4 rounded-2xl bg-base-200 p-4">
+            <p class="text-sm font-semibold">Default branch: {@manual_head.branch}</p>
+            <code class="mt-1 block break-all text-xs">{@manual_head.commit_sha}</code>
+          </div>
+          <div
+            :if={@manual_state == :ready and @manual_workflows == []}
+            class="mt-4 rounded-2xl border border-dashed border-base-300 p-6 text-center text-sm text-base-content/60"
+          >
+            No workflow at this revision declares <code>workflow_dispatch</code>.
+          </div>
+          <div
+            :if={@manual_error && @manual_state == :ready}
+            class="alert alert-error mt-4"
+            role="alert"
+          >
+            {@manual_error}
+          </div>
+          <div :if={@manual_workflows != []} class="mt-5 grid gap-4 lg:grid-cols-2">
+            <form
+              :for={workflow <- @manual_workflows}
+              id={manual_form_id(workflow.path)}
+              phx-submit="launch-manual-workflow"
+              class="rounded-2xl border border-base-300 p-5"
+            >
+              <input type="hidden" name="workflow_path" value={workflow.path} />
+              <input type="hidden" name="request_id" value={@manual_request_ids[workflow.path]} />
+              <h3 class="font-semibold">{workflow.name}</h3>
+              <code class="mt-1 block break-all text-xs text-base-content/55">{workflow.path}</code>
+              <div class="mt-5 space-y-4">
+                <div :for={{id, input} <- Enum.sort(workflow.inputs)}>
+                  <label class="form-control w-full">
+                    <span class="label-text font-medium">
+                      {id}{if input.required, do: " · required", else: ""}
+                    </span>
+                    <span :if={input.description} class="mb-2 text-xs text-base-content/55">
+                      {input.description}
+                    </span>
+                    <select
+                      :if={input.type in [:choice, :boolean]}
+                      name={"inputs[#{id}]"}
+                      required={input.required}
+                      class="select select-bordered w-full"
+                    >
+                      <option
+                        :for={value <- input.options || ["false", "true"]}
+                        value={value}
+                        selected={value == input.default}
+                      >
+                        {value}
+                      </option>
+                    </select>
+                    <input
+                      :if={input.type == :string}
+                      type="text"
+                      name={"inputs[#{id}]"}
+                      value={input.default || ""}
+                      required={input.required}
+                      maxlength="1024"
+                      autocomplete="off"
+                      class="input input-bordered w-full"
+                    />
+                  </label>
+                  <p
+                    :if={@manual_input_errors[id]}
+                    id={"manual-input-#{id}-error"}
+                    class="mt-1 text-sm text-error"
+                    role="alert"
+                  >
+                    {@manual_input_errors[id]}
+                  </p>
+                </div>
+              </div>
+              <p class="mt-4 text-xs text-warning">Do not enter passwords or tokens.</p>
+              <button
+                :if={@current_actor.role in [:administrator, :maintainer]}
+                type="submit"
+                phx-disable-with="Launching…"
+                class="btn btn-primary mt-4 w-full"
+              >Run at this revision</button>
+              <p :if={@current_actor.role == :viewer} class="mt-4 text-sm text-base-content/60">
+                Maintainer access is required to launch this workflow.
+              </p>
+            </form>
+          </div>
+        </section>
+        <section class="rounded-3xl border border-base-300 bg-base-100 p-6">
+          <div class="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <h2 class="text-xl font-semibold">Scheduled workflows</h2>
+              <p class="mt-1 text-sm text-base-content/60">
+                Cron expressions use UTC. Discovery reads one immutable default-branch revision.
+              </p>
+            </div>
+            <button
+              id="discover-scheduled-workflows"
+              phx-click="discover-scheduled-workflows"
+              phx-disable-with="Loading…"
+              class="btn btn-outline btn-sm"
+            >Load schedules</button>
+          </div>
+          <p :if={@schedule_state == :not_run} class="mt-4 text-sm text-base-content/60">
+            Schedules have not been loaded in this session.
+          </p>
+          <div :if={@schedule_state == :error} class="alert alert-error mt-4" role="alert">
+            {@schedule_error}
+          </div>
+          <div
+            :if={@schedule_head}
+            id="schedule-workflow-head"
+            class="mt-4 rounded-2xl bg-base-200 p-4"
+          >
+            <p class="text-sm font-semibold">Default branch: {@schedule_head.branch}</p>
+            <code class="mt-1 block break-all text-xs">{@schedule_head.commit_sha}</code>
+          </div>
+          <div
+            :if={@schedule_state == :ready and @scheduled_workflows == []}
+            class="mt-4 rounded-2xl border border-dashed border-base-300 p-6 text-center text-sm text-base-content/60"
+          >
+            No workflow at this revision declares a schedule.
+          </div>
+          <ul :if={@scheduled_workflows != []} class="mt-5 grid gap-4 lg:grid-cols-2">
+            <li
+              :for={workflow <- @scheduled_workflows}
+              class="rounded-2xl border border-base-300 p-5"
+            >
+              <p class="font-semibold">{workflow.name}</p>
+              <code class="mt-1 block break-all text-xs text-base-content/55">{workflow.path}</code>
+              <ul class="mt-4 space-y-2" aria-label={"Schedules for #{workflow.name}"}>
+                <li
+                  :for={cron <- workflow.schedules}
+                  class="rounded-xl bg-base-200 px-3 py-2 font-mono text-sm"
+                >
+                  {cron} <span class="font-sans text-xs text-base-content/55">UTC</span>
+                </li>
+              </ul>
+            </li>
+          </ul>
         </section>
         <div class="grid gap-6 lg:grid-cols-2">
           <section>

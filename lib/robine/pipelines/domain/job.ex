@@ -36,18 +36,30 @@ defmodule Robine.Pipelines.Domain.Job do
       )
       when is_binary(id) and is_binary(pipeline_id) and is_binary(key) and is_list(needs) and
              is_integer(position) and position >= 0 do
-    status = if needs == [], do: :queued, else: :blocked
+    execution = Map.get(input, :execution, %{})
+    condition = Map.get(execution, "condition", "success")
 
-    {:ok,
-     %__MODULE__{
-       id: id,
-       pipeline_id: pipeline_id,
-       job_key: key,
-       status: status,
-       needs: needs,
-       position: position,
-       execution: Map.get(input, :execution, %{})
-     }}
+    cond do
+      condition not in ["success", "failure", "always"] ->
+        {:error, {:invalid_job_condition, condition}}
+
+      condition == "failure" and needs == [] ->
+        {:error, {:invalid_job_condition, condition}}
+
+      true ->
+        status = if needs == [], do: :queued, else: :blocked
+
+        {:ok,
+         %__MODULE__{
+           id: id,
+           pipeline_id: pipeline_id,
+           job_key: key,
+           status: status,
+           needs: needs,
+           position: position,
+           execution: execution
+         }}
+    end
   end
 
   def new(_input), do: {:error, {:invalid_input, :job}}
@@ -55,16 +67,30 @@ defmodule Robine.Pipelines.Domain.Job do
   @spec release(t(), %{optional(String.t()) => status()}) :: {:ok, t()} | {:error, term()}
   def release(%__MODULE__{status: :blocked} = job, dependency_statuses) do
     statuses = Enum.map(job.needs, &Map.get(dependency_statuses, &1))
+    condition = Map.get(job.execution, "condition", "success")
+    terminal? = Enum.all?(statuses, &(&1 in @terminal))
 
     cond do
-      Enum.all?(statuses, &(&1 == :succeeded)) ->
+      not terminal? ->
+        {:ok, job}
+
+      Enum.any?(statuses, &(&1 == :cancelled)) ->
+        {:ok, %{job | status: :skipped}}
+
+      condition == "success" and Enum.all?(statuses, &(&1 == :succeeded)) ->
         {:ok, %{job | status: :queued}}
 
-      Enum.any?(statuses, &(&1 in [:failed, :cancelled, :skipped])) ->
+      condition == "failure" and Enum.any?(statuses, &(&1 == :failed)) ->
+        {:ok, %{job | status: :queued}}
+
+      condition == "always" ->
+        {:ok, %{job | status: :queued}}
+
+      condition in ["success", "failure"] ->
         {:ok, %{job | status: :skipped}}
 
       true ->
-        {:ok, job}
+        {:error, {:invalid_job_condition, condition}}
     end
   end
 

@@ -6,7 +6,7 @@ defmodule Robine.Execution.Contracts.StepResult do
 
   @type t :: %__MODULE__{
           name: String.t(),
-          status: :succeeded | :failed | :timed_out,
+          status: :succeeded | :failed | :timed_out | :skipped,
           exit_code: integer() | nil,
           output: String.t(),
           duration_ms: non_neg_integer()

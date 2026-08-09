@@ -17,7 +17,7 @@ This is a web application written using the Phoenix web framework.
 
 - Keep Robine as one Mix/OTP application for the MVP. Boundaries are module-level and enforced by architecture tests.
 - Organize each bounded context under `Robine.<Context>` with `domain/`, `use_cases/`, `ports/`, optional `contracts/` or `queries/`, and one public facade module.
-- Expose every public operation from its context facade with an explicit, documented `defdelegate` to one `UseCases.*.call/2` function. Facades contain no business logic.
+- Expose every public operation from its context facade with an explicit, documented `defdelegate` to one `UseCases.*.call/2` function. A pure use case that needs neither actor metadata nor outbound dependencies may use the narrowly documented `call/1` exception from PLAT-002. Facades contain no business logic.
 - Put business invariants and state transitions in pure domain modules. Domain code must not depend on Phoenix, LiveView, Ecto, Oban, Docker, HTTP, filesystems, or `Robine.Adapters`.
 - Use cases accept an input and typed `Robine.ExecutionContext`, coordinate domain policies and context-owned ports, own transaction boundaries, and return `{:ok, value}` or `{:error, reason}` for expected outcomes.
 - Use cases must not reference concrete adapters or delivery frameworks. Do not read application configuration, process state, or global mocks from use cases.

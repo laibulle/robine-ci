@@ -2,19 +2,31 @@ defmodule Robine.Runtime.Dependencies do
   @moduledoc "The sole production composition root for application dependencies."
 
   alias Robine.ExecutionContext
+  alias Robine.Autoscaling.Dependencies, as: AutoscalingDependencies
   alias Robine.Execution.Dependencies, as: ExecutionDependencies
   alias Robine.Identities.Dependencies, as: IdentityDependencies
   alias Robine.Operations.Dependencies, as: OperationsDependencies
   alias Robine.Pipelines.Dependencies, as: PipelineDependencies
   alias Robine.Repositories.Dependencies, as: RepositoryDependencies
+  alias Robine.Runners.Dependencies, as: RunnerDependencies
   alias Robine.Secrets.Dependencies, as: SecretDependencies
   alias Robine.Storage.Dependencies, as: StorageDependencies
+  alias Robine.Transfers.Dependencies, as: TransferDependencies
   alias Robine.Workflows.Dependencies, as: WorkflowDependencies
+
+  @spec local_context() :: ExecutionContext.t()
+  def local_context do
+    ExecutionContext.new(%{id: "cli", role: :maintainer}, "cli", %{
+      workflows: %WorkflowDependencies{decoder: Robine.Adapters.Workflow.YamlDecoder},
+      execution: %ExecutionDependencies{runner: Robine.Adapters.Execution.DockerRunner}
+    })
+  end
 
   @spec context(ExecutionContext.actor(), String.t()) :: ExecutionContext.t()
   def context(actor, correlation_id) do
     storage_quotas = Application.fetch_env!(:robine, :storage_quotas)
     retention = Application.fetch_env!(:robine, :retention)
+    blob_store = Application.fetch_env!(:robine, :blob_store_adapter)
 
     ExecutionContext.new(actor, correlation_id, %{
       pipelines: %PipelineDependencies{
@@ -34,9 +46,13 @@ defmodule Robine.Runtime.Dependencies do
         runner: Robine.Adapters.Execution.DockerRunner
       },
       identities: identity_dependencies(),
+      autoscaling: autoscaling_dependencies(),
+      runners: runner_dependencies(),
+      transfers: %TransferDependencies{archive: Robine.Adapters.Archive.SafeTar},
       operations: %OperationsDependencies{
         health: Robine.Adapters.System.SystemHealth,
-        retention: Robine.Adapters.Persistence.Postgres.StorageRetention
+        retention: Robine.Adapters.Persistence.Postgres.StorageRetention,
+        blob_store: blob_store
       },
       secrets: %SecretDependencies{
         repository: Robine.Adapters.Persistence.Postgres.SecretRepository,
@@ -46,7 +62,7 @@ defmodule Robine.Runtime.Dependencies do
       },
       storage: %StorageDependencies{
         repository: Robine.Adapters.Persistence.Postgres.StorageRepository,
-        blob_store: Robine.Adapters.Storage.LocalBlobStore,
+        blob_store: blob_store,
         clock: Robine.Adapters.System.Clock,
         id_generator: Robine.Adapters.System.IdGenerator,
         instance_quota_bytes: Keyword.fetch!(storage_quotas, :instance_bytes),
@@ -55,8 +71,8 @@ defmodule Robine.Runtime.Dependencies do
       },
       repositories: %RepositoryDependencies{
         repository: Robine.Adapters.Persistence.Postgres.GitHubRepository,
-        signature_verifier: Robine.Adapters.SourceControl.GitHubSignatureVerifier,
-        github: Application.fetch_env!(:robine, :github_adapter),
+        webhook_verifier: Robine.Adapters.SourceControl.ProviderWebhookVerifier,
+        source_control: Robine.Adapters.SourceControl.ProviderRegistry,
         clock: Robine.Adapters.System.Clock,
         id_generator: Robine.Adapters.System.IdGenerator,
         public_url: Application.fetch_env!(:robine, :public_url)
@@ -68,6 +84,7 @@ defmodule Robine.Runtime.Dependencies do
   def validate! do
     storage_quotas = Application.fetch_env!(:robine, :storage_quotas)
     retention = Application.fetch_env!(:robine, :retention)
+    blob_store = Application.fetch_env!(:robine, :blob_store_adapter)
 
     context(%{id: "startup", role: :administrator}, "startup")
     |> Map.fetch!(:dependencies)
@@ -83,10 +100,17 @@ defmodule Robine.Runtime.Dependencies do
     })
 
     IdentityDependencies.validate!(identity_dependencies())
+    AutoscalingDependencies.validate!(autoscaling_dependencies())
+    RunnerDependencies.validate!(runner_dependencies())
+
+    TransferDependencies.validate!(%TransferDependencies{
+      archive: Robine.Adapters.Archive.SafeTar
+    })
 
     OperationsDependencies.validate!(%OperationsDependencies{
       health: Robine.Adapters.System.SystemHealth,
-      retention: Robine.Adapters.Persistence.Postgres.StorageRetention
+      retention: Robine.Adapters.Persistence.Postgres.StorageRetention,
+      blob_store: blob_store
     })
 
     SecretDependencies.validate!(%SecretDependencies{
@@ -98,9 +122,12 @@ defmodule Robine.Runtime.Dependencies do
 
     Robine.Adapters.Security.AesGcmCipher.validate_configuration!()
 
+    if blob_store == Robine.Adapters.Storage.S3BlobStore,
+      do: Robine.Adapters.Storage.S3BlobStore.validate_configuration!()
+
     StorageDependencies.validate!(%StorageDependencies{
       repository: Robine.Adapters.Persistence.Postgres.StorageRepository,
-      blob_store: Robine.Adapters.Storage.LocalBlobStore,
+      blob_store: blob_store,
       clock: Robine.Adapters.System.Clock,
       id_generator: Robine.Adapters.System.IdGenerator,
       instance_quota_bytes: Keyword.fetch!(storage_quotas, :instance_bytes),
@@ -110,8 +137,8 @@ defmodule Robine.Runtime.Dependencies do
 
     RepositoryDependencies.validate!(%RepositoryDependencies{
       repository: Robine.Adapters.Persistence.Postgres.GitHubRepository,
-      signature_verifier: Robine.Adapters.SourceControl.GitHubSignatureVerifier,
-      github: Application.fetch_env!(:robine, :github_adapter),
+      webhook_verifier: Robine.Adapters.SourceControl.ProviderWebhookVerifier,
+      source_control: Robine.Adapters.SourceControl.ProviderRegistry,
       clock: Robine.Adapters.System.Clock,
       id_generator: Robine.Adapters.System.IdGenerator,
       public_url: Application.fetch_env!(:robine, :public_url)
@@ -128,6 +155,26 @@ defmodule Robine.Runtime.Dependencies do
       id_generator: Robine.Adapters.System.IdGenerator,
       bootstrap_token_hash: Application.fetch_env!(:robine, :bootstrap_token_hash),
       bootstrap_expires_at: Application.fetch_env!(:robine, :bootstrap_expires_at)
+    }
+  end
+
+  defp runner_dependencies do
+    %RunnerDependencies{
+      registry: Robine.Adapters.Persistence.Postgres.RunnerRegistry,
+      digester: Robine.Adapters.Security.HmacRunnerCredentials,
+      token_generator: Robine.Adapters.Security.OpaqueTokenGenerator,
+      session_notifier: Robine.Adapters.Runner.PhoenixSessionNotifier,
+      clock: Robine.Adapters.System.Clock,
+      id_generator: Robine.Adapters.System.IdGenerator
+    }
+  end
+
+  defp autoscaling_dependencies do
+    %AutoscalingDependencies{
+      repository: Robine.Adapters.Persistence.Postgres.AutoscalingRepository,
+      provider: Robine.Adapters.Autoscaling.DisabledProvider,
+      clock: Robine.Adapters.System.Clock,
+      id_generator: Robine.Adapters.System.IdGenerator
     }
   end
 end

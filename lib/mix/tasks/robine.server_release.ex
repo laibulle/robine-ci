@@ -15,7 +15,9 @@ defmodule Mix.Tasks.Robine.ServerRelease do
     output = Path.expand(Keyword.get(options, :output, "dist/server"))
     version = Mix.Project.config() |> Keyword.fetch!(:version)
     architecture = :erlang.system_info(:system_architecture) |> to_string() |> sanitize()
-    artifact_name = "robine-server-#{version}-#{architecture}.tar.gz"
+    platform = release_platform!()
+    target = "#{platform.id}-#{platform.version}-#{architecture}"
+    artifact_name = "robine-server-#{version}-#{target}.tar.gz"
     artifact = Path.join(output, artifact_name)
     temporary = artifact <> ".tmp-#{System.unique_integer([:positive])}"
 
@@ -27,6 +29,7 @@ defmodule Mix.Tasks.Robine.ServerRelease do
     try do
       with false <- File.exists?(artifact),
            :ok <- File.mkdir_p(output),
+           :ok <- write_release_platform(release_root, platform, architecture),
            :ok <- File.cp("LICENSE", Path.join(release_root, "LICENSE")),
            :ok <-
              File.cp(
@@ -58,4 +61,39 @@ defmodule Mix.Tasks.Robine.ServerRelease do
   end
 
   defp sanitize(value), do: String.replace(value, ~r/[^A-Za-z0-9._-]/, "-")
+
+  defp release_platform! do
+    values =
+      "/etc/os-release"
+      |> File.read!()
+      |> String.split("\n", trim: true)
+      |> Enum.reduce(%{}, fn line, values ->
+        case String.split(line, "=", parts: 2) do
+          [key, value] -> Map.put(values, key, String.trim(value, "\""))
+          _invalid -> values
+        end
+      end)
+
+    case {values["ID"], values["VERSION_ID"]} do
+      {"ubuntu", version} when version in ["24.04", "26.04"] ->
+        %{id: "ubuntu", version: version, runtime_image: "ubuntu:#{version}"}
+
+      {id, version} ->
+        Mix.raise(
+          "server releases must be built on supported Ubuntu 24.04 or 26.04, got " <>
+            "#{inspect(id)} #{inspect(version)}"
+        )
+    end
+  end
+
+  defp write_release_platform(release_root, platform, architecture) do
+    content = """
+    ROBINE_RELEASE_OS=#{platform.id}
+    ROBINE_RELEASE_OS_VERSION=#{platform.version}
+    ROBINE_RELEASE_ARCH=#{architecture}
+    ROBINE_RUNTIME_IMAGE=#{platform.runtime_image}
+    """
+
+    File.write(Path.join(release_root, "RELEASE_PLATFORM"), content, [:binary])
+  end
 end

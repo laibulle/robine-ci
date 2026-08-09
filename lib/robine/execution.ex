@@ -11,6 +11,9 @@ defmodule Robine.Execution do
   @spec build_local_plan(map(), ExecutionContext.t()) :: {:ok, map()} | {:error, term()}
   defdelegate build_local_plan(input, context), to: UseCases.BuildLocalPlan, as: :call
 
+  @spec evaluate_job_condition(map()) :: {:ok, :run | :skip | :wait} | {:error, term()}
+  defdelegate evaluate_job_condition(input), to: UseCases.EvaluateJobCondition, as: :call
+
   @spec build_ci_specification(map(), ExecutionContext.t()) ::
           {:ok, Robine.Execution.Contracts.Specification.t()} | {:error, term()}
   defdelegate build_ci_specification(input, context),

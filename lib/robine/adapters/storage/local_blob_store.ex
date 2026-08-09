@@ -119,6 +119,23 @@ defmodule Robine.Adapters.Storage.LocalBlobStore do
     end)
   end
 
+  @impl true
+  def health do
+    probe = Path.join(root(), ".health-#{Ecto.UUID.generate()}")
+
+    try do
+      with :ok <- File.mkdir_p(root()), :ok <- File.write(probe, "health", [:exclusive]) do
+        {:ok, %{backend: :local, detail: "Local blob storage writable"}}
+      else
+        {:error, reason} -> {:error, {:local_storage, reason}}
+      end
+    after
+      File.rm(probe)
+    end
+  rescue
+    _error -> {:error, :local_storage_unavailable}
+  end
+
   defp prepare_temporary_directory, do: File.mkdir_p(Path.join(root(), ".tmp"))
   defp prepare_object_directory(target), do: File.mkdir_p(Path.dirname(target))
 

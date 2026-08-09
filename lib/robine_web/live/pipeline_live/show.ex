@@ -86,7 +86,34 @@ defmodule RobineWeb.PipelineLive.Show do
             navigate={~p"/pipelines/#{@pipeline.id}/workflow"}
             class="link mt-3 inline-block text-sm"
           >View immutable workflow revision</.link>
+          <p
+            :if={@pipeline.scheduled_for}
+            id="scheduled-for"
+            class="mt-3 text-sm text-base-content/65"
+          >
+            Intended schedule:
+            <time datetime={DateTime.to_iso8601(@pipeline.scheduled_for)}>{DateTime.to_iso8601(
+              @pipeline.scheduled_for
+            )}</time>
+          </p>
         </header>
+        <div
+          :if={map_size(@pipeline.inputs) > 0}
+          id="manual-inputs"
+          class="rounded-2xl border border-base-300 bg-base-100 p-5"
+        >
+          <p class="font-semibold">Manual inputs</p>
+          <p class="mt-1 text-xs text-base-content/55">These values are non-secret and retained.</p>
+          <dl class="mt-3 grid gap-2 sm:grid-cols-2">
+            <div
+              :for={{name, value} <- Enum.sort(@pipeline.inputs)}
+              class="rounded-xl bg-base-200 p-3"
+            >
+              <dt class="font-mono text-xs text-base-content/55">{name}</dt>
+              <dd class="mt-1 break-all font-mono text-sm">{value}</dd>
+            </div>
+          </dl>
+        </div>
         <div
           :if={Enum.any?(@pipeline.jobs, & &1.infrastructure_failure)}
           class="alert alert-error"
@@ -137,6 +164,12 @@ defmodule RobineWeb.PipelineLive.Show do
                       do: "No dependencies",
                       else: "Needs: #{Enum.join(job.needs, ", ")}"}
                   </p>
+                  <div :if={map_size(job.matrix_values) > 0} class="mt-2 flex flex-wrap gap-1.5">
+                    <span
+                      :for={{axis, value} <- Enum.sort(job.matrix_values)}
+                      class="badge badge-outline badge-sm font-mono"
+                    >{axis}={value}</span>
+                  </div>
                 </div><div class="text-right">
                   <.status_badge status={job.status} />
                   <p class="mt-2 text-xs capitalize text-base-content/60">

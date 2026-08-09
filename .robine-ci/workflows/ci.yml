@@ -1,0 +1,29 @@
+version: 1
+name: Robine CI
+
+on:
+  push:
+    branches: [main]
+  pull_request: {}
+
+jobs:
+  verify:
+    image: elixir@sha256:7ee41a9a8a8427dbd40c9133ee5b9047f585b58db4968fd675fbcd9498e3b22e
+    timeout: 10m
+    env:
+      MIX_ENV: test
+      ERL_FLAGS: "+S 4:4"
+      MAKEFLAGS: "-j4"
+    steps:
+      - name: Checkout
+        uses: checkout
+      - name: Prepare Mix tooling
+        run: mix local.hex --force && mix local.rebar --force
+      - name: Install dependencies
+        run: mix deps.get
+      - name: Compile strictly
+        run: mix compile --warnings-as-errors
+      - name: Check formatting
+        run: mix format --check-formatted
+      - name: Verify architecture and release contracts
+        run: mix run --no-start -e 'Mix.Tasks.Test.run(["--no-start", "test/architecture", "test/specification_governance_test.exs", "test/release_configuration_test.exs", "test/robine/workflows", "test/robine/release"])'

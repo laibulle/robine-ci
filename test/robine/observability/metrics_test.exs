@@ -3,16 +3,33 @@ defmodule Robine.Observability.MetricsTest do
 
   alias Robine.Adapters.Security.AesGcmCipher
   alias Robine.Adapters.Workflow.YamlDecoder
-  alias Robine.Runtime.Measurements
+  alias Robine.Runtime.{Dependencies, Measurements}
+  alias Robine.Workflows
   alias RobineWeb.Telemetry
 
   @required_metrics ~w(
     robine.workflow.validation.count
+    robine.workflow.expansion.expanded_jobs
+    robine.workflow.expansion.matrix_variants
+    robine.workflow.composition.count
+    robine.workflow.composition.duration
+    robine.workflow.composition.source_files
+    robine.workflow.composition.max_depth
+    robine.workflow.composition.composed_jobs
+    robine.workflow.manual.duration
+    robine.workflow.manual.input_count
+    robine.workflow.manual.workflow_count
+    robine.workflow.schedule.duration
+    robine.workflow.schedule.scanned_minutes
+    robine.workflow.schedule.due_occurrences
+    robine.workflow.schedule.pipelines
+    robine.workflow.schedule.truncated_minutes
     robine.queue.depth
     robine.queue.oldest_age
     robine.pipeline.state.count
     robine.job.state.count
     robine.pipeline.duration
+    robine.condition.evaluation.count
     robine.scheduler.dispatch.duration
     robine.runner.attempts.active
     robine.runner.leases.expired
@@ -24,6 +41,12 @@ defmodule Robine.Observability.MetricsTest do
     robine.github.webhook.ack.duration
     robine.github.delivery.duration
     robine.github.api.request.count
+    robine.source_control.request.count
+    robine.source_control.request.duration
+    robine.source_control.webhook.count
+    robine.source_control.webhook.duration
+    robine.source_control.projection.count
+    robine.source_control.delivery.duration
     robine.identity.login.count
     robine.identity.oidc.failure.count
     robine.identity.session.revocation.count
@@ -64,6 +87,7 @@ defmodule Robine.Observability.MetricsTest do
       [:robine, :job, :state],
       [:robine, :runner, :attempts],
       [:robine, :workflow, :validation],
+      [:robine, :workflow, :composition],
       [:robine, :secrets, :decryption_failure]
     ]
 
@@ -81,6 +105,19 @@ defmodule Robine.Observability.MetricsTest do
 
     assert :ok = Measurements.operational_state()
     assert {:ok, _decoded} = YamlDecoder.decode("version: 1\nname: CI\non: {}\njobs: {}\n")
+
+    assert {:ok, _workflow} =
+             Workflows.resolve(
+               %{
+                 entry_path: ".robine-ci/workflows/ci.yml",
+                 sources: %{
+                   ".robine-ci/workflows/ci.yml" =>
+                     "version: 1\nname: CI\non: {push: {}}\njobs:\n  test:\n    image: alpine:3.22\n    steps: [{run: \"true\"}]\n"
+                 }
+               },
+               Dependencies.local_context()
+             )
+
     assert {:error, :invalid_ciphertext} = AesGcmCipher.decrypt(%{}, "aad")
 
     assert_receive {:metric_event, [:robine, :queue], %{depth: depth, oldest_age: age}, %{}}
@@ -96,6 +133,16 @@ defmodule Robine.Observability.MetricsTest do
                     %{count: 1, duration: duration}, %{outcome: :ok, schema_version: 1}}
 
     assert is_integer(duration) and duration >= 0
+
+    assert_receive {:metric_event, [:robine, :workflow, :composition],
+                    %{
+                      duration: composition_duration,
+                      source_files: 1,
+                      max_depth: 0,
+                      composed_jobs: 1
+                    }, %{outcome: :ok}}
+
+    assert is_integer(composition_duration) and composition_duration >= 0
 
     assert_receive {:metric_event, [:robine, :secrets, :decryption_failure], %{count: 1},
                     %{reason: :invalid_ciphertext}}

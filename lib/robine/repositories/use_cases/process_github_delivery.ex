@@ -3,9 +3,8 @@ defmodule Robine.Repositories.UseCases.ProcessGitHubDelivery do
   alias Robine.ExecutionContext
   alias Robine.Pipelines
   alias Robine.Repositories.Dependencies
+  alias Robine.Repositories.Domain.SourceControlEvent
   alias Robine.Workflows
-
-  @pull_request_actions ~w(opened reopened synchronize ready_for_review)
 
   @spec call(map(), ExecutionContext.t()) :: {:ok, map()} | {:error, term()}
   def call(
@@ -17,13 +16,18 @@ defmodule Robine.Repositories.UseCases.ProcessGitHubDelivery do
       )
       when is_binary(id) do
     with {:ok, delivery} <- deps.repository.get_delivery(id),
-         {:ok, event} <- normalize(delivery.event, delivery.payload),
-         {:ok, repository} <- deps.repository.get_by_provider_id(event.repository_id),
+         {:ok, event} <- SourceControlEvent.normalize(delivery),
+         {:ok, repository} <-
+           deps.repository.get_by_provider(
+             delivery.provider,
+             delivery.provider_instance,
+             event.repository_id
+           ),
          true <- repository.trusted,
-         {:ok, files} <- deps.github.workflow_files(repository, event.sha),
+         {:ok, files} <- deps.source_control.workflow_files(repository, event.sha),
          {:ok, pipeline_ids} <- create_matching(files, event, repository, id, context),
          :ok <- deps.repository.finish_delivery(id, :processed, deps.clock.now(), nil) do
-      {:ok, %{pipeline_ids: pipeline_ids, commit_sha: event.sha}}
+      {:ok, %{pipeline_ids: pipeline_ids, commit_sha: event.sha, provider: delivery.provider}}
     else
       {:ignore, reason} ->
         :ok = deps.repository.finish_delivery(id, :ignored, deps.clock.now(), to_string(reason))
@@ -43,58 +47,11 @@ defmodule Robine.Repositories.UseCases.ProcessGitHubDelivery do
 
   def call(_input, %ExecutionContext{}), do: {:error, :forbidden}
 
-  defp normalize(
-         "push",
-         %{
-           "repository" => %{"id" => repository_id},
-           "after" => sha,
-           "ref" => "refs/heads/" <> branch
-         } = payload
-       )
-       when is_integer(repository_id) and is_binary(sha),
-       do:
-         {:ok,
-          %{
-            type: :push,
-            repository_id: repository_id,
-            sha: sha,
-            branch: branch,
-            actor: github_actor(payload)
-          }}
-
-  defp normalize("pull_request", %{"action" => action}) when action not in @pull_request_actions,
-    do: {:ignore, :pull_request_action}
-
-  defp normalize("pull_request", %{"pull_request" => %{"draft" => true}}),
-    do: {:ignore, :draft_pull_request}
-
-  defp normalize("pull_request", payload) do
-    with %{"repository" => %{"id" => repository_id}, "pull_request" => pull_request} <- payload,
-         %{
-           "head" => %{"sha" => sha, "repo" => %{"full_name" => head_name}},
-           "base" => %{"ref" => branch, "repo" => %{"full_name" => base_name}}
-         } <- pull_request do
-      if head_name == base_name,
-        do:
-          {:ok,
-           %{
-             type: :pull_request,
-             repository_id: repository_id,
-             sha: sha,
-             branch: branch,
-             actor: github_actor(payload)
-           }},
-        else: {:ignore, :fork_pull_request}
-    else
-      _ -> {:error, {:invalid_webhook, :pull_request_payload}}
-    end
-  end
-
-  defp normalize(event, _payload), do: {:ignore, {:unsupported_event, event}}
-
   defp create_matching(files, event, repository, delivery_id, context) do
+    sources = source_map(files)
+
     Enum.reduce_while(files, {:ok, []}, fn file, {:ok, pipeline_ids} ->
-      case Workflows.validate(%{source: file.content, path: file.path}, context) do
+      case Workflows.resolve(%{entry_path: file.path, sources: sources}, context) do
         {:ok, validated} ->
           if trigger_matches?(validated.workflow.triggers, event) do
             input = %{
@@ -103,9 +60,9 @@ defmodule Robine.Repositories.UseCases.ProcessGitHubDelivery do
               commit_sha: event.sha,
               trigger: event.type,
               actor: event.actor,
-              idempotency_key: "github:#{delivery_id}:#{file.path}",
+              idempotency_key: "#{repository.provider}:#{delivery_id}:#{file.path}",
               jobs: validated.workflow.jobs,
-              workflow_revision: %{path: file.path, source: file.content}
+              workflow_revision: revision(file, validated)
             }
 
             case Pipelines.create_pipeline(input, context) do
@@ -122,6 +79,16 @@ defmodule Robine.Repositories.UseCases.ProcessGitHubDelivery do
     end)
   end
 
+  defp source_map(files), do: Map.new(files, &{&1.path, &1.content})
+
+  defp revision(file, validated) do
+    %{
+      path: file.path,
+      source: file.content,
+      sources: Map.delete(validated.sources, file.path)
+    }
+  end
+
   defp trigger_matches?(triggers, %{type: type, branch: branch}) do
     key = if type == :push, do: "push", else: "pull_request"
 
@@ -132,12 +99,4 @@ defmodule Robine.Repositories.UseCases.ProcessGitHubDelivery do
       _configuration -> true
     end
   end
-
-  defp github_actor(%{"sender" => %{"login" => login}}) when is_binary(login) and login != "",
-    do: "github:#{String.slice(login, 0, 248)}"
-
-  defp github_actor(%{"pusher" => %{"name" => name}}) when is_binary(name) and name != "",
-    do: "github:#{String.slice(name, 0, 248)}"
-
-  defp github_actor(_payload), do: "github:unknown"
 end

@@ -32,6 +32,53 @@ config :robine, :storage_quotas,
   instance_bytes: storage_instance_quota,
   repository_bytes: storage_repository_quota
 
+storage_root = System.get_env("ROBINE_STORAGE_ROOT", "var/storage") |> Path.expand()
+config :robine, :storage_root, storage_root
+
+blob_store_adapter =
+  case System.get_env("ROBINE_BLOB_STORE", "local") do
+    "local" -> Robine.Adapters.Storage.LocalBlobStore
+    "s3" -> Robine.Adapters.Storage.S3BlobStore
+    _invalid -> raise "ROBINE_BLOB_STORE must be local or s3"
+  end
+
+config :robine, :blob_store_adapter, blob_store_adapter
+
+config :robine,
+       :storage_backend_migration_ack,
+       System.get_env("ROBINE_STORAGE_BACKEND_MIGRATION_ACK")
+
+if blob_store_adapter == Robine.Adapters.Storage.S3BlobStore do
+  endpoint = System.fetch_env!("ROBINE_S3_ENDPOINT")
+  bucket = System.fetch_env!("ROBINE_S3_BUCKET")
+  region = System.fetch_env!("ROBINE_S3_REGION")
+  prefix = System.get_env("ROBINE_S3_PREFIX", "")
+  allow_http_loopback = System.get_env("ROBINE_S3_ALLOW_HTTP_LOOPBACK") in ~w(1 true)
+
+  encryption =
+    case {System.get_env("ROBINE_S3_KMS_KEY_ID"),
+          System.get_env("ROBINE_S3_SERVER_SIDE_ENCRYPTION", "none")} do
+      {key_id, _mode} when is_binary(key_id) and key_id != "" -> [aws_kms_key_id: key_id]
+      {nil, "AES256"} -> "AES256"
+      {nil, "none"} -> nil
+      _invalid -> raise "ROBINE_S3_SERVER_SIDE_ENCRYPTION must be none or AES256"
+    end
+
+  config :robine, :s3_blob_store,
+    client: Robine.Adapters.Storage.ExAwsS3Client,
+    endpoint: endpoint,
+    bucket: bucket,
+    region: region,
+    prefix: prefix,
+    allow_http_loopback: allow_http_loopback,
+    path_style: System.get_env("ROBINE_S3_PATH_STYLE") in ~w(1 true),
+    encryption: encryption,
+    spool_root: Path.join(storage_root, ".s3-spool"),
+    part_size: positive_integer.("ROBINE_S3_PART_SIZE_BYTES", 8_388_608),
+    multipart_concurrency: positive_integer.("ROBINE_S3_MULTIPART_CONCURRENCY", 2),
+    part_timeout_ms: positive_integer.("ROBINE_S3_PART_TIMEOUT_MS", 60_000)
+end
+
 config :robine, :workflow_limits,
   max_source_bytes: positive_integer.("ROBINE_WORKFLOW_MAX_BYTES", 262_144),
   max_jobs: positive_integer.("ROBINE_WORKFLOW_MAX_JOBS", 64),
@@ -112,6 +159,45 @@ end
 
 if github_private_key = System.get_env("GITHUB_APP_PRIVATE_KEY") do
   config :robine, :github_app_private_key, String.replace(github_private_key, "\\n", "\n")
+end
+
+source_control_url = fn name ->
+  case System.get_env(name) do
+    nil ->
+      nil
+
+    value ->
+      uri = URI.parse(value)
+      allow_http = config_env() in [:dev, :test] and uri.host in ["localhost", "127.0.0.1", "::1"]
+
+      valid_scheme = uri.scheme == "https" or (uri.scheme == "http" and allow_http)
+
+      if valid_scheme and is_binary(uri.host) and uri.host != "" and is_nil(uri.userinfo) and
+           is_nil(uri.query) and is_nil(uri.fragment) and uri.path in [nil, "", "/"] do
+        String.trim_trailing(value, "/")
+      else
+        raise "#{name} must be an HTTPS origin without credentials, path, query, or fragment"
+      end
+  end
+end
+
+config :robine, :gitlab_source_control,
+  base_url: source_control_url.("GITLAB_URL"),
+  http_client: Robine.Adapters.SourceControl.ReqHttpClient
+
+config :robine, :forgejo_source_control,
+  base_url: source_control_url.("FORGEJO_URL"),
+  http_client: Robine.Adapters.SourceControl.ReqHttpClient
+
+for {environment, key} <- [
+      {"GITLAB_TOKEN", :gitlab_token},
+      {"GITLAB_WEBHOOK_SECRET", :gitlab_webhook_secret},
+      {"FORGEJO_TOKEN", :forgejo_token},
+      {"FORGEJO_WEBHOOK_SECRET", :forgejo_webhook_secret}
+    ],
+    value = System.get_env(environment),
+    is_binary(value) and value != "" do
+  config :robine, key, value
 end
 
 if bootstrap_token = System.get_env("ROBINE_BOOTSTRAP_TOKEN") do

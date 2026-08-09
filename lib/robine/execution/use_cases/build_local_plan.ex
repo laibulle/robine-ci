@@ -1,7 +1,7 @@
 defmodule Robine.Execution.UseCases.BuildLocalPlan do
   @moduledoc "Builds deterministic local execution specifications from a validated workflow."
 
-  alias Robine.Execution.Contracts.{Specification, Step}
+  alias Robine.Execution.Contracts.{Service, Specification, Step}
   alias Robine.Execution.Domain.CacheKey
   alias Robine.ExecutionContext
   alias Robine.Workflows.Contracts.ValidatedWorkflow
@@ -41,15 +41,22 @@ defmodule Robine.Execution.UseCases.BuildLocalPlan do
   defp select_jobs(workflow, %{job_id: nil}), do: {:ok, workflow.order}
 
   defp select_jobs(workflow, %{job_id: job_id} = input) do
-    if Map.has_key?(workflow.jobs, job_id) do
+    matched_ids =
+      cond do
+        Map.has_key?(workflow.jobs, job_id) -> [job_id]
+        true -> workflow.order |> Enum.filter(&(workflow.jobs[&1].base_id == job_id))
+      end
+
+    if matched_ids != [] do
       selected =
         if Map.get(input, :no_deps, false),
-          do: MapSet.new([job_id]),
-          else: dependencies(workflow.jobs, job_id, MapSet.new())
+          do: MapSet.new(matched_ids),
+          else: Enum.reduce(matched_ids, MapSet.new(), &dependencies(workflow.jobs, &1, &2))
 
       {:ok, Enum.filter(workflow.order, &MapSet.member?(selected, &1))}
     else
-      {:error, {:unknown_job, job_id, workflow.order}}
+      choices = workflow.order |> Enum.map(&workflow.jobs[&1].base_id) |> Enum.uniq()
+      {:error, {:unknown_job, job_id, choices}}
     end
   end
 
@@ -67,6 +74,7 @@ defmodule Robine.Execution.UseCases.BuildLocalPlan do
 
       with {:ok, steps} <- select_steps(job.steps, Map.get(input, :step)),
            {:ok, local_secrets} <- local_secrets(job.secrets, input),
+           {:ok, services} <- local_services(job.services, local_secrets),
            steps = omit_checkout(steps),
            true <- steps != [],
            {:ok, execution_steps} <- execution_steps(steps, source_path) do
@@ -81,7 +89,15 @@ defmodule Robine.Execution.UseCases.BuildLocalPlan do
           source_path: Path.expand(source_path),
           env: job.env,
           secrets: local_secrets,
-          metadata: %{"job_id" => job_id, "local" => true}
+          services: services,
+          metadata: %{
+            "job_id" => job_id,
+            "local" => true,
+            "needs" => job.needs,
+            "condition" => job.condition,
+            "base_id" => job.base_id,
+            "matrix_values" => job.matrix_values
+          }
         }
 
         {:cont, {:ok, result ++ [specification]}}
@@ -114,12 +130,55 @@ defmodule Robine.Execution.UseCases.BuildLocalPlan do
 
   defp local_secrets(_required, _input), do: {:ok, %{}}
 
+  defp local_services(services, secret_values) do
+    services
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.reduce_while({:ok, []}, fn {_id, service}, {:ok, resolved} ->
+      case resolve_local_service_secrets(service.secret_env, secret_values) do
+        {:ok, secret_env} ->
+          execution = %Service{
+            id: service.id,
+            image: service.image,
+            user: service.user,
+            env: service.env,
+            secret_env: secret_env,
+            command: service.command,
+            readiness: service.readiness
+          }
+
+          {:cont, {:ok, [execution | resolved]}}
+
+        {:error, reason} ->
+          {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, resolved} -> {:ok, Enum.reverse(resolved)}
+      error -> error
+    end
+  end
+
+  defp resolve_local_service_secrets(names, values) do
+    Enum.reduce_while(names, {:ok, %{}}, fn {environment_name, secret_name}, {:ok, resolved} ->
+      case Map.fetch(values, secret_name) do
+        {:ok, value} -> {:cont, {:ok, Map.put(resolved, environment_name, value)}}
+        :error -> {:halt, {:error, {:local_service_secret_missing, secret_name}}}
+      end
+    end)
+  end
+
   defp omit_checkout(steps),
     do: Enum.reject(steps, &(&1.kind == :builtin and &1.value == "checkout"))
 
   defp execution_steps(steps, source_path) do
     Enum.reduce_while(steps, {:ok, []}, fn step, {:ok, result} ->
-      execution = %Step{name: step.name, kind: step.kind, value: step.value, with: step.with}
+      execution = %Step{
+        name: step.name,
+        kind: step.kind,
+        value: step.value,
+        condition: step.condition,
+        with: step.with
+      }
 
       case resolve_cache_key(execution, source_path) do
         {:ok, resolved} -> {:cont, {:ok, [resolved | result]}}

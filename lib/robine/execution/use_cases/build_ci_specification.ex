@@ -1,7 +1,7 @@
 defmodule Robine.Execution.UseCases.BuildCiSpecification do
   @moduledoc "Builds the in-memory runner contract from one persisted CI job input."
 
-  alias Robine.Execution.Contracts.{Specification, Step}
+  alias Robine.Execution.Contracts.{Service, Specification, Step}
   alias Robine.Execution.Domain.{CacheKey, SpecificationValidator}
   alias Robine.ExecutionContext
   alias Robine.Secrets
@@ -19,6 +19,7 @@ defmodule Robine.Execution.UseCases.BuildCiSpecification do
          steps = Enum.reject(steps, &checkout_step?/1),
          true <- steps != [],
          {:ok, secret_values} <- resolve_secrets(raw, context),
+         {:ok, services} <- resolve_services(raw["services"] || %{}, secret_values),
          {:ok, normalized_steps} <- resolve_steps(steps, source_path),
          specification = %Specification{
            version: 1,
@@ -30,7 +31,12 @@ defmodule Robine.Execution.UseCases.BuildCiSpecification do
            source_path: source_path,
            env: raw["env"] || %{},
            secrets: secret_values,
-           metadata: %{"idempotency_token" => raw["idempotency_token"]},
+           services: services,
+           metadata: %{
+             "idempotency_token" => raw["idempotency_token"],
+             "base_id" => raw["base_id"],
+             "matrix_values" => raw["matrix_values"] || %{}
+           },
            steps: normalized_steps
          },
          :ok <- SpecificationValidator.validate(specification) do
@@ -45,11 +51,79 @@ defmodule Robine.Execution.UseCases.BuildCiSpecification do
 
   defp resolve_secrets(%{"secret_names" => []}, _context), do: {:ok, %{}}
 
+  defp resolve_secrets(%{"resolved_secrets" => values}, _context) when is_map(values) do
+    if Enum.all?(values, fn {name, value} -> is_binary(name) and is_binary(value) end),
+      do: {:ok, values},
+      else: {:error, :invalid_resolved_secrets}
+  end
+
   defp resolve_secrets(%{"secret_names" => names} = raw, context) when is_list(names) do
     Secrets.resolve_secrets(%{repository_id: raw["repository_id"], names: names}, context)
   end
 
   defp resolve_secrets(_raw, _context), do: {:ok, %{}}
+
+  defp resolve_services(services, secret_values) when is_map(services) do
+    services
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.reduce_while({:ok, []}, fn {_id, raw}, {:ok, resolved} ->
+      case resolve_service(raw, secret_values) do
+        {:ok, service} -> {:cont, {:ok, [service | resolved]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, resolved} -> {:ok, Enum.reverse(resolved)}
+      error -> error
+    end
+  end
+
+  defp resolve_services(_services, _secret_values),
+    do: {:error, :invalid_persisted_execution_specification}
+
+  defp resolve_service(raw, secret_values) when is_map(raw) do
+    with id when is_binary(id) <- raw["id"],
+         image when is_binary(image) <- raw["image"],
+         env when is_map(env) <- raw["env"] || %{},
+         secret_names when is_map(secret_names) <- raw["secret_env"] || %{},
+         {:ok, secret_env} <- resolve_service_secrets(secret_names, secret_values),
+         command when is_list(command) <- raw["command"] || [],
+         {:ok, readiness} <- execution_readiness(raw["readiness"]) do
+      {:ok,
+       %Service{
+         id: id,
+         image: image,
+         user: raw["user"],
+         env: env,
+         secret_env: secret_env,
+         command: command,
+         readiness: readiness
+       }}
+    else
+      {:error, reason} -> {:error, reason}
+      _invalid -> {:error, :invalid_persisted_execution_specification}
+    end
+  end
+
+  defp resolve_service(_raw, _secret_values),
+    do: {:error, :invalid_persisted_execution_specification}
+
+  defp resolve_service_secrets(names, values) do
+    Enum.reduce_while(names, {:ok, %{}}, fn {environment_name, secret_name}, {:ok, resolved} ->
+      case Map.fetch(values, secret_name) do
+        {:ok, value} -> {:cont, {:ok, Map.put(resolved, environment_name, value)}}
+        :error -> {:halt, {:error, {:service_secret_missing, secret_name}}}
+      end
+    end)
+  end
+
+  defp execution_readiness(nil), do: {:ok, nil}
+
+  defp execution_readiness(%{"tcp" => tcp, "timeout_ms" => timeout_ms}),
+    do: {:ok, %{tcp: tcp, timeout_ms: timeout_ms}}
+
+  defp execution_readiness(_invalid),
+    do: {:error, :invalid_persisted_execution_specification}
 
   defp resolve_steps(steps, source_path) do
     Enum.reduce_while(steps, {:ok, []}, fn
@@ -73,6 +147,7 @@ defmodule Robine.Execution.UseCases.BuildCiSpecification do
       name: raw["name"],
       kind: kind(raw["kind"]),
       value: raw["value"],
+      condition: condition(raw["condition"]),
       with: raw["with"] || %{}
     }
   end
@@ -105,4 +180,9 @@ defmodule Robine.Execution.UseCases.BuildCiSpecification do
   defp kind(:builtin), do: :builtin
   defp kind("builtin"), do: :builtin
   defp kind(_unknown), do: :invalid
+  defp condition(nil), do: :success
+  defp condition("success"), do: :success
+  defp condition("failure"), do: :failure
+  defp condition("always"), do: :always
+  defp condition(_unknown), do: :invalid
 end

@@ -31,7 +31,10 @@ Contributors with the source tree can also run:
 
 ```sh
 mix robine.verify_checksums --directory dist
+mix robine.cli_release_smoke
 ```
+
+The release smoke requires Docker. It builds a fresh target-specific bundle, verifies every checksum, runs the installed escript entry point, and reproduces an intentional containerized job failure with exit code 5.
 
 Do not install or execute the artifact when verification fails. Download both files again from the official release; if the mismatch persists, report it as a release integrity incident.
 
@@ -67,3 +70,5 @@ Windows is not a supported binary target because the bundled Exile spawner relie
 Commands print their result to standard output without prompts except where `init` deliberately previews a mutation. Scripts should use `init --yes`, `validate --format json`, and explicit `run` selectors.
 
 For local-only secrets, add a dedicated file such as `.robine.env` to `.gitignore`, declare each required name in the workflow job, then run `robine run --env-file .robine.env`. Robine refuses files whose ignored status cannot be proven and never downloads server-side secrets.
+
+`robine run` starts the same attempt-private service containers as CI. Address them by their service identifier, such as `postgres:5432` or `redis:6379`, never `localhost`; no service port is published to the host. Service `secret-env` mappings resolve only from names declared by the job and supplied through the ignored local secret file.

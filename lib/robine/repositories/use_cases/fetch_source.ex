@@ -11,7 +11,7 @@ defmodule Robine.Repositories.UseCases.FetchSource do
     with true <- Regex.match?(~r/\A[0-9a-f]{40}\z/, sha),
          {:ok, repository} <- deps.repository.get_by_id(repository_id),
          true <- repository.trusted,
-         {:ok, files} <- deps.github.source_files(repository, sha) do
+         {:ok, files} <- deps.source_control.source_files(repository, sha) do
       {:ok, %{repository_id: repository_id, commit_sha: sha, files: files}}
     else
       false -> {:error, :untrusted_or_invalid_source}

@@ -34,3 +34,18 @@ New specifications MUST start from [TEMPLATE.md](TEMPLATE.md). A feature is not 
 | Security | [SEC-001 secrets and trust model](security/sec-001-secrets-and-trust-model.md) | Encryption, masking, and trusted code policy |
 | Storage | [DATA-001 cache and artifacts](storage/data-001-cache-and-artifacts.md) | Dependency cache and job outputs |
 | Operations | [OPS-001 observability and health](operations/ops-001-observability-and-health.md) | Probes, dependency diagnostics, metrics, and alerts |
+
+## Post-MVP specifications
+
+| Domain | Specification | Purpose |
+|---|---|---|
+| Runners | [RUN-001 remote runner protocol](runners/run-001-remote-runner-protocol.md) | Enrollment, authentication, versioned delivery, and reconnection |
+| Runners | [RUN-002 runner fleet and scheduling](runners/run-002-runner-fleet-and-scheduling.md) | Labels, capacity matching, lifecycle administration, and autoscaling boundary |
+| Storage | [DATA-002 S3-compatible blob storage](storage/data-002-s3-compatible-storage.md) | Provider-neutral object storage, multipart transfer, and reconciliation |
+| Execution | [EXEC-002 service containers](execution/exec-002-service-containers.md) | Attempt-scoped Docker services, readiness, secrets, and cleanup |
+| Workflows | [WF-002 conditional execution](workflows/wf-002-conditional-execution.md) | Fixed success, failure, and always job/step conditions |
+| Workflows | [WF-003 job matrices](workflows/wf-003-job-matrices.md) | Bounded static Cartesian job expansion and local reproduction |
+| Workflows | [WF-004 manual workflow inputs](workflows/wf-004-manual-workflow-inputs.md) | Exact-SHA manual launches with bounded typed inputs |
+| Workflows | [WF-005 scheduled workflows](workflows/wf-005-scheduled-workflows.md) | Durable UTC cron scheduling with exact-SHA execution |
+| Workflows | [WF-006 reusable workflows](workflows/wf-006-reusable-workflows.md) | Exact-revision local includes with typed call inputs |
+| Source control | [SCM-001 GitLab and Forgejo integration](source-control/scm-001-gitlab-forgejo-integration.md) | Provider-neutral exact-SHA integration and status projection |

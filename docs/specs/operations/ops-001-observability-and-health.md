@@ -2,7 +2,7 @@
 
 ## Status
 
-- **State:** Accepted
+- **State:** Shipped
 - **Owner:** Robine maintainers
 - **Target:** MVP
 - **Last updated:** 2026-08-09
@@ -102,6 +102,10 @@ The catalogue uses counters, gauges, and bucketed distributions with bounded lab
 - [x] Alert and troubleshooting guidance is published.
 
 The initial alert catalogue and remediation procedures are published in `docs/operations/monitoring-and-troubleshooting.md`.
+
+## Open questions
+
+None blocking. OpenTelemetry trace export remains a future extension; bounded structured events, metrics, and persisted correlation identifiers are the MVP contract.
 
 ## Out of scope / future work
 

@@ -8,7 +8,10 @@ defmodule Robine.Pipelines.UseCases.PipelineCommandsTest do
 
   defmodule FakeUnitOfWork do
     @behaviour Robine.Pipelines.Ports.UnitOfWork
+    @impl true
     def transaction(operation), do: operation.()
+    @impl true
+    def lock(_identity), do: :ok
   end
 
   defmodule FakeRepository do

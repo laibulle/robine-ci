@@ -19,8 +19,23 @@ defmodule Robine.Pipelines.UseCases.GetJobDetail do
       {:ok,
        %{
          pipeline:
-           Map.take(Map.from_struct(pipeline), [:id, :workflow_name, :commit_sha, :status]),
-         job: Map.take(Map.from_struct(job), [:id, :job_key, :status, :needs, :position]),
+           Map.take(Map.from_struct(pipeline), [
+             :id,
+             :workflow_name,
+             :commit_sha,
+             :status,
+             :trigger,
+             :scheduled_for,
+             :inputs
+           ]),
+         job:
+           job
+           |> Map.from_struct()
+           |> Map.take([:id, :job_key, :status, :needs, :position])
+           |> Map.put(:condition, Map.get(job.execution, "condition", "success"))
+           |> Map.put(:runs_on, Map.get(job.execution, "runs_on", ["docker"]))
+           |> Map.put(:base_id, Map.get(job.execution, "base_id") || job.job_key)
+           |> Map.put(:matrix_values, Map.get(job.execution, "matrix_values", %{})),
          attempt:
            attempt && Map.take(Map.from_struct(attempt), [:id, :number, :status, :result_reason])
        }}

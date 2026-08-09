@@ -57,6 +57,24 @@ defmodule RobineWeb.WorkflowRevisionLive.Show do
           ><code>{@revision.source}</code></pre>
         </section>
 
+        <section :if={map_size(@revision.included_sources) > 0} id="included-workflow-revisions">
+          <h2 class="text-xl font-semibold">Included workflows</h2>
+          <div class="mt-4 space-y-3">
+            <details
+              :for={{path, included} <- Enum.sort(@revision.included_sources)}
+              class="rounded-2xl border border-base-300 bg-base-100 p-5"
+            >
+              <summary class="cursor-pointer">
+                <span class="font-mono text-sm break-all">{path}</span>
+                <span class="mt-1 block font-mono text-xs text-base-content/55 break-all">
+                  {included["digest"]}
+                </span>
+              </summary>
+              <pre class="mt-4 max-h-96 overflow-auto rounded-xl bg-neutral p-4 text-sm text-neutral-content"><code>{included["source"]}</code></pre>
+            </details>
+          </div>
+        </section>
+
         <details class="rounded-2xl border border-base-300 bg-base-100 p-5">
           <summary class="cursor-pointer font-semibold">Normalized execution graph</summary>
           <pre id="workflow-revision-graph" class="mt-4 overflow-auto text-sm"><code>{Jason.encode!(@revision.normalized_graph, pretty: true)}</code></pre>

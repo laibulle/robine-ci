@@ -2,9 +2,32 @@ defmodule Robine.Operations.RetentionTest do
   use Robine.DataCase, async: false
 
   alias Robine.Adapters.Persistence.Postgres.Schemas.{Artifact, CacheEntry, StorageGcCandidate}
+  alias Robine.Adapters.Persistence.Postgres.StorageRetention
   alias Robine.Adapters.Storage.LocalBlobStore
   alias Robine.{Operations, Repo, Storage}
   alias Robine.Runtime.Dependencies
+
+  defmodule IncompleteInventoryBlobStore do
+    @behaviour Robine.Storage.Ports.BlobStore
+
+    def put(_content), do: {:error, :unsupported}
+    def put_stream(_content), do: {:error, :unsupported}
+    def get(_blob_id, _digest), do: {:error, :unsupported}
+
+    def delete(blob_id) do
+      send(self(), {:unexpected_delete, blob_id})
+      :ok
+    end
+
+    def inventory, do: {:error, :unavailable}
+
+    def delete_temporary_before(cutoff) do
+      send(self(), {:unexpected_temporary_delete, cutoff})
+      {:ok, 0}
+    end
+
+    def health, do: {:error, :unavailable}
+  end
 
   setup do
     previous = Application.fetch_env!(:robine, :retention)
@@ -136,6 +159,19 @@ defmodule Robine.Operations.RetentionTest do
 
     assert {:ok, %{blobs_deleted: 1}} = Operations.prune_retention(%{}, context)
     assert {:error, :not_found} = LocalBlobStore.get(orphan.digest, orphan.digest)
+  end
+
+  test "an incomplete inventory cannot stage or delete reconciliation garbage" do
+    assert {:error, :unavailable} =
+             StorageRetention.prune(
+               DateTime.utc_now(),
+               [log_seconds: 60, gc_grace_seconds: 0, batch_size: 100],
+               IncompleteInventoryBlobStore
+             )
+
+    assert Repo.aggregate(StorageGcCandidate, :count) == 0
+    refute_receive {:unexpected_delete, _blob_id}
+    refute_receive {:unexpected_temporary_delete, _cutoff}
   end
 
   defp admin_context do

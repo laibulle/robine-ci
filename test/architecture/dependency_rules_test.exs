@@ -19,6 +19,14 @@ defmodule Robine.Architecture.DependencyRulesTest do
     "RobineWeb"
   ]
 
+  @pure_call_one_exceptions [
+    "Robine.Execution.UseCases.EvaluateJobCondition",
+    "Robine.Workflows.UseCases.EvaluateSchedule",
+    "Robine.Workflows.UseCases.PrepareManualRun",
+    "Robine.Secrets.UseCases.RedactOutput",
+    "Robine.Secrets.UseCases.ValidateValues"
+  ]
+
   test "domain modules do not depend on frameworks, delivery, or adapters" do
     assert_clean(Path.wildcard("lib/robine/*/domain/**/*.ex"), @domain_forbidden)
   end
@@ -97,6 +105,70 @@ defmodule Robine.Architecture.DependencyRulesTest do
     end
   end
 
+  test "every use case is documented and exposed by exactly one facade delegate" do
+    facade_files =
+      Path.wildcard("lib/robine/*.ex")
+      |> Enum.reject(
+        &(&1 in [
+            "lib/robine/application.ex",
+            "lib/robine/execution_context.ex",
+            "lib/robine/mailer.ex",
+            "lib/robine/repo.ex"
+          ])
+      )
+
+    delegates = Enum.flat_map(facade_files, &facade_delegates/1)
+
+    use_cases =
+      Path.wildcard("lib/robine/*/use_cases/*.ex")
+      |> Enum.map(fn path ->
+        source = File.read!(path)
+
+        assert [_, module] =
+                 Regex.run(~r/defmodule (Robine\.[A-Za-z]+\.UseCases\.[A-Za-z]+)/, source)
+
+        module
+      end)
+
+    assert Enum.sort(delegates) == Enum.sort(use_cases)
+    assert length(Enum.uniq(delegates)) == length(delegates)
+  end
+
+  test "CLI dependency selection stays in the runtime composition root" do
+    source = File.read!("lib/robine/adapters/cli.ex")
+
+    refute source =~ "Robine.Adapters.Workflow"
+    refute source =~ "Robine.Adapters.Execution"
+    assert source =~ "RuntimeDependencies.local_context()"
+  end
+
+  test "storage retention depends on the blob-store port rather than a concrete backend" do
+    source = File.read!("lib/robine/adapters/persistence/postgres/storage_retention.ex")
+
+    refute source =~ "LocalBlobStore"
+    refute source =~ "S3BlobStore"
+    assert source =~ "blob_store.inventory()"
+    assert source =~ "blob_store.delete("
+  end
+
+  test "use cases expose call/2 except for the explicit pure call/1 allowlist" do
+    for path <- Path.wildcard("lib/robine/*/use_cases/*.ex") do
+      source = File.read!(path)
+      assert [_, name] = Regex.run(~r/defmodule (Robine\.[A-Za-z]+\.UseCases\.[A-Za-z]+)/, source)
+      module = String.to_existing_atom("Elixir." <> name)
+      functions = module.__info__(:functions)
+
+      if name in @pure_call_one_exceptions do
+        assert {:call, 1} in functions
+        refute source =~ "ExecutionContext"
+        refute source =~ ".Ports."
+        refute source =~ ".Dependencies"
+      else
+        assert {:call, 2} in functions, "#{name} must expose call/2"
+      end
+    end
+  end
+
   defp assert_clean(files, forbidden_tokens) do
     found = violations(files, forbidden_tokens)
 
@@ -128,5 +200,20 @@ defmodule Robine.Architecture.DependencyRulesTest do
         ["#{file} reaches into another context through #{dependency}"]
       end
     end)
+  end
+
+  defp facade_delegates(path) do
+    source = File.read!(path)
+    assert [_, context] = Regex.run(~r/defmodule Robine\.([A-Za-z]+) do/, source)
+
+    delegate_count = length(Regex.scan(~r/\bdefdelegate\s/, source))
+    spec_count = length(Regex.scan(~r/^\s*@spec\s/m, source))
+    call_delegate_count = length(Regex.scan(~r/as:\s*:call/, source))
+    assert delegate_count == spec_count, "#{path} must document every delegate with one @spec"
+    assert delegate_count == call_delegate_count, "#{path} delegates must target call"
+
+    Regex.scan(~r/to:\s*UseCases\.([A-Za-z]+)/, source, capture: :all_but_first)
+    |> List.flatten()
+    |> Enum.map(&"Robine.#{context}.UseCases.#{&1}")
   end
 end

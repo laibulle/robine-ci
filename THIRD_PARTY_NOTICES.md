@@ -17,6 +17,8 @@ Robine CI is licensed under AGPL-3.0-or-later. It incorporates or depends on the
 | ecto_sql | 3.14.0 | Apache-2.0 | https://github.com/elixir-ecto/ecto_sql |
 | elixir_make | 0.10.0 | Apache-2.0 | https://github.com/elixir-lang/elixir_make |
 | esbuild | 0.10.0 | MIT | https://github.com/phoenixframework/esbuild |
+| ex_aws | 2.7.0 | MIT | https://github.com/ex-aws/ex_aws |
+| ex_aws_s3 | 2.5.9 | MIT | https://github.com/ex-aws/ex_aws_s3 |
 | exile | 0.14.0 | Apache-2.0 | https://github.com/akash-akya/exile |
 | expo | 1.1.1 | Apache-2.0 | https://github.com/elixir-gettext/expo |
 | file_system | 1.1.1 | Apache-2.0 | https://github.com/falood/file_system |
@@ -48,6 +50,7 @@ Robine CI is licensed under AGPL-3.0-or-later. It incorporates or depends on the
 | req | 0.7.2 | Apache-2.0 | https://github.com/wojtekmach/req |
 | sobelow | 0.15.0 | Apache-2.0 | https://github.com/sobelow/sobelow |
 | swoosh | 1.27.0 | MIT | https://github.com/swoosh/swoosh |
+| sweet_xml | 0.7.5 | MIT | https://github.com/kbrw/sweet_xml |
 | tailwind | 0.5.1 | MIT | https://github.com/phoenixframework/tailwind |
 | telemetry | 1.4.2 | Apache-2.0 | https://github.com/beam-telemetry/telemetry |
 | telemetry_metrics | 1.1.0 | Apache-2.0 | https://github.com/beam-telemetry/telemetry_metrics |
@@ -57,6 +60,7 @@ Robine CI is licensed under AGPL-3.0-or-later. It incorporates or depends on the
 | topbar | 3.0.0 | MIT | https://github.com/buunguyen/topbar |
 | websock | 0.5.3 | MIT | https://github.com/phoenixframework/websock |
 | websock_adapter | 0.6.0 | MIT | https://github.com/phoenixframework/websock_adapter |
+| websockex | 0.5.1 | MIT | https://github.com/witchtails/websockex_wt |
 | yamerl | 0.10.0 | BSD-2-Clause | https://github.com/yakaz/yamerl |
 | yaml_elixir | 2.12.2 | MIT | https://github.com/KamilLelonek/yaml-elixir |
 

@@ -1,5 +1,6 @@
 defmodule Robine.Adapters.Archive.SafeTar do
   @moduledoc false
+  @behaviour Robine.Transfers.Ports.Archive
 
   @defaults [
     max_archive_bytes: 100_000_000,
@@ -8,6 +9,36 @@ defmodule Robine.Adapters.Archive.SafeTar do
     max_ratio: 100,
     timeout_ms: 10_000
   ]
+
+  @impl true
+  def create_source(files, options \\ []) when is_map(files) do
+    options = Keyword.merge(@defaults, options)
+    temporary = Path.join(System.tmp_dir!(), "robine-source-#{Ecto.UUID.generate()}.tar.gz")
+
+    entries =
+      Enum.map(files, fn {path, content} ->
+        {String.to_charlist("source/" <> path), content}
+      end)
+
+    try do
+      with true <- map_size(files) <= options[:max_files],
+           true <- Enum.all?(files, fn {path, content} -> safe_input_file?(path, content) end),
+           true <-
+             Enum.reduce(files, 0, fn {_path, content}, total -> total + byte_size(content) end) <=
+               options[:max_expanded_bytes],
+           :ok <- :erl_tar.create(String.to_charlist(temporary), entries, [:compressed]),
+           {:ok, body} <- File.read(temporary),
+           :ok <- compressed_size(body, options) do
+        {:ok, body}
+      else
+        false -> {:error, :source_archive_limits_exceeded}
+        {:error, reason} -> {:error, reason}
+        other -> {:error, {:source_archive_create, other}}
+      end
+    after
+      File.rm(temporary)
+    end
+  end
 
   def extract_source(body, options \\ []) when is_binary(body) do
     options = Keyword.merge(@defaults, options)
@@ -26,20 +57,32 @@ defmodule Robine.Adapters.Archive.SafeTar do
   def validate_table(entries, compressed_bytes, options \\ []) when is_list(entries) do
     options = Keyword.merge(@defaults, options)
 
-    Enum.reduce_while(entries, {:ok, 0, 0}, fn
-      {path, :directory, _size, _mtime, _mode, _uid, _gid}, {:ok, files, total} ->
-        case safe_relative_path(to_string(path)) do
-          {:ok, _relative} -> {:cont, {:ok, files, total}}
+    Enum.reduce_while(entries, {:ok, 0, 0, 0}, fn
+      {path, :directory, _size, _mtime, _mode, _uid, _gid},
+      {:ok, archive_entries, files, total} ->
+        with :ok <- safe_archive_directory_path(to_string(path)),
+             true <- archive_entries + 1 <= options[:max_files] do
+          {:cont, {:ok, archive_entries + 1, files, total}}
+        else
+          false -> {:halt, {:error, :source_archive_limits_exceeded}}
           error -> {:halt, error}
         end
 
-      {path, :regular, size, _mtime, _mode, _uid, _gid}, {:ok, files, total}
+      {~c"pax_global_header", :unknown, size, _mtime, _mode, _uid, _gid},
+      {:ok, archive_entries, files, total}
+      when is_integer(size) and size >= 0 and size <= 65_536 ->
+        if archive_entries + 1 <= options[:max_files],
+          do: {:cont, {:ok, archive_entries + 1, files, total}},
+          else: {:halt, {:error, :source_archive_limits_exceeded}}
+
+      {path, :regular, size, _mtime, _mode, _uid, _gid}, {:ok, archive_entries, files, total}
       when is_integer(size) and size >= 0 ->
         with {:ok, _relative} <- safe_relative_path(to_string(path)),
+             true <- archive_entries + 1 <= options[:max_files],
              true <- files + 1 <= options[:max_files],
              true <- total + size <= options[:max_expanded_bytes],
              true <- ratio_safe?(total + size, compressed_bytes, options[:max_ratio]) do
-          {:cont, {:ok, files + 1, total + size}}
+          {:cont, {:ok, archive_entries + 1, files + 1, total + size}}
         else
           false -> {:halt, {:error, :source_archive_limits_exceeded}}
           error -> {:halt, error}
@@ -49,7 +92,7 @@ defmodule Robine.Adapters.Archive.SafeTar do
         {:halt, {:error, :unsupported_source_archive_entry}}
     end)
     |> case do
-      {:ok, _files, _total} -> :ok
+      {:ok, _archive_entries, _files, _total} -> :ok
       error -> error
     end
   end
@@ -103,6 +146,14 @@ defmodule Robine.Adapters.Archive.SafeTar do
 
   defp normalize(entries, options) do
     Enum.reduce_while(entries, {:ok, [], 0}, fn
+      {~c"pax_global_header", content}, {:ok, files, total}
+      when is_binary(content) and byte_size(content) <= 65_536 ->
+        {:cont, {:ok, files, total}}
+
+      {"pax_global_header", content}, {:ok, files, total}
+      when is_binary(content) and byte_size(content) <= 65_536 ->
+        {:cont, {:ok, files, total}}
+
       {path, content}, {:ok, files, total} when is_binary(content) ->
         with {:ok, relative} <- safe_relative_path(to_string(path)),
              expanded = total + byte_size(content),
@@ -137,6 +188,34 @@ defmodule Robine.Adapters.Archive.SafeTar do
         {:error, :unsafe_source_archive_path}
     end
   end
+
+  defp safe_archive_directory_path(path) do
+    case Path.split(path) do
+      [archive_root]
+      when archive_root not in ["", ".", ".."] and byte_size(archive_root) <= 4_096 ->
+        if Path.type(path) == :relative and not String.contains?(path, <<0>>),
+          do: :ok,
+          else: {:error, :unsafe_source_archive_path}
+
+      [_archive_root | _relative] ->
+        case safe_relative_path(path) do
+          {:ok, _relative} -> :ok
+          error -> error
+        end
+
+      _invalid ->
+        {:error, :unsafe_source_archive_path}
+    end
+  end
+
+  defp safe_input_file?(path, content) when is_binary(path) and is_binary(content) do
+    parts = Path.split(path)
+
+    path != "" and Path.type(path) == :relative and ".." not in parts and
+      byte_size(path) <= 4_089 and not String.contains?(path, <<0>>)
+  end
+
+  defp safe_input_file?(_path, _content), do: false
 
   defp safe_workspace_path?(path) do
     path != "." and Path.type(path) == :relative and ".." not in Path.split(path) and

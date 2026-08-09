@@ -8,7 +8,7 @@ defmodule Robine.Repositories.UseCases.DiscoverGitHubRepositories do
         actor: %{role: :administrator},
         dependencies: %{repositories: %Dependencies{} = deps}
       }) do
-    with {:ok, repositories} <- deps.github.available_repositories(),
+    with {:ok, repositories} <- deps.source_control.available_repositories(),
          true <- Enum.all?(repositories, &valid?/1) do
       {:ok, Enum.sort_by(repositories, &String.downcase(&1.full_name))}
     else

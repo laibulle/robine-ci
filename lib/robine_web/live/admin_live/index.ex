@@ -1,6 +1,6 @@
 defmodule RobineWeb.AdminLive.Index do
   use RobineWeb, :live_view
-  alias Robine.{Identities, Operations, Secrets}
+  alias Robine.{Autoscaling, Identities, Operations, Runners, Secrets}
 
   @impl true
   def mount(_params, _session, socket), do: {:ok, load(socket)}
@@ -17,6 +17,74 @@ defmodule RobineWeb.AdminLive.Index do
   end
 
   def handle_event("refresh-health", _params, socket), do: {:noreply, load_health(socket)}
+
+  def handle_event("create-runner-enrollment", _params, socket) do
+    case Runners.create_enrollment_token(%{}, socket.assigns.execution_context) do
+      {:ok, enrollment} ->
+        {:noreply, assign(socket, runner_enrollment: enrollment)}
+
+      {:error, reason} ->
+        {:noreply,
+         put_flash(socket, :error, "Cannot create runner enrollment: #{inspect(reason)}")}
+    end
+  end
+
+  def handle_event("update-runner", %{"runner" => params}, socket) do
+    labels =
+      params
+      |> Map.get("labels", "")
+      |> String.split(",", trim: true)
+      |> Enum.map(&String.trim/1)
+
+    case Runners.update_runner(
+           %{runner_id: params["runner_id"], name: params["name"], labels: labels},
+           socket.assigns.execution_context
+         ) do
+      {:ok, _runner} ->
+        {:noreply, socket |> put_flash(:info, "Runner updated.") |> load()}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, "Cannot update runner: #{inspect(reason)}")}
+    end
+  end
+
+  def handle_event("set-runner-state", %{"runner_id" => runner_id, "state" => state}, socket) do
+    admin_state = if state == "enabled", do: :enabled, else: :draining
+
+    case Runners.update_runner(
+           %{runner_id: runner_id, admin_state: admin_state},
+           socket.assigns.execution_context
+         ) do
+      {:ok, _runner} ->
+        {:noreply, socket |> put_flash(:info, "Runner state updated.") |> load()}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, "Cannot change runner state: #{inspect(reason)}")}
+    end
+  end
+
+  def handle_event("rotate-runner", %{"runner_id" => runner_id}, socket) do
+    case Runners.rotate_credential(%{runner_id: runner_id}, socket.assigns.execution_context) do
+      {:ok, credential} ->
+        {:noreply,
+         socket
+         |> assign(runner_credential: credential)
+         |> put_flash(:info, "Credential rotated. Copy the replacement now.")}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, "Cannot rotate credential: #{inspect(reason)}")}
+    end
+  end
+
+  def handle_event("revoke-runner", %{"runner_id" => runner_id}, socket) do
+    case Runners.revoke(%{runner_id: runner_id}, socket.assigns.execution_context) do
+      :ok ->
+        {:noreply, socket |> put_flash(:info, "Runner revoked.") |> load()}
+
+      {:error, reason} ->
+        {:noreply, put_flash(socket, :error, "Cannot revoke runner: #{inspect(reason)}")}
+    end
+  end
 
   def handle_event("run-retention", _params, socket) do
     case Operations.prune_retention(%{}, socket.assigns.execution_context) do
@@ -58,11 +126,37 @@ defmodule RobineWeb.AdminLive.Index do
   end
 
   def handle_event("save-github-private-key", %{"value" => value}, socket) do
-    store_github_credential(socket, "GITHUB_APP_PRIVATE_KEY", value, "GitHub private key")
+    store_source_control_credential(socket, "GITHUB_APP_PRIVATE_KEY", value, "GitHub private key")
   end
 
   def handle_event("save-github-webhook-secret", %{"value" => value}, socket) do
-    store_github_credential(socket, "GITHUB_WEBHOOK_SECRET", value, "Webhook secret")
+    store_source_control_credential(socket, "GITHUB_WEBHOOK_SECRET", value, "Webhook secret")
+  end
+
+  def handle_event("save-gitlab-token", %{"value" => value}, socket) do
+    store_source_control_credential(socket, "GITLAB_TOKEN", value, "GitLab API token")
+  end
+
+  def handle_event("save-gitlab-webhook-secret", %{"value" => value}, socket) do
+    store_source_control_credential(
+      socket,
+      "GITLAB_WEBHOOK_SECRET",
+      value,
+      "GitLab webhook secret"
+    )
+  end
+
+  def handle_event("save-forgejo-token", %{"value" => value}, socket) do
+    store_source_control_credential(socket, "FORGEJO_TOKEN", value, "Forgejo API token")
+  end
+
+  def handle_event("save-forgejo-webhook-secret", %{"value" => value}, socket) do
+    store_source_control_credential(
+      socket,
+      "FORGEJO_WEBHOOK_SECRET",
+      value,
+      "Forgejo webhook secret"
+    )
   end
 
   def handle_event("change-role", %{"user_id" => user_id, "role" => role}, socket) do
@@ -93,14 +187,21 @@ defmodule RobineWeb.AdminLive.Index do
 
   defp load(socket) do
     with {:ok, users} <- Identities.list_users(%{}, socket.assigns.execution_context),
-         {:ok, oidc} <- Identities.oidc_configuration(%{}, socket.assigns.execution_context) do
+         {:ok, oidc} <- Identities.oidc_configuration(%{}, socket.assigns.execution_context),
+         {:ok, runners} <- Runners.list_fleet(%{}, socket.assigns.execution_context),
+         {:ok, autoscaling} <- Autoscaling.fleet_capacity(%{}, socket.assigns.execution_context) do
       socket
       |> assign(
         users: users,
         oidc: oidc,
+        runner_forms: runner_forms(runners),
         retention: retention_projection(),
+        runner_enrollment: Map.get(socket.assigns, :runner_enrollment),
+        runner_credential: Map.get(socket.assigns, :runner_credential),
         secret_rotation_cursor: Map.get(socket.assigns, :secret_rotation_cursor)
       )
+      |> stream(:runners, runners, reset: true)
+      |> stream(:autoscaling_policies, autoscaling, reset: true)
       |> load_health()
     else
       {:error, reason} ->
@@ -108,9 +209,14 @@ defmodule RobineWeb.AdminLive.Index do
         |> assign(
           users: [],
           oidc: %{enabled: false, preflight: {:error, reason}},
+          runner_forms: %{},
           retention: retention_projection(),
+          runner_enrollment: Map.get(socket.assigns, :runner_enrollment),
+          runner_credential: Map.get(socket.assigns, :runner_credential),
           secret_rotation_cursor: Map.get(socket.assigns, :secret_rotation_cursor)
         )
+        |> stream(:runners, [], reset: true)
+        |> stream(:autoscaling_policies, [], reset: true)
         |> load_health()
     end
   end
@@ -122,7 +228,7 @@ defmodule RobineWeb.AdminLive.Index do
     end
   end
 
-  defp store_github_credential(socket, name, value, label) do
+  defp store_source_control_credential(socket, name, value, label) do
     case Secrets.store_secret(
            %{
              name: name,
@@ -149,9 +255,12 @@ defmodule RobineWeb.AdminLive.Index do
   defp check_label(:database), do: "PostgreSQL"
   defp check_label(:durable_queue), do: "Durable queue"
   defp check_label(:outbox), do: "Event outbox"
+  defp check_label(:scheduler), do: "Scheduled workflows"
   defp check_label(:docker), do: "Docker Engine"
   defp check_label(:storage), do: "Blob storage"
   defp check_label(:github_app), do: "GitHub App"
+  defp check_label(:gitlab), do: "GitLab"
+  defp check_label(:forgejo), do: "Forgejo"
   defp check_label(:oidc), do: "OpenID Connect"
 
   defp status_class(:ok), do: "badge-success"
@@ -173,6 +282,22 @@ defmodule RobineWeb.AdminLive.Index do
   defp preflight_text(:not_configured), do: "Not configured"
   defp preflight_text({:ok, host}), do: "Discovery succeeded via #{host}"
   defp preflight_text({:error, _reason}), do: "Discovery failed"
+
+  defp runner_forms(runners) do
+    Map.new(runners, fn runner ->
+      form =
+        to_form(
+          %{
+            "runner_id" => runner.id,
+            "name" => runner.name,
+            "labels" => Enum.join(runner.labels, ", ")
+          },
+          as: :runner
+        )
+
+      {runner.id, form}
+    end)
+  end
 
   @impl true
   def render(assigns) do
@@ -214,6 +339,212 @@ defmodule RobineWeb.AdminLive.Index do
               </div>
               <p class="mt-2 text-sm text-base-content/60">{check.detail}</p>
             </article>
+          </div>
+        </section>
+        <section class="rounded-3xl border border-base-300 bg-base-100 p-6">
+          <div>
+            <p class="text-sm font-semibold uppercase tracking-[0.16em] text-primary">
+              Elastic capacity
+            </p>
+            <h2 class="mt-1 text-xl font-semibold">Autoscaling</h2>
+            <p class="mt-1 max-w-3xl text-sm text-base-content/60">
+              No infrastructure provider is enabled by default. Every provider effect is backed by a durable idempotent intent.
+            </p>
+          </div>
+          <div id="autoscaling-policies" phx-update="stream" class="mt-5 grid gap-3">
+            <p
+              id="autoscaling-empty"
+              class="hidden rounded-2xl border border-dashed border-base-300 p-5 text-sm text-base-content/60 only:block"
+            >
+              Static runners only. Configure a provider adapter and policy to enable elastic capacity.
+            </p>
+            <article
+              :for={{dom_id, policy} <- @streams.autoscaling_policies}
+              id={dom_id}
+              class="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-base-300 p-4"
+            >
+              <div>
+                <h3 class="font-semibold">{policy.name}</h3>
+                <p class="mt-1 text-xs text-base-content/55">
+                  {policy.provider} · {policy.queued_demand || 0} queued jobs
+                </p>
+              </div>
+              <div class="flex items-center gap-3">
+                <span class="badge badge-outline">desired {policy.desired || "—"}</span>
+                <span class="badge badge-outline">observed {policy.observed || "—"}</span>
+                <span class={
+                  if policy.health == :healthy, do: "badge badge-success", else: "badge badge-warning"
+                }>{policy.health}</span>
+              </div>
+            </article>
+          </div>
+        </section>
+        <section class="rounded-3xl border border-base-300 bg-base-100 p-6">
+          <div>
+            <p class="text-sm font-semibold uppercase tracking-[0.16em] text-primary">Fleet</p>
+            <h2 class="mt-1 text-xl font-semibold">Remote runners</h2>
+            <p class="mt-1 max-w-3xl text-sm text-base-content/60">
+              Operator labels are separate from machine-reported capabilities. Draining preserves active work and prevents new assignments.
+            </p>
+          </div>
+          <div
+            :if={@runner_credential}
+            id="runner-credential-result"
+            role="status"
+            class="mt-5 rounded-2xl border border-warning/40 bg-warning/10 p-4"
+          >
+            <p class="font-semibold">Copy the replacement credential now</p>
+            <code class="mt-2 block break-all rounded-xl bg-base-300 p-3 text-xs">{@runner_credential.credential}</code>
+          </div>
+          <div id="runner-fleet" phx-update="stream" class="mt-6 grid gap-4">
+            <p
+              id="runner-fleet-empty"
+              class="hidden rounded-2xl border border-dashed border-base-300 p-6 text-sm text-base-content/60 only:block"
+            >
+              No remote runner is enrolled yet.
+            </p>
+            <article
+              :for={{dom_id, runner} <- @streams.runners}
+              id={dom_id}
+              class="rounded-2xl border border-base-300 p-5 transition hover:border-primary/40"
+            >
+              <div class="flex flex-wrap items-start justify-between gap-4">
+                <div>
+                  <div class="flex flex-wrap items-center gap-2">
+                    <h3 class="font-semibold">{runner.name}</h3>
+                    <span class="badge badge-outline">{runner.admin_state}</span>
+                    <span class="badge badge-ghost">{runner.connectivity}</span>
+                  </div>
+                  <p class="mt-2 text-xs text-base-content/55">
+                    {runner.software_version || "version unknown"} · {runner.active_attempts}/{runner.concurrency} slots active · last heartbeat {if runner.last_seen_at,
+                      do: DateTime.to_iso8601(runner.last_seen_at),
+                      else: "never"}
+                  </p>
+                  <div class="mt-3 flex flex-wrap gap-2">
+                    <span :for={label <- runner.labels} class="badge badge-primary badge-outline">{label}</span>
+                    <span :for={{key, value} <- runner.capabilities} class="badge badge-ghost">{key}: {to_string(
+                      value
+                    )}</span>
+                  </div>
+                </div>
+                <div :if={runner.admin_state != :revoked} class="flex flex-wrap gap-2">
+                  <button
+                    id={"runner-state-#{runner.id}"}
+                    phx-click="set-runner-state"
+                    phx-value-runner_id={runner.id}
+                    phx-value-state={
+                      if runner.admin_state == :draining, do: "enabled", else: "draining"
+                    }
+                    class="btn btn-outline btn-sm"
+                  >
+                    {if runner.admin_state == :draining, do: "Enable", else: "Drain"}
+                  </button>
+                  <button
+                    id={"rotate-runner-#{runner.id}"}
+                    phx-click="rotate-runner"
+                    phx-value-runner_id={runner.id}
+                    data-confirm="Rotate this credential? The previous credential remains valid for five minutes."
+                    class="btn btn-outline btn-sm"
+                  >
+                    Rotate credential
+                  </button>
+                  <button
+                    id={"revoke-runner-#{runner.id}"}
+                    phx-click="revoke-runner"
+                    phx-value-runner_id={runner.id}
+                    data-confirm="Revoke this runner immediately? It will be disconnected and cannot authenticate again."
+                    class="btn btn-error btn-outline btn-sm"
+                  >
+                    Revoke
+                  </button>
+                </div>
+              </div>
+              <.form
+                :if={runner.admin_state != :revoked}
+                for={@runner_forms[runner.id]}
+                id={"runner-form-#{runner.id}"}
+                phx-submit="update-runner"
+                class="mt-5 grid gap-3 md:grid-cols-[1fr_2fr_auto] md:items-end"
+              >
+                <.input field={@runner_forms[runner.id][:runner_id]} type="hidden" />
+                <.input field={@runner_forms[runner.id][:name]} label="Display name" required />
+                <.input
+                  field={@runner_forms[runner.id][:labels]}
+                  label="Operator labels (comma-separated)"
+                />
+                <button class="btn btn-primary" phx-disable-with="Saving…">Save</button>
+              </.form>
+            </article>
+          </div>
+        </section>
+        <section class="rounded-3xl border border-base-300 bg-base-100 p-6">
+          <h2 class="text-xl font-semibold">GitLab and Forgejo credentials</h2>
+          <p class="mt-1 max-w-3xl text-sm text-base-content/60">
+            Configure provider origins with <code>GITLAB_URL</code>
+            and <code>FORGEJO_URL</code>. Values stored below are encrypted, write-only, and override environment bootstrap credentials.
+          </p>
+          <div class="mt-6 grid gap-6 md:grid-cols-2">
+            <form
+              :for={
+                {id, event, label} <- [
+                  {"gitlab-token", "save-gitlab-token", "GitLab API token"},
+                  {"gitlab-webhook-secret", "save-gitlab-webhook-secret", "GitLab webhook secret"},
+                  {"forgejo-token", "save-forgejo-token", "Forgejo API token"},
+                  {"forgejo-webhook-secret", "save-forgejo-webhook-secret", "Forgejo webhook secret"}
+                ]
+              }
+              id={id <> "-form"}
+              phx-submit={event}
+              class="space-y-3"
+            >
+              <label for={id} class="font-semibold">{label}</label>
+              <input
+                id={id}
+                type="password"
+                name="value"
+                required
+                minlength="8"
+                maxlength="65536"
+                autocomplete="new-password"
+                class="input input-bordered w-full"
+              />
+              <button class="btn btn-primary btn-sm" phx-disable-with="Encrypting…">
+                Store {label}
+              </button>
+            </form>
+          </div>
+        </section>
+        <section class="rounded-3xl border border-base-300 bg-base-100 p-6">
+          <div class="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <h2 class="text-xl font-semibold">Remote runner enrollment</h2>
+              <p class="mt-1 max-w-3xl text-sm text-base-content/60">
+                Generate a single-use token valid for 15 minutes. It is displayed once and grants creation of one machine identity.
+              </p>
+            </div>
+            <button
+              id="create-runner-enrollment"
+              phx-click="create-runner-enrollment"
+              class="btn btn-primary btn-sm"
+              phx-disable-with="Generating…"
+            >
+              Generate enrollment command
+            </button>
+          </div>
+          <div
+            :if={@runner_enrollment}
+            id="runner-enrollment-result"
+            role="status"
+            class="mt-6 rounded-2xl border border-warning/40 bg-warning/10 p-4"
+          >
+            <p class="font-semibold">Copy this command now</p>
+            <p class="mt-1 text-sm text-base-content/70">
+              Replace <code>RUNNER_NAME</code>
+              and run it on the trusted worker. The token expires at {DateTime.to_iso8601(
+                @runner_enrollment.expires_at
+              )}.
+            </p>
+            <pre class="mt-3 overflow-x-auto whitespace-pre-wrap break-all rounded-xl bg-base-300 p-3 text-xs"><code>ROBINE_RUNNER_ENROLLMENT_TOKEN='{@runner_enrollment.token}' robine-runner enroll --server '{Application.fetch_env!(:robine, :public_url)}' --name 'RUNNER_NAME' --config /etc/robine-runner/config.json</code></pre>
           </div>
         </section>
         <section class="rounded-3xl border border-base-300 bg-base-100 p-6">

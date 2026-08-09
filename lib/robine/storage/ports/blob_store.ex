@@ -18,4 +18,5 @@ defmodule Robine.Storage.Ports.BlobStore do
               | {:error, term()}
   @callback delete_temporary_before(DateTime.t()) ::
               {:ok, non_neg_integer()} | {:error, term()}
+  @callback health() :: {:ok, map()} | {:error, term()}
 end

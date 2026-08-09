@@ -106,6 +106,23 @@ defmodule RobineWeb.Telemetry do
       last_value("robine.github.api.request.rate_limit_remaining"),
       last_value("robine.github.api.request.rate_limit_limit"),
       last_value("robine.github.api.request.rate_limit_reset"),
+      counter("robine.source_control.request.count",
+        tags: [:provider, :operation, :outcome, :status]
+      ),
+      distribution("robine.source_control.request.duration",
+        tags: [:provider, :operation, :outcome, :status],
+        unit: {:native, :millisecond}
+      ),
+      counter("robine.source_control.webhook.count", tags: [:provider, :outcome, :event]),
+      distribution("robine.source_control.webhook.duration",
+        tags: [:provider, :outcome, :event],
+        unit: {:native, :millisecond}
+      ),
+      counter("robine.source_control.projection.count", tags: [:operation, :outcome]),
+      distribution("robine.source_control.delivery.duration",
+        tags: [:provider, :outcome],
+        unit: {:native, :millisecond}
+      ),
 
       # Workflow validation
       counter("robine.workflow.validation.count", tags: [:outcome, :schema_version]),
@@ -113,6 +130,30 @@ defmodule RobineWeb.Telemetry do
         tags: [:outcome, :schema_version],
         unit: {:native, :millisecond}
       ),
+      last_value("robine.workflow.expansion.expanded_jobs"),
+      last_value("robine.workflow.expansion.matrix_variants"),
+      counter("robine.workflow.composition.count", tags: [:outcome]),
+      distribution("robine.workflow.composition.duration",
+        tags: [:outcome],
+        unit: {:native, :millisecond}
+      ),
+      last_value("robine.workflow.composition.source_files", tags: [:outcome]),
+      last_value("robine.workflow.composition.max_depth", tags: [:outcome]),
+      last_value("robine.workflow.composition.composed_jobs", tags: [:outcome]),
+      distribution("robine.workflow.manual.duration",
+        tags: [:operation, :outcome],
+        unit: {:native, :millisecond}
+      ),
+      sum("robine.workflow.manual.input_count", tags: [:operation, :outcome]),
+      sum("robine.workflow.manual.workflow_count", tags: [:operation, :outcome]),
+      distribution("robine.workflow.schedule.duration",
+        tags: [:outcome],
+        unit: {:native, :millisecond}
+      ),
+      sum("robine.workflow.schedule.scanned_minutes", tags: [:outcome]),
+      sum("robine.workflow.schedule.due_occurrences", tags: [:outcome]),
+      sum("robine.workflow.schedule.pipelines", tags: [:outcome]),
+      sum("robine.workflow.schedule.truncated_minutes", tags: [:outcome]),
 
       # Durable scheduling and pipeline state
       last_value("robine.queue.depth"),
@@ -122,6 +163,7 @@ defmodule RobineWeb.Telemetry do
       counter("robine.pipeline.transition.count", tags: [:entity, :outcome]),
       distribution("robine.pipeline.duration", tags: [:outcome], unit: :millisecond),
       counter("robine.pipeline.retry.count", tags: [:outcome]),
+      counter("robine.condition.evaluation.count", tags: [:scope, :condition, :outcome]),
       distribution("robine.scheduler.dispatch.duration",
         tags: [:outcome],
         unit: {:native, :millisecond}

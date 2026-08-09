@@ -2,7 +2,7 @@
 
 ## Status
 
-- **State:** Accepted
+- **State:** Shipped
 - **Owner:** Workflows
 - **Target:** MVP
 - **Last updated:** 2026-08-08
@@ -25,7 +25,7 @@ Developers need a readable, locally validatable CI definition with predictable e
 ## Non-goals
 
 - Running GitHub Actions or supporting `uses` marketplace references.
-- Templating, arbitrary expressions, dynamic job generation, or matrices in the MVP.
+- Templating, arbitrary expressions, dynamic job generation, or matrices in the MVP. Bounded static post-MVP matrices are specified separately by WF-003.
 - Deployment environments and manual approval gates.
 
 ## Users and use cases
@@ -116,6 +116,10 @@ Built-in inputs are fixed as follows:
 
 Jobs share one container and workspace across their sequential steps. Each `run` step executes using `/bin/sh -e` by default; a job MAY declare another shell executable present in its image. Every step receives the exit status of its command, and the first failed step stops the job.
 
+Post-MVP workflow v1 also accepts the bounded `services` job map defined by [EXEC-002](../execution/exec-002-service-containers.md). A service has an exact DNS identifier, image, optional user/environment/secret-environment/command, and optional TCP readiness check. It never publishes a host port or receives the job workspace.
+
+Post-MVP workflow v1 accepts bounded static `strategy.matrix` expansion as defined by [WF-003](wf-003-job-matrices.md). This adds only fixed image tokens and declared `ROBINE_MATRIX_*` environment values; it does not add a general expression evaluator.
+
 Version 1 accepts only `/bin/sh` and `/bin/bash` as explicit `shell` values. `/bin/sh` is the default. If the selected executable is absent, preparation fails with `shell_unavailable` before any user step runs.
 
 ## Failure modes and recovery
@@ -151,4 +155,4 @@ Every semantic diagnostic is enriched from a parser-owned path-to-source index a
 
 ## Out of scope / future work
 
-- Matrices, conditional expressions, reusable workflows, services, scheduled triggers, manual inputs, and marketplace actions.
+- Reusable workflows, deployment environments, approvals, and marketplace actions.

@@ -9,6 +9,7 @@ defmodule Robine.Adapters.Persistence.Postgres.Schemas.Attempt do
     field :job_id, :binary_id
     field :number, :integer
     field :idempotency_token, :binary_id
+    field :runner_id, :string
     field :status, Ecto.Enum, values: Robine.Pipelines.Domain.Attempt.statuses()
     field :lease_expires_at, :utc_datetime_usec
     field :last_sequence, :integer, default: 0
@@ -25,6 +26,7 @@ defmodule Robine.Adapters.Persistence.Postgres.Schemas.Attempt do
       :job_id,
       :number,
       :idempotency_token,
+      :runner_id,
       :status,
       :lease_expires_at,
       :last_sequence,

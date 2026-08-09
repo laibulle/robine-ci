@@ -1,6 +1,6 @@
 # Robine CI
 
-Robine CI is an open-source, self-hosted continuous integration service built with Elixir and Phoenix. The MVP targets trusted GitHub repositories and executes jobs in local Docker containers.
+Robine CI is an open-source, self-hosted continuous integration service built with Elixir and Phoenix. It targets explicitly trusted GitHub, GitLab, and Forgejo repositories and executes jobs in isolated local or outbound-only remote Docker runners.
 
 The project is under active development. The product contract is documented in [the specification index](docs/specs/README.md), implementation work is tracked in [TASKS.md](TASKS.md), and contributors must follow [AGENTS.md](AGENTS.md).
 
@@ -11,15 +11,17 @@ The project is under active development. The product contract is documented in [
 - Oban durable-work foundation
 - Clean Architecture reference slice for pipeline creation
 - Atomic pipeline and outbox persistence
-- Workflow schema v1 parsing and semantic validation
+- Workflow schema v1 parsing, semantic validation, and exact-revision reusable workflows
+- Deterministic `success`, `failure`, and `always` conditions plus bounded static job matrices
 - Stable workflow diagnostic codes and dependency-cycle detection
-- Isolated local Docker execution and the `robine` validation/execution CLI
-- Encrypted secrets, immutable artifacts, caches, and cursor-based redacted logs
-- Signed GitHub webhook ingestion, exact-SHA workflows, GitHub App installation tokens, and checks
+- Isolated local/remote Docker execution, attempt-private service containers, and the `robine` validation/execution CLI
+- Encrypted secrets, immutable artifacts, local or S3-compatible caches/artifacts, and cursor-based redacted logs
+- Authenticated GitHub, GitLab, and Forgejo webhooks, exact-SHA workflows, and durable check/status projection
 - Local Argon2id authentication, revocable sessions, and optional OpenID Connect SSO
 - Authenticated LiveView pipeline, job, log, cancellation, and retry experiences
+- Outbound-only remote Docker runners with versioned restart-safe sessions and fleet administration
 
-Remote runners and untrusted-workload isolation are post-MVP. Release validation that requires a real GitHub installation or external first-use participants remains tracked in `TASKS.md`.
+Untrusted-workload isolation remains post-MVP. Release validation that requires a real GitHub installation or external first-use participants remains tracked in `TASKS.md`.
 
 ## Requirements
 
@@ -89,6 +91,102 @@ Each job is limited to 2 vCPU, 4 GiB RAM without additional swap, and 512 proces
 
 Live cancellation polls durable state every 250 ms and gives the container five seconds to stop before Docker forces termination. Override the grace with `ROBINE_RUNNER_CANCELLATION_GRACE_MS`.
 
+## Conditional cleanup and diagnostics
+
+Use `if: failure` for diagnostics that should run only after an ordinary command or built-in failure, and `if: always` for cleanup that should run after success or ordinary failure:
+
+```yaml
+jobs:
+  test:
+    image: alpine:3.22
+    steps:
+      - name: Test
+        run: ./test.sh
+      - name: Upload diagnostics
+        if: failure
+        uses: artifacts/upload
+        with:
+          name: diagnostics
+          paths: [tmp/diagnostics]
+      - name: Cleanup
+        if: always
+        run: ./cleanup.sh
+```
+
+The only condition values are `success` (the default), `failure`, and `always`. Neither `failure` nor `always` continues after cancellation, timeout, runner loss, service loss, or an infrastructure error. `robine run` applies the same job and step rules as CI.
+
+## Job matrices
+
+Use a bounded static matrix to run one job across up to 32 Cartesian variants:
+
+```yaml
+jobs:
+  test:
+    strategy:
+      matrix:
+        elixir: ["1.18.4", "1.19.0"]
+        otp: ["27.3", "28.0"]
+    image: "hexpm/elixir:${{ matrix.elixir }}-erlang-${{ matrix.otp }}"
+    steps:
+      - run: mix test
+```
+
+Each variant receives `ROBINE_MATRIX_ELIXIR` and `ROBINE_MATRIX_OTP`, appears as an independent job and GitHub check, and can be reproduced exactly with a quoted generated key such as `robine run 'test[elixir=1.18.4,otp=27.3]'`. `robine run test` runs the whole group. Matrix expansion remains subject to the configured workflow job and step limits.
+
+## Manual workflows
+
+Declare bounded, non-secret inputs under `on.workflow_dispatch.inputs` to let administrators and maintainers launch a trusted repository workflow from its exact default-branch SHA:
+
+```yaml
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: choice
+        required: true
+        options: [staging, production]
+      version:
+        type: string
+        required: true
+      dry_run:
+        type: boolean
+        default: true
+```
+
+The normalized values are retained on the pipeline and injected as `ROBINE_INPUT_ENVIRONMENT`, `ROBINE_INPUT_VERSION`, and `ROBINE_INPUT_DRY_RUN`. They are deliberately visible and must never contain credentials. Reproduce the same run locally with repeated flags, for example `robine run release --input environment=staging --input version=2.4.0 --input dry_run=true`.
+
+## Scheduled workflows
+
+Robine evaluates native five-field cron expressions in UTC without calling a provider scheduler:
+
+```yaml
+on:
+  schedule:
+    - cron: "0 2 * * *"
+    - cron: "*/30 9-17 * * 1-5"
+```
+
+Each due minute resolves the trusted repository's current default-branch head to an exact SHA and creates one idempotent pipeline. A durable cursor catches up missed occurrences for up to 24 hours after downtime; longer outages retain the newest 1,440 minutes and report the truncated backlog in metrics. Pipeline detail keeps the intended UTC occurrence separate from execution timestamps.
+
+## Reusable workflows
+
+Entry workflows can include reviewed jobs from another `.yml` file in the same repository and exact Git revision:
+
+```yaml
+includes:
+  quality:
+    path: .robine-ci/workflows/quality.yml
+    inputs:
+      runtime: "3.22"
+jobs:
+  package:
+    image: alpine:3.22
+    needs: quality--test
+    steps: [{run: "true"}]
+```
+
+The included file declares `on.workflow_call.inputs`; its jobs are namespaced as `quality--<job>` and receive normalized non-secret values such as `ROBINE_CALL_INPUT_RUNTIME`. Composition is restricted to the same exact source set, four levels and 16 transitive includes. The CLI discovers these repository-local sources automatically, and immutable pipeline revisions retain every included source and digest. Cross-repository, URL, branch, tag, and secret call inputs are intentionally unsupported.
+
 ## GitHub App
 
 Create a GitHub App for the instance with these repository permissions:
@@ -107,6 +205,39 @@ export GITHUB_WEBHOOK_SECRET="..."
 ```
 
 `GITHUB_APP_PRIVATE_KEY` and `GITHUB_WEBHOOK_SECRET` are bootstrap and break-glass inputs. After the first administrator signs in, the Administration page can store replacements encrypted in PostgreSQL with the versioned instance AES-256-GCM key; encrypted values take precedence and are never displayed again. `GITHUB_APP_ID` remains non-secret configuration. Installation access tokens and their granted-permission projection are cached only until shortly before GitHub expires them.
+
+## GitLab and Forgejo
+
+Configure one GitLab and/or Forgejo origin. Origins are non-secret, must be HTTPS in production, and are fixed at startup:
+
+```bash
+export GITLAB_URL="https://gitlab.com"
+export GITLAB_TOKEN="..."
+export GITLAB_WEBHOOK_SECRET="..."
+
+export FORGEJO_URL="https://code.example.com"
+export FORGEJO_TOKEN="..."
+export FORGEJO_WEBHOOK_SECRET="..."
+```
+
+GitLab projects use a project/group token limited to the connected projects with API access sufficient for repository reads and commit-status writes. Configure push and merge-request webhooks at `<ROBINE_PUBLIC_URL>/api/gitlab/webhooks` and use the same random value for GitLab's secret-token field and `GITLAB_WEBHOOK_SECRET`.
+
+Forgejo tokens require repository content read and commit-status write access. Configure push and pull-request webhooks at `<ROBINE_PUBLIC_URL>/api/forgejo/webhooks` with a secret matching `FORGEJO_WEBHOOK_SECRET`; Robine verifies Forgejo's HMAC-SHA256 signature over the raw body.
+
+The environment token and webhook variables are bootstrap and recovery fallbacks. Administrators can replace all four values from Instance Administration; stored values are encrypted, write-only, and take precedence. Repository discovery is always repeated server-side before an exact project ID/name selection becomes trusted.
+
+Provider adapters have opt-in contract smokes against pinned official containers. Each smoke creates an isolated temporary provider, user, repository, exact commit, and terminal status, then removes the container:
+
+```bash
+docker pull codeberg.org/forgejo/forgejo:16.0.2-rootless
+mix test test/robine/adapters/source_control/forgejo_integration_test.exs
+
+docker pull gitlab/gitlab-ce:19.2.1-ce.0
+ROBINE_GITLAB_INTEGRATION=1 mix test \
+  test/robine/adapters/source_control/git_lab_integration_test.exs
+```
+
+The GitLab smoke is excluded from ordinary QA because a cold Omnibus startup takes several minutes and materially more resources. Unit and provider-neutral vertical tests remain part of every QA run.
 
 ## OpenID Connect
 

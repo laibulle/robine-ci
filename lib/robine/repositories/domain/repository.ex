@@ -1,7 +1,9 @@
 defmodule Robine.Repositories.Domain.Repository do
-  @moduledoc "A trusted GitHub repository installed on this Robine instance."
+  @moduledoc "A trusted source-control repository installed on this Robine instance."
   @enforce_keys [
     :id,
+    :provider,
+    :provider_instance,
     :provider_id,
     :installation_id,
     :owner,
@@ -12,6 +14,8 @@ defmodule Robine.Repositories.Domain.Repository do
   ]
   defstruct [
     :id,
+    :provider,
+    :provider_instance,
     :provider_id,
     :installation_id,
     :owner,
@@ -23,6 +27,8 @@ defmodule Robine.Repositories.Domain.Repository do
 
   @type t :: %__MODULE__{
           id: String.t(),
+          provider: :github | :gitlab | :forgejo,
+          provider_instance: String.t(),
           provider_id: integer(),
           installation_id: integer(),
           owner: String.t(),

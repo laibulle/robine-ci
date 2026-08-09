@@ -25,7 +25,9 @@ defmodule Robine.Pipelines.Contracts.PipelineView do
     :status,
     :inserted_at,
     :started_at,
-    :finished_at
+    :finished_at,
+    :scheduled_for,
+    inputs: %{}
   ]
 
   @type t :: %__MODULE__{
@@ -39,7 +41,9 @@ defmodule Robine.Pipelines.Contracts.PipelineView do
           status: Pipeline.status(),
           inserted_at: DateTime.t(),
           started_at: DateTime.t() | nil,
-          finished_at: DateTime.t() | nil
+          finished_at: DateTime.t() | nil,
+          scheduled_for: DateTime.t() | nil,
+          inputs: %{optional(String.t()) => String.t()}
         }
 
   @spec from_domain(Pipeline.t()) :: t()

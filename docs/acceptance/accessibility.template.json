@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "kind": "accessibility_smoke",
+  "tested_at": "2026-08-09T12:00:00Z",
+  "tester": {
+    "id": "replace-with-release-record-tester-id",
+    "unfamiliar_with_implementation": true
+  },
+  "environment": {
+    "screen_reader": "replace-with-name-and-version",
+    "browser": "replace-with-name-and-version",
+    "operating_system": "replace-with-name-and-version"
+  },
+  "journeys": [
+    {"id": "first_run_setup", "completed": true, "keyboard_only": true, "announcements_understood": true, "focus_order_logical": true, "blocking_issues": [], "notes": "Replace with observations"},
+    {"id": "sign_in", "completed": true, "keyboard_only": true, "announcements_understood": true, "focus_order_logical": true, "blocking_issues": [], "notes": "Replace with observations"},
+    {"id": "connect_repository", "completed": true, "keyboard_only": true, "announcements_understood": true, "focus_order_logical": true, "blocking_issues": [], "notes": "Replace with observations"},
+    {"id": "inspect_running_pipeline", "completed": true, "keyboard_only": true, "announcements_understood": true, "focus_order_logical": true, "blocking_issues": [], "notes": "Replace with observations"},
+    {"id": "diagnose_failed_job", "completed": true, "keyboard_only": true, "announcements_understood": true, "focus_order_logical": true, "blocking_issues": [], "notes": "Replace with observations"},
+    {"id": "cancel_and_retry", "completed": true, "keyboard_only": true, "announcements_understood": true, "focus_order_logical": true, "blocking_issues": [], "notes": "Replace with observations"}
+  ],
+  "issues": [],
+  "notes": "Replace every placeholder with observations from the uncoached session"
+}

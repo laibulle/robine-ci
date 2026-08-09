@@ -2,7 +2,7 @@
 
 ## Status
 
-- **State:** Draft
+- **State:** Shipped
 - **Owner:** Identity
 - **Target:** MVP
 - **Last updated:** 2026-08-09

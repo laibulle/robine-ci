@@ -5,6 +5,8 @@ defmodule Robine.Adapters.Persistence.Postgres.Schemas.GitHubRepository do
   @primary_key {:id, :binary_id, autogenerate: false}
 
   schema "github_repositories" do
+    field :provider, Ecto.Enum, values: [:github, :gitlab, :forgejo]
+    field :provider_instance, :string
     field :provider_id, :integer
     field :installation_id, :integer
     field :owner, :string
@@ -18,6 +20,8 @@ defmodule Robine.Adapters.Persistence.Postgres.Schemas.GitHubRepository do
     schema
     |> cast(attributes, [
       :id,
+      :provider,
+      :provider_instance,
       :provider_id,
       :installation_id,
       :owner,
@@ -28,6 +32,8 @@ defmodule Robine.Adapters.Persistence.Postgres.Schemas.GitHubRepository do
     ])
     |> validate_required([
       :id,
+      :provider,
+      :provider_instance,
       :provider_id,
       :installation_id,
       :owner,
@@ -36,7 +42,11 @@ defmodule Robine.Adapters.Persistence.Postgres.Schemas.GitHubRepository do
       :trusted,
       :inserted_at
     ])
-    |> unique_constraint(:provider_id)
-    |> unique_constraint(:full_name)
+    |> unique_constraint([:provider, :provider_instance, :provider_id],
+      name: :source_control_repositories_provider_identity_index
+    )
+    |> unique_constraint([:provider, :provider_instance, :full_name],
+      name: :source_control_repositories_provider_name_index
+    )
   end
 end

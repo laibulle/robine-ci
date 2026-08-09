@@ -2,7 +2,7 @@
 
 ## Status
 
-- **State:** Accepted
+- **State:** Shipped
 - **Owner:** Execution
 - **Target:** MVP
 - **Last updated:** 2026-08-09
@@ -124,4 +124,4 @@ None blocking.
 
 ## Out of scope / future work
 
-- Remote runners, micro-VM isolation, service containers, GPU/device access, and autoscaling.
+- Micro-VM isolation, GPU/device access, and autoscaling. Attempt-scoped services are specified separately by EXEC-002.

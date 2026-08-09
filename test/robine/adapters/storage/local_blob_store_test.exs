@@ -2,6 +2,11 @@ defmodule Robine.Adapters.Storage.LocalBlobStoreTest do
   use ExUnit.Case, async: false
 
   alias Robine.Adapters.Storage.LocalBlobStore
+  alias Robine.TestSupport.PortContracts.BlobStoreContract
+
+  test "passes the shared blob-store port contract" do
+    assert :ok = BlobStoreContract.assert_contract(LocalBlobStore)
+  end
 
   test "writes content atomically by digest and verifies every read" do
     content = "blob-#{Ecto.UUID.generate()}"

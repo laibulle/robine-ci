@@ -1,6 +1,6 @@
 # Robine CI implementation plan
 
-This file orders implementation work for the MVP. Product behavior and architecture are defined in [docs/specs](docs/specs/README.md). A checkbox means the task and all of its exit criteria have been verified, not merely started.
+This file orders implementation work for the MVP and accepted post-MVP increments. Product behavior and architecture are defined in [docs/specs](docs/specs/README.md). A checkbox means the task and all of its exit criteria have been verified, not merely started.
 
 ## Status legend
 
@@ -251,8 +251,8 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 
 - **Spec:** [CLI-001](docs/specs/cli/cli-001-local-developer-experience.md)
 - **Depends on:** BOOT-001
-- [x] Choose a cross-platform packaging strategy and supported platforms. (Elixir escript for the MVP; requires a compatible Erlang runtime.)
-- [x] Implement version reporting, deterministic SHA-256 manifests, cross-platform verification instructions, stable exit-code classes, and non-interactive output.
+- [x] Choose a target-specific packaging strategy and supported platforms. (GNU/Linux x86-64 escript plus target-native Exile runtime for the verified MVP binary.)
+- [x] Implement version reporting, deterministic SHA-256 manifests, supported-host verification instructions, stable exit-code classes, and non-interactive output.
 - [x] Ensure the CLI does not transmit repository data or telemetry by default.
 
 ### CLI-102 — Implement init and validation
@@ -344,15 +344,18 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - [x] Test archive attacks, log injection, secret leakage, authorization boundaries, OIDC account collision, and fork policy.
 - [x] Run architecture checks, compiler-as-static-analysis, Sobelow, MixAudit, Hex retirement audit, unused-dependency checks, and the complete test suite through `mix qa`.
 - [ ] Resolve every applicable unchecked acceptance criterion in accepted specs.
+  - External evidence gate: `mix robine.verify_acceptance --first-pipeline FILE --accessibility FILE --artifact-manifest SHA256SUMS`.
 
 ### DX-101 — Verify the ten-minute first pipeline
 
 - **Spec:** [PROD-001](docs/specs/product/prod-001-mvp-definition.md)
 - **Depends on:** QA-101, CLI-103, WEB-103
-- [x] Test documented installation from a clean supported Linux host.
+- [x] Test the documented target-specific release installation with real PostgreSQL, migrations, server readiness, Caddy validation, and complete cleanup on supported Linux.
 - [ ] Reach a green GitHub check in under ten minutes, excluding approvals and image downloads.
+  - Follow `docs/acceptance/first-pipeline.md` and retain a verified external evidence file.
 - [x] Reproduce a representative failed CI job locally from the command shown in the UI.
 - [ ] Conduct accessibility and first-use tests with developers unfamiliar with the implementation.
+  - Follow `docs/acceptance/accessibility.md` and retain a verified external evidence file.
 - [x] Fix or explicitly re-specify every material failure discovered.
 
 ### REL-101 — Prepare the first open-source release
@@ -361,21 +364,267 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - [x] Confirm the complete AGPL-3.0-or-later text and a test-enforced locked third-party notice inventory.
 - [x] Publish installation, upgrade, backup, recovery, security-model, and troubleshooting documentation.
 - [x] Document supported versions, retention defaults, limitations, and trusted-repository assumptions.
-- [x] Produce and verify checksummed server and CLI 0.1.0 artifacts, including license material in the server archive.
+- [x] Produce and verify checksummed server, CLI, and runner 0.1.0 artifacts, including exact license material and disabled Erlang Distribution in the server archive; all three real packaging smokes run in `mix qa`.
 - [x] Publish a forward-migration and backup-restore rollback procedure.
 - [ ] Tag the release only after all MVP acceptance criteria are verified.
+
+## Phase 9 — Remote runners
+
+### RUN-201 — Implement runner enrollment and identity
+
+- **Spec:** [RUN-001](docs/specs/runners/run-001-remote-runner-protocol.md)
+- **Depends on:** ARCH-003, IAM-101
+- [x] Implement the accepted enrollment, authentication, rotation, and revocation slice.
+- [x] Add runner, enrollment-token, and credential persistence with no plaintext secret retention.
+- [x] Expose administrator-authorized token creation and public single-use enrollment through facade use cases.
+- [x] Implement constant-time credential authentication, five-minute-overlap rotation, and immediate revocation.
+- [x] Audit every enrollment, rotation, authentication anomaly, and revocation without secret material.
+- [x] Prove expiry, replay prevention, race safety, rate limits, and architecture boundaries.
+
+### RUN-202 — Implement the versioned runner session protocol
+
+- **Spec:** [RUN-001](docs/specs/runners/run-001-remote-runner-protocol.md)
+- **Depends on:** RUN-201
+- [x] Owner: Codex — versioned remote-runner protocol implemented and verified.
+- [x] Add a Phoenix WebSocket server adapter with header-based authentication and explicit version negotiation.
+- [x] Package and checksum the standalone runner with a TLS-validating outbound WebSocket client and release smoke.
+- [x] Implement bounded hello capabilities, heartbeat persistence, and immediate disconnect-on-revocation behavior.
+- [x] Implement capped full-jitter reconnect backoff and active-attempt reconciliation.
+- [x] Derive runner staleness after 60 seconds and expose it to scheduling and administration.
+- [x] Implement runner-owned durable message IDs, attempt sequences, acknowledgements, and duplicate/reorder handling in one transaction.
+- [x] Transfer attempt-scoped source, logs, artifacts, caches, and secrets with bounded backpressure.
+- [x] Prove restart, disconnect, revocation, proxy, and version-skew behavior end to end.
+
+### RUN-203 — Implement fleet matching and administration
+
+- **Spec:** [RUN-002](docs/specs/runners/run-002-runner-fleet-and-scheduling.md)
+- **Depends on:** RUN-202
+- [x] Extend workflow v1 with validated all-match `runs-on` labels and a Docker default.
+- [x] Separate administrator labels from bounded runner-reported capabilities.
+- [x] Atomically match and reserve compatible capacity with repository fairness.
+- [x] Implement enabled, draining, and revoked administration with audited LiveView controls, including immediate cancellation delivery to connected revoked runners.
+- [x] Explain absent, offline, draining, and busy matching capacity on queued jobs.
+- [x] Verify concurrency safety, fairness, accessibility, and 1,000-runner scheduling performance.
+
+### RUN-204 — Implement provider-neutral autoscaling
+
+- **Spec:** [RUN-002](docs/specs/runners/run-002-runner-fleet-and-scheduling.md)
+- **Depends on:** RUN-203
+- [x] Define autoscaling policy, desired-capacity, provider, and durable intent ports.
+- [x] Reconcile provision and termination effects with stable idempotency keys.
+- [x] Protect active leases and enforce min/max, idle, and cooldown boundaries.
+- [x] Expose desired versus observed capacity and degraded provider health.
+- [x] Prove restart-safe behavior with a fake provider adapter before accepting a cloud adapter spec.
 
 ## Post-MVP backlog
 
 These items are intentionally unordered and must receive specifications before implementation:
 
-- [ ] Remote runner enrollment over authenticated HTTPS/WebSocket.
-- [ ] Runner labels, capabilities, autoscaling, and fleet administration.
-- [ ] S3-compatible artifact and cache storage.
-- [ ] GitLab, Forgejo/Gitea, and additional source-control providers.
-- [ ] Service containers and richer workflow conditions.
-- [ ] Matrices, reusable workflows, manual inputs, and scheduled triggers.
+- [x] S3-compatible artifact and cache storage — DATA-002 shipped with MinIO and remote-runner evidence.
+  - [x] Specify content keys, bounded spooling, multipart abort, credentials, encryption, health, and failure semantics.
+  - [x] Remove concrete local-storage dependencies from retention, health, and runtime composition.
+  - [x] Implement validated local/S3 runtime selection and a digest-verifying S3 adapter.
+  - [x] Pass a real multipart put/get/inventory/delete smoke against pinned MinIO.
+  - [x] Prove interrupted multipart abort, bounded memory, 1,000-object pagination, and normalized failure classes.
+  - [x] Add durable backend migration acknowledgement with an exact transition token and operator runbook.
+  - [x] Prove an S3-backed two-job remote-runner cache/artifact journey without bucket credentials.
+- [x] GitLab and Forgejo source-control providers — SCM-001 shipped with pinned real-provider adapter contracts; additional providers remain future work.
+- [x] Service containers — EXEC-002 shipped with PostgreSQL, Redis, CLI, remote-runner, and cleanup evidence.
+- [x] Conditional execution — WF-002 shipped with fixed job/step conditions and local/remote parity.
+- [x] Matrices — WF-003 shipped with bounded expansion and CI/CLI/remote parity.
+- [x] Manual workflow inputs — WF-004 shipped and verified in Phase 13.
+- [x] Reusable workflows and scheduled triggers — WF-005 and WF-006 shipped.
 - [ ] Micro-VM isolation for untrusted workloads.
 - [ ] Managed Robine cloud and commercial support operations.
 - [ ] SAML, LDAP, SCIM, and identity group mapping.
 - [ ] Deployment environments, approvals, and release workflows.
+
+## Phase 10 — Service containers
+
+### EXEC-301 — Extend workflow and execution contracts
+
+- **Spec:** [EXEC-002](docs/specs/execution/exec-002-service-containers.md)
+- **Depends on:** EXEC-103, RUN-202
+- [x] Add source-located workflow validation and normalization for bounded service definitions.
+- [x] Add the inspect-safe service execution contract and server/CLI mapping.
+- [x] Prove invalid fixtures and secret mapping rules without Docker.
+
+### EXEC-302 — Implement Docker service lifecycle
+
+- **Spec:** [EXEC-002](docs/specs/execution/exec-002-service-containers.md)
+- **Depends on:** EXEC-301
+- [x] Create attempt-owned networks and hardened service containers without host publication or workspace mounts.
+- [x] Implement bounded TCP readiness, early-exit detection, redacted diagnostics, cancellation, and cleanup.
+- [x] Extend label-safe orphan reconciliation to service containers, anonymous volumes, and networks.
+
+### EXEC-303 — Verify local and remote service journeys
+
+- **Spec:** [EXEC-002](docs/specs/execution/exec-002-service-containers.md)
+- **Depends on:** EXEC-302
+- [x] Run PostgreSQL and Redis fixtures through the CLI and a remote runner.
+- [x] Prove secret non-persistence, resource isolation, failure diagnostics, and interrupted cleanup.
+- [x] Complete EXEC-002 acceptance evidence and full QA.
+
+## Phase 11 — Conditional execution
+
+### WF-301 — Extend condition contracts
+
+- **Spec:** [WF-002](docs/specs/workflows/wf-002-conditional-execution.md)
+- **Depends on:** WF-102, PIPE-102, EXEC-301
+- [x] Add source-located validation and normalized job/step condition enums.
+- [x] Persist conditions without adding an expression evaluator or provider data.
+- [x] Add invalid fixtures and pure condition-policy tests.
+
+### WF-302 — Implement conditional job scheduling
+
+- **Spec:** [WF-002](docs/specs/workflows/wf-002-conditional-execution.md)
+- **Depends on:** WF-301
+- [x] Atomically queue or skip jobs from terminal dependency snapshots.
+- [x] Ensure skipped jobs create no attempts and project distinctly.
+- [x] Prove concurrent release and reconciliation idempotency.
+
+### WF-303 — Implement conditional step execution
+
+- **Spec:** [WF-002](docs/specs/workflows/wf-002-conditional-execution.md)
+- **Depends on:** WF-301, WF-302
+- [x] Continue ordinary failures into matching failure/always steps while retaining the first failure.
+- [x] Halt all remaining conditions on cancellation, timeout, service loss, or adapter failure.
+- [x] Verify CLI and remote parity, UX, architecture, and full QA (290 tests).
+
+## Phase 12 — Job matrices
+
+### WF-401 — Extend and expand workflow contracts
+
+- **Spec:** [WF-003](docs/specs/workflows/wf-003-job-matrices.md)
+- **Depends on:** WF-102, WF-301
+- [x] Validate bounded matrix strategies, axes, values, image tokens, and environment collisions.
+- [x] Expand deterministic job variants and fan-in dependencies before pipeline creation.
+- [x] Enforce expanded job/step limits and ambiguous artifact rules with source-located diagnostics.
+
+### WF-402 — Persist and schedule matrix variants
+
+- **Spec:** [WF-003](docs/specs/workflows/wf-003-job-matrices.md)
+- **Depends on:** WF-401, PIPE-102
+- [x] Persist immutable base IDs and matrix values in workflow revisions and job execution metadata.
+- [x] Schedule, conditionally release, retry, and project every variant as an ordinary job.
+- [x] Prove independent and simultaneous variant reconciliation without duplicate attempts.
+
+### WF-403 — Deliver matrix DX and parity
+
+- **Spec:** [WF-003](docs/specs/workflows/wf-003-job-matrices.md)
+- **Depends on:** WF-402, CLI-103, GH-103, WEB-102, RUN-202
+- [x] Support CLI selection by base group and exact generated key with matching execution contracts.
+- [x] Expose matrix values consistently in LiveView, logs, and GitHub checks.
+- [x] Verify services, remote runners, architecture, release smoke, and full QA (305 tests).
+
+## Phase 13 — Manual workflow inputs
+
+### WF-501 — Extend workflow dispatch contracts
+
+- **Spec:** [WF-004](docs/specs/workflows/wf-004-manual-workflow-inputs.md)
+- **Depends on:** WF-102, WF-401
+- [x] Normalize typed bounded input definitions and exact source diagnostics.
+- [x] Implement the pure submitted-input policy and reserved environment collision rules.
+- [x] Inject immutable values into ordinary and matrix job contracts.
+
+### WF-502 — Resolve and launch exact revisions
+
+- **Spec:** [WF-004](docs/specs/workflows/wf-004-manual-workflow-inputs.md)
+- **Depends on:** WF-501, GH-102, PIPE-101
+- [x] Resolve the GitHub default-branch head and fetch workflows only at the exact SHA.
+- [x] Expose authorized discovery and idempotent manual-launch use cases through the repository facade.
+- [x] Persist trigger, actor, SHA, workflow revision, input map, jobs, and outbox atomically.
+
+### WF-503 — Deliver manual-run DX and parity
+
+- **Spec:** [WF-004](docs/specs/workflows/wf-004-manual-workflow-inputs.md)
+- **Depends on:** WF-502, CLI-103, WEB-102, RUN-202
+- [x] Build the accessible repository launch flow and input-aware pipeline/job views.
+- [x] Add repeated CLI `--input` validation and exact reproduction commands.
+- [x] Verify matrices, remote runners, authorization, idempotency, architecture, and full QA (313 tests).
+
+## Phase 14 — Scheduled workflows
+
+### WF-601 — Extend schedule contracts
+
+- **Spec:** [WF-005](docs/specs/workflows/wf-005-scheduled-workflows.md)
+- **Depends on:** WF-102, WF-401
+- [x] Implement a pure bounded five-field UTC cron value object.
+- [x] Normalize bounded schedule declarations with exact source diagnostics and shared fixtures.
+- [x] Prove matching semantics independently of Oban and system time.
+
+### WF-602 — Reconcile durable occurrences
+
+- **Spec:** [WF-005](docs/specs/workflows/wf-005-scheduled-workflows.md)
+- **Depends on:** WF-601, GH-102, PIPE-101
+- [x] Persist the intended occurrence on pipelines and a compare-and-set scheduler cursor.
+- [x] Reconcile bounded missed minutes against one exact GitHub head fetch per repository.
+- [x] Create idempotent scheduled pipelines and advance the cursor only after a complete scan.
+
+### WF-603 — Deliver schedule operations and DX
+
+- **Spec:** [WF-005](docs/specs/workflows/wf-005-scheduled-workflows.md)
+- **Depends on:** WF-602, GH-103, WEB-102, OPS-101
+- [x] Run reconciliation every minute through a background adapter.
+- [x] Expose schedules, intended occurrences, checks, metrics, audit, and scheduler health.
+- [x] Verify recovery, concurrency, architecture, release smoke, and full QA (326 tests).
+
+## Phase 15 — Reusable workflows
+
+### WF-701 — Resolve exact multi-file workflow contracts
+
+- **Spec:** [WF-006](docs/specs/workflows/wf-006-reusable-workflows.md)
+- **Depends on:** WF-102, WF-501
+- [x] Validate bounded include declarations and reusable `workflow_call` inputs.
+- [x] Implement pure recursive resolution, cycle/depth/count limits, namespaces, and input injection.
+- [x] Run the ordinary validator over one deterministic composed raw graph with source diagnostics.
+
+### WF-702 — Persist and execute composed revisions
+
+- **Spec:** [WF-006](docs/specs/workflows/wf-006-reusable-workflows.md)
+- **Depends on:** WF-701, GH-102, PIPE-101
+- [x] Resolve push, pull-request, manual, and schedule entries from one exact fetched source set.
+- [x] Persist every included source and digest in the immutable workflow revision.
+- [x] Execute composed jobs identically through local and remote runners.
+
+### WF-703 — Deliver reusable-workflow DX and parity
+
+- **Spec:** [WF-006](docs/specs/workflows/wf-006-reusable-workflows.md)
+- **Depends on:** WF-702, CLI-103, GH-103, WEB-102
+- [x] Discover local sources for CLI validation/execution and retain stable namespaced selection.
+- [x] Display included revisions/digests and composed names consistently in LiveView and checks.
+- [x] Verify recursion failures, input isolation, idempotency, architecture, release smoke, and full QA (335 tests).
+
+## Phase 16 — GitLab and Forgejo source control
+
+### SCM-801 — Establish provider-neutral repository contracts
+
+- **Spec:** [SCM-001](docs/specs/source-control/scm-001-gitlab-forgejo-integration.md)
+- **Depends on:** ARCH-002, GH-102, GH-103
+- [x] Replace GitHub-specific shared use-case dependencies with a provider-neutral source-control port and runtime registry.
+- [x] Persist provider kind and configured-instance identity with collision-safe repository, delivery, and projection constraints.
+- [x] Preserve every existing GitHub journey and migrate existing rows to the default GitHub instance.
+
+### SCM-802 — Implement GitLab delivery and status parity
+
+- **Spec:** [SCM-001](docs/specs/source-control/scm-001-gitlab-forgejo-integration.md)
+- **Depends on:** SCM-801
+- [x] Validate GitLab webhook tokens before parsing and normalize push/merge-request events.
+- [x] Fetch workflows, source, default head, paginated discovery, and permissions through bounded exact-SHA GitLab APIs.
+- [x] Project pipeline/job state through durable idempotent GitLab commit statuses.
+
+### SCM-803 — Implement Forgejo delivery and status parity
+
+- **Spec:** [SCM-001](docs/specs/source-control/scm-001-gitlab-forgejo-integration.md)
+- **Depends on:** SCM-801
+- [x] Validate Forgejo webhook signatures before parsing and normalize push/pull-request events.
+- [x] Fetch workflows, source, default head, paginated discovery, and permissions through bounded exact-SHA Forgejo APIs.
+- [x] Project pipeline/job state through durable idempotent Forgejo commit statuses.
+
+### SCM-804 — Deliver multi-provider operations and QA
+
+- **Spec:** [SCM-001](docs/specs/source-control/scm-001-gitlab-forgejo-integration.md)
+- **Depends on:** SCM-802, SCM-803, WEB-102, OPS-101
+- [x] Add provider-aware setup, discovery, repository health, webhook routes, and corrective guidance.
+- [x] Prove identity separation, redirect/size bounds, outage reconciliation, manual/schedule/reusable/local/remote parity, and migrations.
+- [x] Run architecture checks, security audits, pinned Forgejo 16.0.2 and GitLab CE 19.2.1 integration smokes, server/CLI/runner release smokes, and full QA (355 tests; heavyweight GitLab smoke verified separately).

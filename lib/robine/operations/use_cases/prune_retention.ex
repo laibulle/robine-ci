@@ -9,7 +9,8 @@ defmodule Robine.Operations.UseCases.PruneRetention do
       }) do
     deps.retention.prune(
       Map.get(input, :now, DateTime.utc_now()),
-      Application.fetch_env!(:robine, :retention)
+      Application.fetch_env!(:robine, :retention),
+      deps.blob_store
     )
   end
 

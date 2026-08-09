@@ -110,7 +110,9 @@ defmodule Robine.Adapters.Persistence.Postgres.PipelineRepository do
       status: schema.status,
       inserted_at: schema.inserted_at,
       started_at: schema.started_at,
-      finished_at: schema.finished_at
+      finished_at: schema.finished_at,
+      scheduled_for: schema.scheduled_for,
+      inputs: schema.inputs || %{}
     })
   end
 
@@ -122,6 +124,7 @@ defmodule Robine.Adapters.Persistence.Postgres.PipelineRepository do
       source: schema.source,
       digest: schema.digest,
       normalized_graph: schema.normalized_graph,
+      included_sources: schema.included_sources || %{},
       created_at: schema.created_at
     })
   end

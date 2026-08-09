@@ -4,6 +4,36 @@ defmodule Robine.Repositories do
   alias Robine.Repositories.Contracts.RepositoryView
   alias Robine.Repositories.UseCases
 
+  @spec register_source_control_repository(map(), ExecutionContext.t()) ::
+          {:ok, RepositoryView.t()} | {:error, term()}
+  defdelegate register_source_control_repository(input, context),
+    to: UseCases.RegisterSourceControlRepository,
+    as: :call
+
+  @spec accept_source_control_webhook(map(), ExecutionContext.t()) ::
+          {:ok, :accepted | :duplicate} | {:error, term()}
+  defdelegate accept_source_control_webhook(input, context),
+    to: UseCases.AcceptSourceControlWebhook,
+    as: :call
+
+  @spec discover_source_control_repositories(map(), ExecutionContext.t()) ::
+          {:ok, [map()]} | {:error, term()}
+  defdelegate discover_source_control_repositories(input, context),
+    to: UseCases.DiscoverSourceControlRepositories,
+    as: :call
+
+  @spec trust_source_control_repository(map(), ExecutionContext.t()) ::
+          {:ok, RepositoryView.t()} | {:error, term()}
+  defdelegate trust_source_control_repository(input, context),
+    to: UseCases.TrustSourceControlRepository,
+    as: :call
+
+  @spec check_source_control_connection(map(), ExecutionContext.t()) ::
+          {:ok, map()} | {:error, term()}
+  defdelegate check_source_control_connection(input, context),
+    to: UseCases.CheckSourceControlConnection,
+    as: :call
+
   @spec register_github_repository(map(), ExecutionContext.t()) ::
           {:ok, RepositoryView.t()} | {:error, term()}
   defdelegate register_github_repository(input, context),
@@ -44,5 +74,27 @@ defmodule Robine.Repositories do
           {:ok, RepositoryView.t()} | {:error, term()}
   defdelegate trust_github_repository(input, context),
     to: UseCases.TrustGitHubRepository,
+    as: :call
+
+  @spec list_manual_workflows(map(), ExecutionContext.t()) :: {:ok, map()} | {:error, term()}
+  defdelegate list_manual_workflows(input, context),
+    to: UseCases.ListManualWorkflows,
+    as: :call
+
+  @spec launch_manual_workflow(map(), ExecutionContext.t()) :: {:ok, map()} | {:error, term()}
+  defdelegate launch_manual_workflow(input, context),
+    to: UseCases.LaunchManualWorkflow,
+    as: :call
+
+  @spec reconcile_scheduled_workflows(map(), ExecutionContext.t()) ::
+          {:ok, map()} | {:error, term()}
+  defdelegate reconcile_scheduled_workflows(input, context),
+    to: UseCases.ReconcileScheduledWorkflows,
+    as: :call
+
+  @spec list_scheduled_workflows(map(), ExecutionContext.t()) ::
+          {:ok, map()} | {:error, term()}
+  defdelegate list_scheduled_workflows(input, context),
+    to: UseCases.ListScheduledWorkflows,
     as: :call
 end

@@ -2,7 +2,7 @@
 
 ## Status
 
-- **State:** Draft
+- **State:** Accepted
 - **Owner:** Product
 - **Target:** MVP
 - **Last updated:** 2026-08-08
@@ -103,6 +103,8 @@ The service exposes structured application logs, health endpoints, webhook proce
 ## Open questions
 
 None blocking.
+
+The external timing session follows `docs/acceptance/first-pipeline.md`. Release evidence is retained outside the public repository when it contains private tester or repository information and is schema-checked with `mix robine.verify_acceptance` before this criterion is marked complete.
 
 ## Decisions
 

@@ -7,7 +7,9 @@ defmodule Robine.Adapters.Execution.DockerRunner do
   alias Robine.Secrets.Domain.Redactor
 
   @output_limit 10_000_000
+  @service_diagnostic_limit 64_000
   @attempt_label "io.robine.attempt"
+  @service_label "io.robine.service"
 
   def run(%Specification{} = specification) do
     run(specification, fn _event -> :ok end, fn -> false end)
@@ -23,29 +25,60 @@ defmodule Robine.Adapters.Execution.DockerRunner do
     started_at = DateTime.utc_now()
     resource = resource_name(specification.attempt_id)
     volume = resource <> "-workspace"
+    network = if specification.services == [], do: nil, else: resource <> "-network"
 
-    with :ok <- prepare_image(specification, on_output) do
-      case provision(specification, resource, volume) do
+    with :ok <- prepare_images(specification, on_output) do
+      case provision(specification, resource, volume, network, on_output, cancel_requested) do
         :ok ->
-          run_owned(specification, resource, volume, started_at, on_output, cancel_requested)
+          run_owned(
+            specification,
+            resource,
+            volume,
+            network,
+            started_at,
+            on_output,
+            cancel_requested
+          )
 
         {:error, :duplicate_attempt} ->
           {:error, {:docker, :duplicate_attempt}}
 
+        {:error, {:service_unavailable, _service_id, :cancelled, _diagnostic}} ->
+          cleanup_warning = cleanup(specification, resource, volume, network)
+
+          {:ok,
+           %Result{
+             attempt_id: specification.attempt_id,
+             status: :cancelled,
+             reason: :cancelled,
+             steps: [],
+             started_at: started_at,
+             finished_at: DateTime.utc_now(),
+             cleanup_warning: cleanup_warning
+           }}
+
         {:error, reason} ->
-          _cleanup_warning = cleanup(resource, volume)
+          _cleanup_warning = cleanup(specification, resource, volume, network)
           {:error, {:docker, reason}}
       end
     end
   end
 
-  defp run_owned(specification, resource, volume, started_at, on_output, cancel_requested) do
+  defp run_owned(
+         specification,
+         resource,
+         volume,
+         network,
+         started_at,
+         on_output,
+         cancel_requested
+       ) do
     with :ok <- copy_source(specification.source_path, resource, specification.workspace),
          :ok <- start_container(resource, specification.shell),
          :ok <- ensure_shell(resource, specification.shell),
          {:ok, step_results} <-
            run_steps(specification, resource, on_output, cancel_requested) do
-      cleanup_warning = cleanup(resource, volume)
+      cleanup_warning = cleanup(specification, resource, volume, network)
 
       {:ok,
        %Result{
@@ -59,7 +92,7 @@ defmodule Robine.Adapters.Execution.DockerRunner do
        }}
     else
       {:step_failed, step_results, reason} ->
-        cleanup_warning = cleanup(resource, volume)
+        cleanup_warning = cleanup(specification, resource, volume, network)
 
         {:ok,
          %Result{
@@ -73,7 +106,7 @@ defmodule Robine.Adapters.Execution.DockerRunner do
          }}
 
       {:step_cancelled, step_results} ->
-        cleanup_warning = cleanup(resource, volume)
+        cleanup_warning = cleanup(specification, resource, volume, network)
 
         {:ok,
          %Result{
@@ -87,15 +120,18 @@ defmodule Robine.Adapters.Execution.DockerRunner do
          }}
 
       {:error, reason} ->
-        _cleanup_warning = cleanup(resource, volume)
+        _cleanup_warning = cleanup(specification, resource, volume, network)
         {:error, {:docker, reason}}
     end
   end
 
-  defp provision(specification, resource, volume) do
-    with {:ok, _output} <-
+  defp provision(specification, resource, volume, network, on_output, cancel_requested) do
+    with :ok <- create_network(specification, network),
+         {:ok, _output} <-
            docker(["volume", "create", "--label", label(specification), volume]),
-         {:ok, _output} <- create_container(specification, resource, volume) do
+         :ok <-
+           create_services(specification, resource, network, on_output, cancel_requested),
+         {:ok, _output} <- create_container(specification, resource, volume, network) do
       :ok
     end
   end
@@ -107,8 +143,15 @@ defmodule Robine.Adapters.Execution.DockerRunner do
     with {:ok, containers} <- labeled_resources(:container),
          {:ok, removed_containers} <- remove_orphans(containers, active, :container),
          {:ok, volumes} <- labeled_resources(:volume),
-         {:ok, removed_volumes} <- remove_orphans(volumes, active, :volume) do
-      {:ok, %{containers_removed: removed_containers, volumes_removed: removed_volumes}}
+         {:ok, removed_volumes} <- remove_orphans(volumes, active, :volume),
+         {:ok, networks} <- labeled_resources(:network),
+         {:ok, removed_networks} <- remove_orphans(networks, active, :network) do
+      {:ok,
+       %{
+         containers_removed: removed_containers,
+         volumes_removed: removed_volumes,
+         networks_removed: removed_networks
+       }}
     end
   end
 
@@ -140,6 +183,20 @@ defmodule Robine.Adapters.Execution.DockerRunner do
     end
   end
 
+  defp labeled_resources(:network) do
+    case docker([
+           "network",
+           "ls",
+           "--filter",
+           "label=#{@attempt_label}",
+           "--format",
+           "{{.ID}} {{.Label \"#{@attempt_label}\"}}"
+         ]) do
+      {:ok, output} -> parse_labeled_resources(output)
+      error -> error
+    end
+  end
+
   @doc false
   def parse_labeled_resources(output) when is_binary(output) do
     output
@@ -165,8 +222,9 @@ defmodule Robine.Adapters.Execution.DockerRunner do
     |> Enum.reduce_while({:ok, 0}, fn resource, {:ok, count} ->
       args =
         case type do
-          :container -> ["rm", "--force", resource.name]
+          :container -> ["rm", "--force", "--volumes", resource.name]
           :volume -> ["volume", "rm", "--force", resource.name]
+          :network -> ["network", "rm", resource.name]
         end
 
       case docker(args) do
@@ -176,16 +234,50 @@ defmodule Robine.Adapters.Execution.DockerRunner do
     end)
   end
 
-  defp prepare_image(specification, callback) do
+  defp prepare_images(specification, callback) do
+    with :ok <-
+           prepare_image(
+             specification.image,
+             specification.timeout_ms,
+             callback,
+             "Image acquisition",
+             1
+           ) do
+      specification.services
+      |> Enum.with_index(1)
+      |> Enum.reduce_while(:ok, fn {service, index}, :ok ->
+        case prepare_image(
+               service.image,
+               specification.timeout_ms,
+               callback,
+               "Service #{service.id}",
+               index * 10 + 1
+             ) do
+          :ok -> {:cont, :ok}
+          {:error, reason} -> {:halt, {:error, {:service_image, service.id, reason}}}
+        end
+      end)
+    end
+  end
+
+  defp prepare_image(image, timeout_ms, callback, step_name, sequence) do
     started = System.monotonic_time(:millisecond)
 
-    with :ok <- emit_phase(callback, 1, :running, started, "Acquiring #{specification.image}"),
-         {:ok, detail} <- acquire_image(specification.image, specification.timeout_ms),
-         :ok <- emit_phase(callback, 2, :succeeded, started, detail) do
+    with :ok <- emit_phase(callback, sequence, :running, started, "Acquiring #{image}", step_name),
+         {:ok, detail} <- acquire_image(image, timeout_ms),
+         :ok <- emit_phase(callback, sequence + 1, :succeeded, started, detail, step_name) do
       :ok
     else
       {:error, reason} = error ->
-        _ = emit_phase(callback, 2, :failed, started, "Image acquisition failed")
+        _ =
+          emit_phase(
+            callback,
+            sequence + 1,
+            :failed,
+            started,
+            "Image acquisition failed",
+            step_name
+          )
 
         if match?({:image_acquisition, _}, reason),
           do: error,
@@ -209,12 +301,12 @@ defmodule Robine.Adapters.Execution.DockerRunner do
     end
   end
 
-  defp emit_phase(callback, sequence, status, started, content) do
+  defp emit_phase(callback, sequence, status, started, content, step_name) do
     callback.(%{
       sequence: sequence,
       phase: :image_acquisition,
       step_position: 0,
-      step_name: "Image acquisition",
+      step_name: step_name,
       status: status,
       exit_code: if(status == :failed, do: 1, else: nil),
       duration_ms: System.monotonic_time(:millisecond) - started,
@@ -223,7 +315,240 @@ defmodule Robine.Adapters.Execution.DockerRunner do
     })
   end
 
-  defp create_container(specification, resource, volume) do
+  defp create_network(_specification, nil), do: :ok
+
+  defp create_network(specification, network) do
+    case docker(["network", "create", "--label", label(specification), network]) do
+      {:ok, _output} ->
+        :ok
+
+      {:error, %{output: output}} ->
+        if String.contains?(output, "already exists"),
+          do: {:error, :duplicate_attempt},
+          else:
+            {:error,
+             {:network_create, redact_and_truncate(output, service_secret_values(specification))}}
+    end
+  end
+
+  defp create_services(
+         %Specification{services: []},
+         _resource,
+         _network,
+         _on_output,
+         _cancel_requested
+       ),
+       do: :ok
+
+  defp create_services(specification, resource, network, on_output, cancel_requested) do
+    specification.services
+    |> Enum.with_index(1)
+    |> Enum.reduce_while(:ok, fn {service, index}, :ok ->
+      name = service_resource_name(resource, service.id)
+      started = System.monotonic_time(:millisecond)
+      sequence = 100 + index * 2
+
+      with :ok <-
+             emit_service_phase(
+               on_output,
+               service,
+               sequence,
+               :running,
+               started,
+               "Starting service"
+             ),
+           {:ok, _output} <- create_service(specification, service, name, network),
+           {:ok, _output} <- docker(["start", name], specification.timeout_ms),
+           :ok <- await_service(service, name, cancel_requested, specification),
+           :ok <-
+             emit_service_phase(
+               on_output,
+               service,
+               sequence + 1,
+               :succeeded,
+               started,
+               "Service ready"
+             ) do
+        {:cont, :ok}
+      else
+        {:error, :duplicate_attempt} ->
+          {:halt, {:error, :duplicate_attempt}}
+
+        {:error, reason} ->
+          diagnostic = service_diagnostic(name, service_secret_values(specification))
+
+          _ =
+            emit_service_phase(
+              on_output,
+              service,
+              sequence + 1,
+              :failed,
+              started,
+              "Service failed: #{diagnostic}"
+            )
+
+          {:halt, {:error, {:service_unavailable, service.id, reason, diagnostic}}}
+      end
+    end)
+  end
+
+  defp emit_service_phase(callback, service, sequence, status, started, content) do
+    callback.(%{
+      sequence: sequence,
+      phase: :service_preparation,
+      step_position: 0,
+      step_name: "Service #{service.id}",
+      status: status,
+      exit_code: if(status == :failed, do: 1, else: nil),
+      duration_ms: System.monotonic_time(:millisecond) - started,
+      stream: :system,
+      content: content
+    })
+  end
+
+  defp create_service(specification, service, name, network) do
+    environment = Map.merge(service.env, service.secret_env)
+
+    args =
+      [
+        "create",
+        "--name",
+        name,
+        "--label",
+        label(specification),
+        "--label",
+        "#{@service_label}=#{service.id}",
+        "--cap-drop",
+        "ALL",
+        "--security-opt",
+        "no-new-privileges",
+        resource_limit_args(),
+        "--network",
+        network,
+        "--network-alias",
+        service.id,
+        "--tmpfs",
+        "/tmp:rw,noexec,nosuid,size=256m"
+      ]
+      |> List.flatten()
+      |> Kernel.++(
+        service_user_args(service.user) ++
+          environment_args(environment) ++ [service.image] ++ service.command
+      )
+
+    case docker(args, specification.timeout_ms) do
+      {:error, %{output: output}} = error ->
+        if String.contains?(output, "already in use") or
+             String.contains?(output, "already exists") do
+          {:error, :duplicate_attempt}
+        else
+          redact_error(error, service_secret_values(specification))
+        end
+
+      result ->
+        result
+    end
+  end
+
+  defp await_service(service, name, cancel_requested, specification) do
+    timeout_ms = if service.readiness, do: service.readiness.timeout_ms, else: 5_000
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    await_service_until(service, name, cancel_requested, specification, deadline)
+  end
+
+  defp await_service_until(service, name, cancel_requested, specification, deadline) do
+    cond do
+      cancel_requested.() ->
+        {:error, :cancelled}
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        {:error, {:readiness_timeout, service.readiness && service.readiness.timeout_ms}}
+
+      true ->
+        case service_state(name) do
+          {:ok, %{running: false, status: status}} ->
+            {:error, {:service_exited, status}}
+
+          {:ok, %{running: true}} when is_nil(service.readiness) ->
+            :ok
+
+          {:ok, %{running: true, ip: ip}} ->
+            if tcp_ready?(ip, service.readiness.tcp) do
+              :ok
+            else
+              wait_for_service_poll(service, name, cancel_requested, specification, deadline)
+            end
+
+          {:error, reason} ->
+            {:error, {:service_inspect, reason}}
+        end
+    end
+  end
+
+  defp wait_for_service_poll(service, name, cancel_requested, specification, deadline) do
+    receive do
+    after
+      100 -> await_service_until(service, name, cancel_requested, specification, deadline)
+    end
+  end
+
+  defp service_state(name) do
+    case docker(
+           [
+             "inspect",
+             "--format",
+             "{{.State.Running}} {{.State.Status}} {{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}",
+             name
+           ],
+           2_000
+         ) do
+      {:ok, output} ->
+        case String.split(String.trim(output), ~r/\s+/, parts: 3) do
+          ["true", status, ip] -> {:ok, %{running: true, status: status, ip: ip}}
+          ["false", status] -> {:ok, %{running: false, status: status, ip: nil}}
+          ["false", status, _ip] -> {:ok, %{running: false, status: status, ip: nil}}
+          _invalid -> {:error, :invalid_service_inspect}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp tcp_ready?(ip, port) when is_binary(ip) and ip != "" do
+    case :gen_tcp.connect(String.to_charlist(ip), port, [:binary, active: false], 100) do
+      {:ok, socket} ->
+        :ok = :gen_tcp.close(socket)
+        true
+
+      {:error, _reason} ->
+        false
+    end
+  end
+
+  defp tcp_ready?(_ip, _port), do: false
+
+  defp service_diagnostic(name, secret_values) do
+    case docker(["logs", "--tail", "200", name], 2_000) do
+      {:ok, output} -> bounded_service_diagnostic(output, secret_values)
+      {:error, %{output: output}} -> bounded_service_diagnostic(output, secret_values)
+    end
+  end
+
+  defp bounded_service_diagnostic(output, secret_values) do
+    output = redact_and_truncate(output, secret_values)
+
+    if byte_size(output) <= @service_diagnostic_limit,
+      do: output,
+      else:
+        binary_part(
+          output,
+          byte_size(output) - @service_diagnostic_limit,
+          @service_diagnostic_limit
+        )
+  end
+
+  defp create_container(specification, resource, volume, network) do
     args =
       [
         "create",
@@ -237,7 +562,7 @@ defmodule Robine.Adapters.Execution.DockerRunner do
         "no-new-privileges",
         resource_limit_args(),
         "--network",
-        "bridge",
+        network || "bridge",
         "--mount",
         "type=volume,source=#{volume},target=#{specification.workspace}",
         "--tmpfs",
@@ -392,14 +717,65 @@ defmodule Robine.Adapters.Execution.DockerRunner do
   defp run_steps(specification, resource, on_output, cancel_requested) do
     specification.steps
     |> Enum.with_index(1)
-    |> Enum.reduce_while({:ok, []}, fn {step, position}, {:ok, results} ->
-      case run_step(step, position, specification, resource, on_output, cancel_requested) do
-        {:ok, result} -> {:cont, {:ok, results ++ [result]}}
-        {:failed, result, reason} -> {:halt, {:step_failed, results ++ [result], reason}}
-        {:cancelled, result} -> {:halt, {:step_cancelled, results ++ [result]}}
-        {:error, reason} -> {:halt, {:error, reason}}
+    |> Enum.reduce_while({:running, [], nil}, fn {step, position},
+                                                 {:running, results, first_failure} ->
+      cond do
+        cancel_requested.() ->
+          {:halt, {:step_cancelled, results}}
+
+        condition_matches?(step.condition, first_failure) ->
+          case run_step(step, position, specification, resource, on_output, cancel_requested) do
+            {:ok, result} ->
+              {:cont, {:running, results ++ [result], first_failure}}
+
+            {:failed, result, :command_failed} ->
+              failure = first_failure || :command_failed
+              {:cont, {:running, results ++ [result], failure}}
+
+            {:failed, result, reason} ->
+              {:halt, {:step_failed, results ++ [result], reason}}
+
+            {:cancelled, result} ->
+              {:halt, {:step_cancelled, results ++ [result]}}
+
+            {:error, reason} ->
+              {:halt, {:error, reason}}
+          end
+
+        true ->
+          case skip_step(step, position, on_output, first_failure) do
+            {:ok, result} -> {:cont, {:running, results ++ [result], first_failure}}
+            {:error, reason} -> {:halt, {:error, reason}}
+          end
       end
     end)
+    |> case do
+      {:running, results, nil} -> {:ok, results}
+      {:running, results, first_failure} -> {:step_failed, results, first_failure}
+      terminal -> terminal
+    end
+  end
+
+  defp condition_matches?(:success, nil), do: true
+  defp condition_matches?(:success, _failure), do: false
+  defp condition_matches?(:failure, nil), do: false
+  defp condition_matches?(:failure, _failure), do: true
+  defp condition_matches?(:always, _failure), do: true
+
+  defp skip_step(step, position, on_output, first_failure) do
+    outcome = if is_nil(first_failure), do: "success", else: "failure"
+    message = "Skipped because if: #{step.condition} did not match #{outcome}"
+
+    with :ok <- emit_terminal(on_output, step, position, 1, :skipped, nil, 0, message) do
+      {:ok,
+       %StepResult{
+         name: step.name,
+         status: :skipped,
+         exit_code: nil,
+         output: message,
+         duration_ms: 0
+       }}
+    end
   end
 
   defp run_step(
@@ -423,12 +799,16 @@ defmodule Robine.Adapters.Execution.DockerRunner do
       step.value
     ]
 
+    abort_requested = fn ->
+      execution_abort_request(specification, resource, cancel_requested)
+    end
+
     case docker_stream(
            args,
            specification.timeout_ms,
            Map.values(specification.secrets),
            resource,
-           cancel_requested,
+           abort_requested,
            &emit_output(on_output, step, position, started, &1, &2, &3)
          ) do
       {:ok, output, chunk_count} ->
@@ -448,6 +828,21 @@ defmodule Robine.Adapters.Execution.DockerRunner do
         duration = System.monotonic_time(:millisecond) - started
         _ = emit_terminal(on_output, step, position, chunk_count + 1, :cancelled, nil, duration)
         {:cancelled, step_result(step, :failed, nil, output, started, [])}
+
+      {:error,
+       %{
+         service_lost: _service_id,
+         output: output,
+         chunk_count: chunk_count
+       }} ->
+        duration = System.monotonic_time(:millisecond) - started
+
+        _ =
+          emit_terminal(on_output, step, position, chunk_count + 1, :failed, 1, duration, output)
+
+        {:failed,
+         step_result(step, :failed, 1, output, started, Map.values(specification.secrets)),
+         :service_unavailable}
 
       {:error, %{exit_code: exit_code, output: output, chunk_count: chunk_count}} ->
         duration = System.monotonic_time(:millisecond) - started
@@ -507,16 +902,17 @@ defmodule Robine.Adapters.Execution.DockerRunner do
 
       {:error, reason} ->
         duration = System.monotonic_time(:millisecond) - started
-        _ = emit_terminal(callback, step, position, 1, :failed, 1, duration)
+        diagnostic = redact_and_truncate(inspect(reason), Map.values(specification.secrets))
+        _ = emit_terminal(callback, step, position, 1, :failed, 1, duration, diagnostic)
 
         {:failed,
          step_result(
            step,
            :failed,
            1,
-           inspect(reason),
+           diagnostic,
            started,
-           Map.values(specification.secrets)
+           []
          ), :command_failed}
     end
   end
@@ -611,17 +1007,27 @@ defmodule Robine.Adapters.Execution.DockerRunner do
     })
   end
 
-  defp emit_terminal(on_output, step, position, chunk_index, status, exit_code, duration) do
+  defp emit_terminal(
+         on_output,
+         step,
+         position,
+         chunk_index,
+         status,
+         exit_code,
+         duration,
+         content \\ ""
+       ) do
     on_output.(%{
       sequence: position * 1_000_000 + chunk_index,
       phase: :execution,
       step_position: position,
       step_name: step.name,
       status: status,
+      condition: step.condition,
       exit_code: exit_code,
       duration_ms: duration,
       stream: :system,
-      content: ""
+      content: content
     })
   end
 
@@ -710,72 +1116,115 @@ defmodule Robine.Adapters.Execution.DockerRunner do
     remaining = max(deadline - System.monotonic_time(:millisecond), 0)
     task_pid = task.pid
 
-    if cancel_requested.() do
-      cancel_running(task, process, resource, state)
-    else
-      receive do
-        {:stream_data, ^task_pid, stream, data} when stream in [:stdout, :stderr] ->
-          redactor = Map.fetch!(state.redactors, stream)
-          {emitted, redactor} = Redactor.push(redactor, data)
-          updated = %{state | redactors: Map.put(state.redactors, stream, redactor)}
+    case cancel_requested.() do
+      true ->
+        cancel_running(task, process, resource, state)
 
-          case emit_stream_chunks(emitted, stream, on_chunk, updated) do
-            {:ok, updated} ->
-              send(task.pid, {:stream_ack, self()})
+      :cancelled ->
+        cancel_running(task, process, resource, state)
 
-              stream_receive(
-                task,
-                process,
-                deadline,
-                on_chunk,
-                resource,
-                cancel_requested,
-                updated
-              )
+      {:service_lost, service_id, diagnostic} ->
+        service_lost_running(task, process, resource, state, service_id, diagnostic)
 
-            {:error, reason} ->
-              stop_stream(task, process)
-              {:error, {:output_callback, reason}}
-          end
+      false ->
+        receive do
+          {:stream_data, ^task_pid, stream, data} when stream in [:stdout, :stderr] ->
+            redactor = Map.fetch!(state.redactors, stream)
+            {emitted, redactor} = Redactor.push(redactor, data)
+            updated = %{state | redactors: Map.put(state.redactors, stream, redactor)}
 
-        {:stream_exit, ^task_pid, exit_status} ->
-          case finish_streams(on_chunk, state) do
-            {:ok, updated} ->
-              _ = Task.await(task, 1_000)
-              stream_result(exit_status, updated)
+            case emit_stream_chunks(emitted, stream, on_chunk, updated) do
+              {:ok, updated} ->
+                send(task.pid, {:stream_ack, self()})
 
-            {:error, reason} ->
-              {:error, {:output_callback, reason}}
-          end
+                stream_receive(
+                  task,
+                  process,
+                  deadline,
+                  on_chunk,
+                  resource,
+                  cancel_requested,
+                  updated
+                )
 
-        {:stream_error, ^task_pid, reason} ->
-          _ = Task.await(task, 1_000)
-          {:error, %{exit_code: nil, output: inspect(reason), chunk_count: state.chunk_count}}
+              {:error, reason} ->
+                stop_stream(task, process)
+                {:error, {:output_callback, reason}}
+            end
 
-        {:DOWN, ref, :process, _pid, reason} when ref == task.ref ->
-          {:error, %{exit_code: nil, output: inspect(reason), chunk_count: state.chunk_count}}
-      after
-        min(remaining, 250) ->
-          if remaining <= 250,
-            do: timeout_running(task, process, state),
-            else:
-              stream_receive(
-                task,
-                process,
-                deadline,
-                on_chunk,
-                resource,
-                cancel_requested,
-                state
-              )
-      end
+          {:stream_exit, ^task_pid, exit_status} ->
+            case finish_streams(on_chunk, state) do
+              {:ok, updated} ->
+                _ = Task.await(task, 1_000)
+                stream_result(exit_status, updated)
+
+              {:error, reason} ->
+                {:error, {:output_callback, reason}}
+            end
+
+          {:stream_error, ^task_pid, reason} ->
+            _ = Task.await(task, 1_000)
+            {:error, %{exit_code: nil, output: inspect(reason), chunk_count: state.chunk_count}}
+
+          {:DOWN, ref, :process, _pid, reason} when ref == task.ref ->
+            {:error, %{exit_code: nil, output: inspect(reason), chunk_count: state.chunk_count}}
+        after
+          min(remaining, 250) ->
+            if remaining <= 250,
+              do: timeout_running(task, process, resource, state),
+              else:
+                stream_receive(
+                  task,
+                  process,
+                  deadline,
+                  on_chunk,
+                  resource,
+                  cancel_requested,
+                  state
+                )
+        end
     end
   end
 
+  defp execution_abort_request(%Specification{services: []}, _resource, cancel_requested),
+    do: if(cancel_requested.(), do: :cancelled, else: false)
+
+  defp execution_abort_request(specification, resource, cancel_requested) do
+    if cancel_requested.() do
+      :cancelled
+    else
+      Enum.find_value(specification.services, false, fn service ->
+        name = service_resource_name(resource, service.id)
+
+        case service_state(name) do
+          {:ok, %{running: true}} ->
+            false
+
+          {:ok, %{running: false}} ->
+            {:service_lost, service.id,
+             service_diagnostic(name, service_secret_values(specification))}
+
+          {:error, _reason} ->
+            {:service_lost, service.id, "service state unavailable"}
+        end
+      end)
+    end
+  end
+
+  defp service_lost_running(task, process, resource, state, service_id, diagnostic) do
+    force_stop_running_container(resource)
+    stop_stream(task, process)
+
+    {:error,
+     %{
+       service_lost: service_id,
+       output: "Service #{service_id} became unavailable\n#{diagnostic}",
+       chunk_count: state.chunk_count
+     }}
+  end
+
   defp cancel_running(task, process, resource, state) do
-    grace_ms = Application.fetch_env!(:robine, :runner_cancellation_grace_ms)
-    grace_seconds = max(div(grace_ms + 999, 1_000), 1)
-    _ = docker(["stop", "--time", Integer.to_string(grace_seconds), resource], grace_ms + 5_000)
+    stop_running_container(resource)
     stop_stream(task, process)
 
     {:error,
@@ -786,7 +1235,8 @@ defmodule Robine.Adapters.Execution.DockerRunner do
      }}
   end
 
-  defp timeout_running(task, process, state) do
+  defp timeout_running(task, process, resource, state) do
+    stop_running_container(resource)
     stop_stream(task, process)
 
     {:error,
@@ -795,6 +1245,18 @@ defmodule Robine.Adapters.Execution.DockerRunner do
        output: rendered_output(state) <> "\ncommand timed out",
        chunk_count: state.chunk_count
      }}
+  end
+
+  defp stop_running_container(resource) do
+    grace_ms = Application.fetch_env!(:robine, :runner_cancellation_grace_ms)
+    grace_seconds = max(div(grace_ms + 999, 1_000), 1)
+    _ = docker(["stop", "--time", Integer.to_string(grace_seconds), resource], grace_ms + 5_000)
+    :ok
+  end
+
+  defp force_stop_running_container(resource) do
+    _ = docker(["kill", resource], 5_000)
+    :ok
   end
 
   defp finish_streams(on_chunk, state) do
@@ -900,14 +1362,22 @@ defmodule Robine.Adapters.Execution.DockerRunner do
     error -> {:error, %{exit_code: nil, output: Exception.message(error)}}
   end
 
-  defp cleanup(resource, volume) do
-    container_result = docker(["rm", "--force", resource])
-    volume_result = docker(["volume", "rm", "--force", volume])
+  defp cleanup(specification, resource, volume, network) do
+    results =
+      [docker(["rm", "--force", "--volumes", resource])] ++
+        Enum.map(specification.services, fn service ->
+          docker([
+            "rm",
+            "--force",
+            "--volumes",
+            service_resource_name(resource, service.id)
+          ])
+        end) ++
+        [docker(["volume", "rm", "--force", volume])] ++
+        if(network, do: [docker(["network", "rm", network])], else: [])
 
-    case {ignorable_cleanup(container_result), ignorable_cleanup(volume_result)} do
-      {:ok, :ok} -> nil
-      other -> inspect(other)
-    end
+    normalized = Enum.map(results, &ignorable_cleanup/1)
+    if Enum.all?(normalized, &(&1 == :ok)), do: nil, else: inspect(normalized)
   end
 
   defp ignorable_cleanup({:ok, _output}), do: :ok
@@ -920,11 +1390,21 @@ defmodule Robine.Adapters.Execution.DockerRunner do
     |> Enum.flat_map(fn {key, value} -> ["--env", "#{key}=#{value}"] end)
   end
 
+  defp service_user_args(nil), do: []
+  defp service_user_args(user), do: ["--user", user]
+
   defp resource_name(attempt_id) do
     suffix =
       :crypto.hash(:sha256, attempt_id) |> Base.encode16(case: :lower) |> binary_part(0, 20)
 
     "robine-#{suffix}"
+  end
+
+  defp service_resource_name(resource, service_id), do: "#{resource}-svc-#{service_id}"
+
+  defp service_secret_values(specification) do
+    Map.values(specification.secrets) ++
+      Enum.flat_map(specification.services, &Map.values(&1.secret_env))
   end
 
   defp label(specification), do: "#{@attempt_label}=#{specification.attempt_id}"

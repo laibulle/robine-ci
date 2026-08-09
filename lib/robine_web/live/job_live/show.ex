@@ -1,6 +1,6 @@
 defmodule RobineWeb.JobLive.Show do
   use RobineWeb, :live_view
-  alias Robine.Pipelines
+  alias Robine.{Pipelines, Runners}
   @log_window 50
 
   @impl true
@@ -86,11 +86,14 @@ defmodule RobineWeb.JobLive.Show do
   defp load(socket) do
     case Pipelines.job_detail(%{job_id: socket.assigns.job_id}, socket.assigns.execution_context) do
       {:ok, detail} ->
+        placement = placement(detail.job, socket.assigns.execution_context)
+
         socket
         |> assign(
           pipeline: detail.pipeline,
           job: detail.job,
           attempt: detail.attempt,
+          placement: placement,
           rerun_suggestion: Map.get(socket.assigns, :rerun_suggestion)
         )
         |> load_new_logs()
@@ -99,6 +102,21 @@ defmodule RobineWeb.JobLive.Show do
         socket |> put_flash(:error, "Job not found.") |> push_navigate(to: ~p"/pipelines")
     end
   end
+
+  defp placement(%{status: :queued, runs_on: labels}, context) do
+    case Runners.explain_capacity(%{labels: labels}, context) do
+      {:ok, explanation} -> explanation
+      {:error, _reason} -> nil
+    end
+  end
+
+  defp placement(_job, _context), do: nil
+
+  defp placement_message(:absent), do: "No registered runner satisfies every requested label."
+  defp placement_message(:offline), do: "Matching runners exist, but they are offline or stale."
+  defp placement_message(:draining), do: "Matching runners are draining and accept no new work."
+  defp placement_message(:busy), do: "Every matching runner is currently at capacity."
+  defp placement_message(:available), do: "Compatible capacity is available; dispatch is pending."
 
   defp load_new_logs(socket) do
     started = System.monotonic_time()
@@ -191,6 +209,7 @@ defmodule RobineWeb.JobLive.Show do
   end
 
   defp phase_label("image_acquisition"), do: "Image acquisition"
+  defp phase_label("service_preparation"), do: "Service preparation"
   defp phase_label("execution"), do: "Execution"
   defp phase_label("cleanup"), do: "Cleanup"
   defp phase_label(phase), do: phase |> to_string() |> String.replace("_", " ")
@@ -199,6 +218,19 @@ defmodule RobineWeb.JobLive.Show do
   defp stream_label("stderr"), do: "standard error"
   defp stream_label("system"), do: "runner event"
   defp stream_label(_stream), do: "combined output"
+
+  defp local_job_selector(%{matrix_values: values, job_key: key}) when map_size(values) > 0,
+    do: "'#{key}'"
+
+  defp local_job_selector(job), do: job.job_key
+
+  defp local_input_flags(inputs) do
+    inputs
+    |> Enum.sort()
+    |> Enum.map_join("", fn {name, value} -> " --input " <> shell_quote("#{name}=#{value}") end)
+  end
+
+  defp shell_quote(value), do: "'" <> String.replace(value, "'", "'\"'\"'") <> "'"
 
   @impl true
   def render(assigns) do
@@ -222,7 +254,52 @@ defmodule RobineWeb.JobLive.Show do
               class="btn btn-primary btn-sm"
             >Retry job</button>
           </div>
+          <div
+            :if={map_size(@job.matrix_values) > 0}
+            id="matrix-values"
+            class="mt-3 flex flex-wrap gap-2"
+          >
+            <span
+              :for={{axis, value} <- Enum.sort(@job.matrix_values)}
+              class="badge badge-outline font-mono"
+            >{axis}={value}</span>
+          </div>
         </header>
+        <div
+          :if={map_size(@pipeline.inputs) > 0}
+          id="manual-inputs"
+          class="rounded-2xl border border-base-300 bg-base-100 p-4"
+        >
+          <p class="font-semibold">Manual inputs</p>
+          <div class="mt-2 flex flex-wrap gap-2">
+            <span
+              :for={{name, value} <- Enum.sort(@pipeline.inputs)}
+              class="badge badge-outline font-mono"
+            >{name}={value}</span>
+          </div>
+        </div>
+        <div
+          :if={@job.status == :skipped}
+          id="condition-explanation"
+          class="rounded-2xl border border-base-300 bg-base-200/60 p-4"
+        >
+          <p class="font-semibold">Condition did not match</p>
+          <p class="mt-1 text-sm text-base-content/65">
+            This job was skipped because <code>if: {@job.condition}</code>
+            did not match the terminal outcomes of its dependencies.
+          </p>
+        </div>
+        <div
+          :if={@placement}
+          id="placement-explanation"
+          class="rounded-2xl border border-primary/25 bg-primary/5 p-4"
+        >
+          <p class="font-semibold">Waiting for compatible capacity</p>
+          <p class="mt-1 text-sm text-base-content/65">{placement_message(@placement.status)}</p>
+          <p class="mt-2 text-xs text-base-content/50">
+            Required labels: {Enum.join(@placement.requested_labels, ", ")}
+          </p>
+        </div>
         <div :if={@rerun_suggestion} class="alert alert-warning">
           <div>
             <p class="font-semibold">Required artifacts expired or are unavailable.</p>
@@ -245,7 +322,7 @@ defmodule RobineWeb.JobLive.Show do
           <div class="flex items-center justify-between">
             <h2 class="font-semibold">Local reproduction</h2><span class="badge badge-outline">Docker</span>
           </div>
-          <pre class="mt-4 overflow-x-auto"><code>robine run {@job.job_key} --workflow .robine-ci/workflows/ci.yml</code></pre>
+          <pre class="mt-4 overflow-x-auto"><code>robine run {local_job_selector(@job)} --workflow .robine-ci/workflows/ci.yml{local_input_flags(@pipeline.inputs)}</code></pre>
           <p class="mt-4 text-sm opacity-70">
             CI-only inputs omitted: GitHub event payload, server-side secrets, and remote caches.
           </p>

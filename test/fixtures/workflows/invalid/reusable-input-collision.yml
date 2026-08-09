@@ -1,0 +1,14 @@
+version: 1
+name: Invalid reusable input
+on:
+  workflow_call:
+    inputs:
+      runtime:
+        type: string
+jobs:
+  test:
+    image: alpine:3.22
+    env:
+      ROBINE_CALL_INPUT_RUNTIME: forged
+    steps:
+      - run: echo invalid

@@ -7,7 +7,7 @@ defmodule Robine.Operations.UseCases.GetHealth do
         actor: %{role: :administrator},
         dependencies: %{operations: %Dependencies{} = deps}
       }),
-      do: deps.health.check()
+      do: deps.health.check(deps.blob_store)
 
   def call(_input, %ExecutionContext{}), do: {:error, :forbidden}
 end

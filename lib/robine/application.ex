@@ -12,6 +12,7 @@ defmodule Robine.Application do
     children = [
       RobineWeb.Telemetry,
       Robine.Repo,
+      Robine.Adapters.Storage.BackendGuard,
       {Oban, Application.fetch_env!(:robine, Oban)},
       {DNSCluster, query: Application.get_env(:robine, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: Robine.PubSub},

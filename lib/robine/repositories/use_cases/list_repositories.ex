@@ -13,6 +13,8 @@ defmodule Robine.Repositories.UseCases.ListRepositories do
        Enum.map(repositories, fn repository ->
          Map.take(Map.from_struct(repository), [
            :id,
+           :provider,
+           :provider_instance,
            :owner,
            :name,
            :full_name,

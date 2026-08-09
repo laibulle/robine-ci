@@ -51,11 +51,20 @@ defmodule Robine.Pipelines.UseCases.DeliverEvent do
     do: {:error, {:unsupported_event, event_type}}
 
   defp sync_checks(pipeline_id, context) do
-    case Repositories.sync_github_checks(%{pipeline_id: pipeline_id}, context) do
-      {:ok, _count} -> :ok
-      {:error, :not_found} -> :ok
-      {:error, reason} -> {:error, reason}
-    end
+    outcome =
+      case Repositories.sync_github_checks(%{pipeline_id: pipeline_id}, context) do
+        {:ok, _count} -> :ok
+        {:error, :not_found} -> :not_found
+        {:error, _reason} -> :deferred
+      end
+
+    :telemetry.execute(
+      [:robine, :source_control, :projection],
+      %{count: 1},
+      %{operation: :dispatch, outcome: outcome}
+    )
+
+    :ok
   end
 
   defp effect(%{event_type: "pipeline.created"}), do: :dispatch

@@ -10,6 +10,7 @@ defmodule Robine.Adapters.Persistence.Postgres.Schemas.WorkflowRevision do
     field :source, :string
     field :digest, :string
     field :normalized_graph, :map
+    field :included_sources, :map, default: %{}
     field :created_at, :utc_datetime_usec
   end
 
@@ -22,6 +23,7 @@ defmodule Robine.Adapters.Persistence.Postgres.Schemas.WorkflowRevision do
       :source,
       :digest,
       :normalized_graph,
+      :included_sources,
       :created_at
     ])
     |> validate_required([
@@ -31,6 +33,7 @@ defmodule Robine.Adapters.Persistence.Postgres.Schemas.WorkflowRevision do
       :source,
       :digest,
       :normalized_graph,
+      :included_sources,
       :created_at
     ])
     |> unique_constraint(:id, name: :workflow_revisions_pkey)

@@ -26,6 +26,8 @@ defmodule Robine.Pipelines.UseCases.GetPipelineSnapshot do
          inserted_at: pipeline.inserted_at,
          started_at: pipeline.started_at,
          finished_at: pipeline.finished_at,
+         scheduled_for: pipeline.scheduled_for,
+         inputs: pipeline.inputs,
          duration_ms: duration_ms(pipeline.started_at, pipeline.finished_at || now),
          jobs: Enum.map(jobs, &job_projection(&1, deps.job_repository, now))
        }}
@@ -45,6 +47,8 @@ defmodule Robine.Pipelines.UseCases.GetPipelineSnapshot do
     |> Map.from_struct()
     |> Map.take([:id, :job_key, :status, :position, :needs])
     |> Map.merge(%{
+      base_id: Map.get(job.execution, "base_id") || job.job_key,
+      matrix_values: Map.get(job.execution, "matrix_values", %{}),
       phase: attempt && attempt.status,
       result_reason: attempt && attempt.result_reason,
       infrastructure_failure: attempt && attempt.result_reason in [:runner_lost, :system_failure],

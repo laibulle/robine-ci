@@ -10,7 +10,7 @@ defmodule Robine.MixProject do
       start_permanent: Mix.env() == :prod,
       aliases: aliases(),
       deps: deps(),
-      escript: [main_module: Robine.Adapters.CLI, app: nil],
+      escript: escript_config(),
       compilers: [:phoenix_live_view] ++ Mix.compilers(),
       listeners: [Phoenix.CodeReloader]
     ]
@@ -33,6 +33,8 @@ defmodule Robine.MixProject do
         qa: :test,
         verify: :test,
         "robine.cli_release_smoke": :test,
+        "robine.runner_release_smoke": :test,
+        "robine.server_release_smoke": :test,
         "robine.release": :cli,
         "robine.server_release": :prod,
         "robine.verify_checksums": :cli
@@ -43,6 +45,21 @@ defmodule Robine.MixProject do
   # Specifies which paths to compile per environment.
   defp elixirc_paths(:test), do: ["lib", "test/support"]
   defp elixirc_paths(_), do: ["lib"]
+
+  defp escript_config do
+    case System.get_env("ROBINE_ESCRIPT_TARGET") do
+      "runner" ->
+        [
+          main_module: Robine.Adapters.Runner.CLI,
+          app: nil,
+          name: "robine-runner",
+          path: System.fetch_env!("ROBINE_ESCRIPT_PATH")
+        ]
+
+      _default ->
+        [main_module: Robine.Adapters.CLI, app: nil]
+    end
+  end
 
   # Specifies your project dependencies.
   #
@@ -81,6 +98,10 @@ defmodule Robine.MixProject do
        depth: 1},
       {:swoosh, "~> 1.16"},
       {:req, "~> 0.5"},
+      {:ex_aws, "~> 2.7"},
+      {:ex_aws_s3, "~> 2.5"},
+      {:sweet_xml, "~> 0.7"},
+      {:websockex, "~> 0.5.1"},
       {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false},
       {:sobelow, "~> 0.14", only: [:dev, :test], runtime: false},
       {:telemetry_metrics, "~> 1.0"},
@@ -121,7 +142,9 @@ defmodule Robine.MixProject do
         "cmd env MIX_ENV=dev mix hex.audit",
         "deps.unlock --check-unused",
         "test",
-        "robine.cli_release_smoke"
+        "robine.server_release_smoke",
+        "robine.cli_release_smoke",
+        "robine.runner_release_smoke"
       ],
       precommit: ["verify"]
     ]

@@ -17,11 +17,13 @@ defmodule Robine.Pipelines.UseCases.ClaimNextJob do
 
     with :ok <- admit(deps) do
       deps.unit_of_work.transaction(fn ->
-        with {:ok, job} <- repository.next_queued(global_limit, repository_limit),
+        with {:ok, job} <-
+               next_job(input, global_limit, repository_limit, deps.clock.now(), repository),
              {:ok, pipeline} <- deps.pipeline_repository.get(job.pipeline_id),
              {:ok, running_pipeline} <- start_pipeline(pipeline, deps.clock.now()),
              {:ok, running_job} <- Job.transition(job, :running),
-             {:ok, attempt} <- new_attempt(job, lease_seconds, deps, repository),
+             {:ok, attempt} <-
+               new_attempt(job, lease_seconds, Map.get(input, :runner_id), deps, repository),
              :ok <- deps.pipeline_repository.update(running_pipeline),
              :ok <- repository.update_job(running_job),
              :ok <- repository.insert_attempt(attempt),
@@ -34,12 +36,21 @@ defmodule Robine.Pipelines.UseCases.ClaimNextJob do
 
   def call(_input, %ExecutionContext{}), do: {:error, :forbidden}
 
-  defp new_attempt(job, lease_seconds, deps, repository) do
+  defp next_job(%{runner_id: runner_id}, global, repository_limit, now, repository)
+       when is_binary(runner_id) do
+    repository.next_queued_for_runner(runner_id, now, global, repository_limit)
+  end
+
+  defp next_job(_input, global, repository_limit, _now, repository),
+    do: repository.next_queued(global, repository_limit)
+
+  defp new_attempt(job, lease_seconds, runner_id, deps, repository) do
     Attempt.new(%{
       id: deps.id_generator.generate(),
       job_id: job.id,
       number: repository.next_attempt_number(job.id),
       idempotency_token: deps.id_generator.generate(),
+      runner_id: runner_id,
       lease_expires_at: DateTime.add(deps.clock.now(), lease_seconds, :second)
     })
   end

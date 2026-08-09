@@ -2,7 +2,14 @@ defmodule Robine.Pipelines.Domain.Attempt do
   @moduledoc "One immutable-history execution attempt for a job."
 
   @statuses [:queued, :preparing, :running, :cancelling, :succeeded, :failed, :cancelled]
-  @reasons [:command_failed, :timeout, :runner_lost, :system_failure, :cancelled]
+  @reasons [
+    :command_failed,
+    :timeout,
+    :runner_lost,
+    :service_unavailable,
+    :system_failure,
+    :cancelled
+  ]
 
   @enforce_keys [:id, :job_id, :number, :idempotency_token, :status, :lease_expires_at]
   defstruct [
@@ -10,6 +17,7 @@ defmodule Robine.Pipelines.Domain.Attempt do
     :job_id,
     :number,
     :idempotency_token,
+    :runner_id,
     :status,
     :lease_expires_at,
     :last_sequence,
@@ -20,12 +28,19 @@ defmodule Robine.Pipelines.Domain.Attempt do
 
   @type status ::
           :queued | :preparing | :running | :cancelling | :succeeded | :failed | :cancelled
-  @type reason :: :command_failed | :timeout | :runner_lost | :system_failure | :cancelled
+  @type reason ::
+          :command_failed
+          | :timeout
+          | :runner_lost
+          | :service_unavailable
+          | :system_failure
+          | :cancelled
   @type t :: %__MODULE__{
           id: String.t(),
           job_id: String.t(),
           number: pos_integer(),
           idempotency_token: String.t(),
+          runner_id: String.t() | nil,
           status: status(),
           lease_expires_at: DateTime.t(),
           last_sequence: non_neg_integer() | nil,
@@ -41,13 +56,15 @@ defmodule Robine.Pipelines.Domain.Attempt do
   def reasons, do: @reasons
 
   @spec new(map()) :: {:ok, t()} | {:error, term()}
-  def new(%{
-        id: id,
-        job_id: job_id,
-        number: number,
-        idempotency_token: token,
-        lease_expires_at: %DateTime{} = lease
-      })
+  def new(
+        %{
+          id: id,
+          job_id: job_id,
+          number: number,
+          idempotency_token: token,
+          lease_expires_at: %DateTime{} = lease
+        } = input
+      )
       when is_binary(id) and is_binary(job_id) and is_integer(number) and number > 0 and
              is_binary(token) do
     {:ok,
@@ -56,6 +73,7 @@ defmodule Robine.Pipelines.Domain.Attempt do
        job_id: job_id,
        number: number,
        idempotency_token: token,
+       runner_id: Map.get(input, :runner_id),
        status: :queued,
        lease_expires_at: lease,
        last_sequence: 0

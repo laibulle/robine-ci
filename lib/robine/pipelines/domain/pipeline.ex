@@ -25,7 +25,9 @@ defmodule Robine.Pipelines.Domain.Pipeline do
     :status,
     :inserted_at,
     :started_at,
-    :finished_at
+    :finished_at,
+    :scheduled_for,
+    inputs: %{}
   ]
 
   @type status ::
@@ -49,14 +51,18 @@ defmodule Robine.Pipelines.Domain.Pipeline do
           status: status(),
           inserted_at: DateTime.t(),
           started_at: DateTime.t() | nil,
-          finished_at: DateTime.t() | nil
+          finished_at: DateTime.t() | nil,
+          scheduled_for: DateTime.t() | nil,
+          inputs: %{optional(String.t()) => String.t()}
         }
 
   @spec create(map(), String.t(), DateTime.t()) :: {:ok, t()} | {:error, term()}
   def create(input, id, now) when is_map(input) and is_binary(id) do
     with {:ok, repository_id} <- required_string(input, :repository_id),
          {:ok, workflow_name} <- required_string(input, :workflow_name),
-         {:ok, commit_sha} <- valid_sha(input) do
+         {:ok, commit_sha} <- valid_sha(input),
+         {:ok, inputs} <- valid_inputs(Map.get(input, :inputs, %{})),
+         {:ok, scheduled_for} <- scheduled_for(Map.get(input, :scheduled_for)) do
       {:ok,
        %__MODULE__{
          id: id,
@@ -69,13 +75,27 @@ defmodule Robine.Pipelines.Domain.Pipeline do
          status: :created,
          inserted_at: DateTime.truncate(now, :microsecond),
          started_at: nil,
-         finished_at: nil
+         finished_at: nil,
+         scheduled_for: scheduled_for,
+         inputs: inputs
        }}
     end
   end
 
   @spec statuses() :: [status()]
   def statuses, do: @statuses
+
+  @spec idempotent_id(String.t()) :: {:ok, String.t()} | {:error, :invalid_idempotency_key}
+  def idempotent_id(key) when is_binary(key) and byte_size(key) in 1..512 do
+    <<bytes::binary-size(16), _rest::binary>> = :crypto.hash(:sha256, key)
+
+    <<a::binary-size(8), b::binary-size(4), c::binary-size(4), d::binary-size(4),
+      e::binary-size(12)>> = Base.encode16(bytes, case: :lower)
+
+    {:ok, Enum.join([a, b, c, d, e], "-")}
+  end
+
+  def idempotent_id(_key), do: {:error, :invalid_idempotency_key}
 
   @spec transition(t(), status()) :: {:ok, t()} | {:error, term()}
   def transition(%__MODULE__{status: current} = pipeline, target, now \\ nil) do
@@ -178,6 +198,24 @@ defmodule Robine.Pipelines.Domain.Pipeline do
         default
     end
   end
+
+  defp valid_inputs(inputs) when is_map(inputs) and map_size(inputs) <= 16 do
+    if Enum.all?(inputs, fn {key, value} ->
+         is_binary(key) and is_binary(value) and byte_size(key) <= 31 and
+           byte_size(value) <= 1_024
+       end),
+       do: {:ok, inputs},
+       else: {:error, {:invalid_input, :inputs, :invalid}}
+  end
+
+  defp valid_inputs(_inputs), do: {:error, {:invalid_input, :inputs, :invalid}}
+
+  defp scheduled_for(nil), do: {:ok, nil}
+
+  defp scheduled_for(%DateTime{} = scheduled_for),
+    do: {:ok, DateTime.truncate(scheduled_for, :microsecond)}
+
+  defp scheduled_for(_value), do: {:error, {:invalid_input, :scheduled_for, :invalid}}
 
   defp apply_timing(pipeline, target, now, force \\ false)
 

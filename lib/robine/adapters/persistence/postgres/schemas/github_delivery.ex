@@ -5,6 +5,9 @@ defmodule Robine.Adapters.Persistence.Postgres.Schemas.GitHubDelivery do
   @primary_key {:id, :string, autogenerate: false}
 
   schema "github_deliveries" do
+    field :provider, Ecto.Enum, values: [:github, :gitlab, :forgejo]
+    field :provider_instance, :string
+    field :provider_delivery_id, :string
     field :event, :string
     field :payload, :map
     field :status, Ecto.Enum, values: [:pending, :processed, :ignored, :failed]
@@ -15,8 +18,31 @@ defmodule Robine.Adapters.Persistence.Postgres.Schemas.GitHubDelivery do
 
   def changeset(schema, attributes) do
     schema
-    |> cast(attributes, [:id, :event, :payload, :status, :received_at, :processed_at, :failure])
-    |> validate_required([:id, :event, :payload, :status, :received_at])
+    |> cast(attributes, [
+      :id,
+      :provider,
+      :provider_instance,
+      :provider_delivery_id,
+      :event,
+      :payload,
+      :status,
+      :received_at,
+      :processed_at,
+      :failure
+    ])
+    |> validate_required([
+      :id,
+      :provider,
+      :provider_instance,
+      :provider_delivery_id,
+      :event,
+      :payload,
+      :status,
+      :received_at
+    ])
     |> unique_constraint(:id)
+    |> unique_constraint([:provider, :provider_instance, :provider_delivery_id],
+      name: :source_control_deliveries_provider_identity_index
+    )
   end
 end

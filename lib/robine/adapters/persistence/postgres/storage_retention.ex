@@ -11,26 +11,25 @@ defmodule Robine.Adapters.Persistence.Postgres.StorageRetention do
     StorageGcCandidate
   }
 
-  alias Robine.Adapters.Storage.LocalBlobStore
   alias Robine.Repo
 
   @impl true
-  def prune(now, options) do
+  def prune(now, options, blob_store) do
     batch_size = Keyword.fetch!(options, :batch_size)
     grace_seconds = Keyword.fetch!(options, :gc_grace_seconds)
     log_seconds = Keyword.fetch!(options, :log_seconds)
 
     with {:ok, staged} <- stage(now, batch_size, grace_seconds, log_seconds),
-         {:ok, garbage} <- drain(now, batch_size),
-         {:ok, reconciliation} <- reconcile(now, batch_size, grace_seconds) do
+         {:ok, garbage} <- drain(now, batch_size, blob_store),
+         {:ok, reconciliation} <- reconcile(now, batch_size, grace_seconds, blob_store) do
       {:ok, staged |> Map.put(:blobs_deleted, garbage) |> Map.merge(reconciliation)}
     end
   end
 
-  defp reconcile(now, batch_size, grace_seconds) do
-    with {:ok, %{objects: objects, unsafe: unsafe}} <- LocalBlobStore.inventory(),
+  defp reconcile(now, batch_size, grace_seconds, blob_store) do
+    with {:ok, %{objects: objects, unsafe: unsafe}} <- blob_store.inventory(),
          {:ok, temporary_deleted} <-
-           LocalBlobStore.delete_temporary_before(DateTime.add(now, -grace_seconds, :second)) do
+           blob_store.delete_temporary_before(DateTime.add(now, -grace_seconds, :second)) do
       physical_ids = MapSet.new(objects, & &1.blob_id)
       referenced = referenced_blob_ids()
       referenced_ids = MapSet.new(referenced, & &1.blob_id)
@@ -134,7 +133,7 @@ defmodule Robine.Adapters.Persistence.Postgres.StorageRetention do
     count
   end
 
-  defp drain(now, limit) do
+  defp drain(now, limit, blob_store) do
     candidates =
       Repo.all(
         from candidate in StorageGcCandidate,
@@ -148,7 +147,7 @@ defmodule Robine.Adapters.Persistence.Postgres.StorageRetention do
         acknowledge(candidate.blob_id)
         {:cont, {:ok, count}}
       else
-        case LocalBlobStore.delete(candidate.blob_id) do
+        case blob_store.delete(candidate.blob_id) do
           :ok ->
             acknowledge(candidate.blob_id)
             {:cont, {:ok, count + 1}}

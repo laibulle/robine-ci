@@ -16,6 +16,8 @@ defmodule Robine.Adapters.Persistence.Postgres.Schemas.Pipeline do
     field :status, Ecto.Enum, values: Robine.Pipelines.Domain.Pipeline.statuses()
     field :started_at, :utc_datetime_usec
     field :finished_at, :utc_datetime_usec
+    field :scheduled_for, :utc_datetime_usec
+    field :inputs, :map, default: %{}
     timestamps(type: :utc_datetime_usec, updated_at: false)
   end
 
@@ -35,7 +37,9 @@ defmodule Robine.Adapters.Persistence.Postgres.Schemas.Pipeline do
       :status,
       :inserted_at,
       :started_at,
-      :finished_at
+      :finished_at,
+      :scheduled_for,
+      :inputs
     ])
     |> validate_required([
       :id,

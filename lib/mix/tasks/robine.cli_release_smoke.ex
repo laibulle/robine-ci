@@ -53,8 +53,11 @@ defmodule Mix.Tasks.Robine.CliReleaseSmoke do
     manifest = Path.join(output, "SHA256SUMS")
 
     case Robine.Release.Checksums.verify(manifest, output) do
-      :ok -> :ok
-      {:error, reason} -> Mix.raise("CLI release checksum verification failed: #{inspect(reason)}")
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Mix.raise("CLI release checksum verification failed: #{inspect(reason)}")
     end
   end
 

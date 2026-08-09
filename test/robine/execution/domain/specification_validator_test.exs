@@ -1,7 +1,7 @@
 defmodule Robine.Execution.Domain.SpecificationValidatorTest do
   use ExUnit.Case, async: true
 
-  alias Robine.Execution.Contracts.{Specification, Step}
+  alias Robine.Execution.Contracts.{Service, Specification, Step}
   alias Robine.Execution.Domain.SpecificationValidator
 
   test "accepts a complete version 1 execution contract" do
@@ -23,10 +23,32 @@ defmodule Robine.Execution.Domain.SpecificationValidatorTest do
 
   test "debug inspection never renders plaintext secrets" do
     secret = "inspection-fixture-secret"
-    rendered = inspect(specification(secrets: %{"TOKEN" => secret}))
+
+    service = %Service{
+      id: "postgres",
+      image: "postgres:18-alpine",
+      secret_env: %{"POSTGRES_PASSWORD" => secret}
+    }
+
+    rendered = inspect(specification(secrets: %{"TOKEN" => secret}, services: [service]))
 
     refute rendered =~ secret
     refute rendered =~ "TOKEN"
+    refute rendered =~ "POSTGRES_PASSWORD"
+  end
+
+  test "rejects malformed and duplicate normalized services" do
+    service = %Service{id: "postgres", image: "postgres:18-alpine"}
+
+    assert :ok = specification(services: [service]) |> SpecificationValidator.validate()
+
+    assert {:error, {:invalid_specification, :services}} =
+             specification(services: [service, service]) |> SpecificationValidator.validate()
+
+    invalid = %{service | readiness: %{tcp: 70_000, timeout_ms: 1}}
+
+    assert {:error, {:invalid_specification, :services}} =
+             specification(services: [invalid]) |> SpecificationValidator.validate()
   end
 
   defp specification(overrides \\ []) do

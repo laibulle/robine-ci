@@ -24,7 +24,9 @@ defmodule Robine.Pipelines.UseCases.ListPipelines do
            :status,
            :inserted_at,
            :started_at,
-           :finished_at
+           :finished_at,
+           :scheduled_for,
+           :inputs
          ])
        end)}
     end

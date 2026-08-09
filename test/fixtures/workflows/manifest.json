@@ -1,7 +1,15 @@
 {
   "valid/minimal.yml": {"valid": true},
   "valid/builtins.yml": {"valid": true},
+  "valid/matrix.yml": {"valid": true},
+  "valid/manual-inputs.yml": {"valid": true},
+  "valid/scheduled.yml": {"valid": true},
+  "valid/reusable.yml": {"valid": true},
   "invalid/unknown-key.yml": {"valid": false, "codes": ["workflow.unknown_key"]},
   "invalid/cycle.yml": {"valid": false, "codes": ["workflow.cycle", "workflow.cycle"]},
-  "invalid/unsafe-cache.yml": {"valid": false, "codes": ["step.cache_inputs"]}
+  "invalid/unsafe-cache.yml": {"valid": false, "codes": ["step.cache_inputs"]},
+  "invalid/matrix-token.yml": {"valid": false, "codes": ["matrix.interpolation"]},
+  "invalid/manual-input-collision.yml": {"valid": false, "codes": ["manual_input.env_collision"]},
+  "invalid/scheduled-cron.yml": {"valid": false, "codes": ["schedule.cron"]},
+  "invalid/reusable-input-collision.yml": {"valid": false, "codes": ["call_input.env_collision"]}
 }

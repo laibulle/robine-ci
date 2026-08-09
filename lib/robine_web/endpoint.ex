@@ -18,6 +18,10 @@ defmodule RobineWeb.Endpoint do
     websocket: [connect_info: [session: @session_options]],
     longpoll: [connect_info: [session: @session_options]]
 
+  socket "/runner/socket", RobineWeb.RunnerSocket,
+    websocket: [connect_info: [:x_headers, :peer_data], max_frame_size: 262_144],
+    longpoll: false
+
   # Serve at "/" the static files from "priv/static" directory.
   #
   # When code reloading is disabled (e.g., in production),

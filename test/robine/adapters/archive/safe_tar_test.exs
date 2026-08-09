@@ -5,6 +5,20 @@ defmodule Robine.Adapters.Archive.SafeTarTest do
 
   test "accepts bounded regular files below a single archive root" do
     assert :ok = SafeTar.validate_table([entry("root/lib/app.ex", :regular, 100)], 50)
+
+    assert :ok =
+             SafeTar.validate_table(
+               [entry("root", :directory, 0), entry("root/lib", :directory, 0)],
+               50
+             )
+  end
+
+  test "creates a deterministic-policy source archive that round-trips through validation" do
+    files = %{"lib/app.ex" => "defmodule App do\nend\n", "README.md" => "hello"}
+
+    assert {:ok, archive} = SafeTar.create_source(files)
+    assert {:ok, extracted} = SafeTar.extract_source(archive)
+    assert Map.new(extracted) == files
   end
 
   test "rejects traversal, links, devices, and other special entries" do
@@ -15,6 +29,20 @@ defmodule Robine.Adapters.Archive.SafeTarTest do
       assert {:error, :unsupported_source_archive_entry} =
                SafeTar.validate_table([entry("root/item", type, 1)], 10)
     end
+  end
+
+  test "accepts Forgejo's bounded PAX global metadata header only by its exact name" do
+    assert :ok =
+             SafeTar.validate_table(
+               [entry("pax_global_header", :unknown, 52), entry("root/app.ex", :regular, 10)],
+               20
+             )
+
+    assert {:error, :unsupported_source_archive_entry} =
+             SafeTar.validate_table([entry("root/pax_global_header", :unknown, 52)], 20)
+
+    assert {:error, :unsupported_source_archive_entry} =
+             SafeTar.validate_table([entry("pax_global_header", :unknown, 65_537)], 20)
   end
 
   test "enforces file count, expanded size, and compression ratio before extraction" do

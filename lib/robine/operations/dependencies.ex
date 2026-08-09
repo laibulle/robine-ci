@@ -1,14 +1,16 @@
 defmodule Robine.Operations.Dependencies do
   @moduledoc false
   alias Robine.Operations.Ports.{Health, Retention}
-  @enforce_keys [:health, :retention]
-  defstruct [:health, :retention]
-  @type t :: %__MODULE__{health: module(), retention: module()}
+  alias Robine.Storage.Ports.BlobStore
+  @enforce_keys [:health, :retention, :blob_store]
+  defstruct [:health, :retention, :blob_store]
+  @type t :: %__MODULE__{health: module(), retention: module(), blob_store: module()}
 
   def validate!(%__MODULE__{} = dependencies) do
     for {implementation, behaviour} <- [
           {dependencies.health, Health},
-          {dependencies.retention, Retention}
+          {dependencies.retention, Retention},
+          {dependencies.blob_store, BlobStore}
         ] do
       Code.ensure_loaded!(implementation)
 

@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "kind": "first_pipeline",
+  "operator": {
+    "id": "replace-with-release-record-tester-id",
+    "new_to_robine": true
+  },
+  "host": {
+    "started_empty": true,
+    "operating_system": "Ubuntu Server 24.04 LTS",
+    "architecture": "x86_64"
+  },
+  "started_at": "2026-08-09T10:00:00Z",
+  "green_check_at": "2026-08-09T10:10:00Z",
+  "excluded_intervals": [
+    {
+      "category": "image_download",
+      "started_at": "2026-08-09T10:05:00Z",
+      "finished_at": "2026-08-09T10:06:00Z",
+      "notes": "Replace with observed image-download interval"
+    }
+  ],
+  "repository": "owner/repository",
+  "commit_sha": "0000000000000000000000000000000000000000",
+  "check_url": "https://github.com/owner/repository/runs/0000000000",
+  "artifact_manifest_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "notes": "Replace every placeholder with contemporaneous release evidence"
+}

@@ -18,6 +18,7 @@ defmodule Robine.Workflows.UseCases.ValidateWorkflow do
     with :ok <- source_size(source, limits),
          {:ok, document, locations} <- decode(dependencies.decoder, source),
          {:ok, workflow, warnings} <- locate(Validator.validate(document, limits), locations) do
+      emit_expansion(workflow)
       {:ok, %ValidatedWorkflow{path: path, workflow: workflow, warnings: warnings}}
     end
   end
@@ -75,4 +76,15 @@ defmodule Robine.Workflows.UseCases.ValidateWorkflow do
 
   defp locate({:error, diagnostics}, locations),
     do: {:error, Enum.map(diagnostics, &Diagnostic.locate(&1, locations))}
+
+  defp emit_expansion(workflow) do
+    matrix_variants =
+      Enum.count(workflow.jobs, fn {_id, job} -> map_size(job.matrix_values) > 0 end)
+
+    :telemetry.execute(
+      [:robine, :workflow, :expansion],
+      %{expanded_jobs: map_size(workflow.jobs), matrix_variants: matrix_variants},
+      %{}
+    )
+  end
 end

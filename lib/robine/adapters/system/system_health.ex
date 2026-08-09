@@ -4,17 +4,24 @@ defmodule Robine.Adapters.System.SystemHealth do
   import Ecto.Query
 
   alias Robine.Repo
-  alias Robine.Adapters.Persistence.Postgres.Schemas.OutboxEvent
+
+  alias Robine.Adapters.Persistence.Postgres.Schemas.{
+    OutboxEvent,
+    ScheduleReconciliationState
+  }
 
   @impl true
-  def check do
+  def check(blob_store) do
     checks = %{
       database: database(),
       durable_queue: durable_queue(),
       outbox: outbox(),
+      scheduler: scheduler(),
       docker: docker(),
-      storage: storage(),
+      storage: storage(blob_store),
       github_app: github_app(),
+      gitlab: source_control_provider(:gitlab, :gitlab_source_control),
+      forgejo: source_control_provider(:forgejo, :forgejo_source_control),
       oidc: optional_configuration(:oidc_config)
     }
 
@@ -93,6 +100,49 @@ defmodule Robine.Adapters.System.SystemHealth do
     _error -> %{status: :error, detail: "Outbox state unavailable"}
   end
 
+  defp scheduler do
+    case Repo.get(ScheduleReconciliationState, "workflows") do
+      nil ->
+        %{
+          status: :degraded,
+          detail: "Scheduled workflow reconciliation has not completed yet",
+          cursor: nil,
+          cursor_age_seconds: nil,
+          last_failure: nil
+        }
+
+      state ->
+        raw_age = state.cursor && DateTime.diff(DateTime.utc_now(), state.cursor, :second)
+        age = raw_age && max(raw_age, 0)
+        degraded = not is_nil(state.last_failure) or is_nil(age) or age > 120 or raw_age < -60
+
+        %{
+          status: if(degraded, do: :degraded, else: :ok),
+          detail: scheduler_detail(age, state.last_failure),
+          cursor: state.cursor,
+          cursor_age_seconds: age,
+          last_failure: state.last_failure
+        }
+    end
+  rescue
+    _error ->
+      %{
+        status: :error,
+        detail: "Scheduled workflow reconciliation state is unavailable",
+        cursor: nil,
+        cursor_age_seconds: nil,
+        last_failure: nil
+      }
+  end
+
+  defp scheduler_detail(age, nil) when is_integer(age),
+    do: "Schedule cursor is #{age} seconds old"
+
+  defp scheduler_detail(_age, nil), do: "No successful schedule reconciliation"
+
+  defp scheduler_detail(age, failure),
+    do: "Last schedule reconciliation failed (#{failure}); cursor age #{age || "unknown"} seconds"
+
   defp docker do
     task =
       Task.async(fn ->
@@ -109,22 +159,18 @@ defmodule Robine.Adapters.System.SystemHealth do
     _error -> %{status: :degraded, detail: "Docker Engine unavailable"}
   end
 
-  defp storage do
-    root = Application.fetch_env!(:robine, :storage_root)
-    probe = Path.join(root, ".health-#{Ecto.UUID.generate()}")
-
-    try do
-      with :ok <- File.mkdir_p(root), :ok <- File.write(probe, "health", [:exclusive]) do
-        %{status: :ok, detail: "Local blob storage writable"}
-      else
-        {:error, _reason} -> %{status: :error, detail: "Local blob storage is not writable"}
-      end
-    after
-      File.rm(probe)
+  defp storage(blob_store) do
+    case blob_store.health() do
+      {:ok, details} -> Map.put(details, :status, :ok)
+      {:error, reason} -> %{status: :error, detail: storage_error(reason)}
     end
-  rescue
-    _error -> %{status: :error, detail: "Local blob storage is not writable"}
   end
+
+  defp storage_error(:invalid_configuration), do: "Blob storage configuration is invalid"
+  defp storage_error(:forbidden), do: "Blob storage access is forbidden"
+  defp storage_error(:throttled), do: "Blob storage is throttling requests"
+  defp storage_error(:unavailable), do: "Blob storage is unavailable"
+  defp storage_error(_reason), do: "Blob storage health check failed"
 
   defp github_app do
     app_id = Application.get_env(:robine, :github_app_id)
@@ -175,5 +221,25 @@ defmodule Robine.Adapters.System.SystemHealth do
     if Application.get_env(:robine, key),
       do: %{status: :ok, detail: "Configured"},
       else: %{status: :optional, detail: "Not configured"}
+  end
+
+  defp source_control_provider(provider, config_key) do
+    case Application.get_env(:robine, config_key, []) |> Keyword.get(:base_url) do
+      base_url when is_binary(base_url) and base_url != "" ->
+        with {:ok, _token} <-
+               Robine.Adapters.SourceControl.ProviderCredentials.fetch(provider, :token),
+             {:ok, _secret} <-
+               Robine.Adapters.SourceControl.ProviderCredentials.fetch(
+                 provider,
+                 :webhook_secret
+               ) do
+          %{status: :ok, detail: "Configured credentials available"}
+        else
+          _error -> %{status: :degraded, detail: "Configured provider credentials incomplete"}
+        end
+
+      _disabled ->
+        %{status: :optional, detail: "Not configured"}
+    end
   end
 end

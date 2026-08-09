@@ -38,6 +38,11 @@ defmodule Robine.Pipelines do
   @spec job_execution(map(), ExecutionContext.t()) :: {:ok, map()} | {:error, term()}
   defdelegate job_execution(input, context), to: UseCases.GetJobExecution, as: :call
 
+  @spec remote_job_execution(map(), ExecutionContext.t()) :: {:ok, map()} | {:error, term()}
+  defdelegate remote_job_execution(input, context),
+    to: UseCases.GetRemoteJobExecution,
+    as: :call
+
   @spec pipeline_snapshot(map(), ExecutionContext.t()) :: {:ok, map()} | {:error, term()}
   defdelegate pipeline_snapshot(input, context), to: UseCases.GetPipelineSnapshot, as: :call
 
@@ -75,9 +80,27 @@ defmodule Robine.Pipelines do
           {:ok, Robine.Pipelines.Domain.Attempt.t()} | {:error, term()}
   defdelegate heartbeat_attempt(input, context), to: UseCases.HeartbeatAttempt, as: :call
 
+  @spec heartbeat_runner_attempts(map(), ExecutionContext.t()) ::
+          {:ok, map()} | {:error, term()}
+  defdelegate heartbeat_runner_attempts(input, context),
+    to: UseCases.HeartbeatRunnerAttempts,
+    as: :call
+
+  @spec reconcile_runner_attempts(map(), ExecutionContext.t()) ::
+          {:ok, map()} | {:error, term()}
+  defdelegate reconcile_runner_attempts(input, context),
+    to: UseCases.ReconcileRunnerAttempts,
+    as: :call
+
   @spec reconcile_outbox(map(), ExecutionContext.t()) ::
           {:ok, non_neg_integer()} | {:error, term()}
   defdelegate reconcile_outbox(input, context), to: UseCases.ReconcileOutbox, as: :call
+
+  @spec get_idempotent_pipeline(map(), ExecutionContext.t()) ::
+          {:ok, Contracts.PipelineView.t()} | {:error, term()}
+  defdelegate get_idempotent_pipeline(input, context),
+    to: UseCases.GetIdempotentPipeline,
+    as: :call
 
   @spec workflow_revision(map(), ExecutionContext.t()) ::
           {:ok, Robine.Pipelines.Contracts.WorkflowRevisionView.t()} | {:error, term()}

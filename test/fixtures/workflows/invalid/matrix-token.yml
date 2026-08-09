@@ -1,0 +1,12 @@
+version: 1
+name: Invalid matrix token
+on:
+  push: {}
+jobs:
+  test:
+    strategy:
+      matrix:
+        version: ["3.22"]
+    image: "alpine:${{ matrix.missing }}"
+    steps:
+      - run: "true"

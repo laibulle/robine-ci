@@ -7,9 +7,16 @@
 # General application configuration
 import Config
 
+config :ex_aws,
+  http_client: Robine.Adapters.Storage.ExAwsReqClient,
+  json_codec: Jason
+
 config :robine,
   ecto_repos: [Robine.Repo],
   generators: [timestamp_type: :utc_datetime],
+  blob_store_adapter: Robine.Adapters.Storage.LocalBlobStore,
+  storage_backend_migration_ack: nil,
+  s3_blob_store: nil,
   storage_root: Path.expand("../var/storage", __DIR__),
   storage_max_object_bytes: 1_073_741_824,
   storage_quotas: [instance_bytes: 53_687_091_200, repository_bytes: 10_737_418_240],
@@ -33,6 +40,8 @@ config :robine,
   bootstrap_token_hash: :crypto.hash(:sha256, "development-bootstrap-token"),
   bootstrap_expires_at: ~U[2030-01-01 00:00:00Z],
   github_adapter: Robine.Adapters.SourceControl.GitHubClient,
+  gitlab_source_control: [base_url: nil],
+  forgejo_source_control: [base_url: nil],
   oidc_adapter: Robine.Adapters.Identity.AssentOIDC,
   oidc_config: nil
 
@@ -45,6 +54,8 @@ config :robine, Oban,
      crontab: [
        {"* * * * *", Robine.Adapters.Background.ReconcileLeasesWorker},
        {"* * * * *", Robine.Adapters.Background.ReconcileOutboxWorker},
+       {"* * * * *", Robine.Adapters.Background.ReconcileAutoscalingWorker},
+       {"* * * * *", Robine.Adapters.Background.ReconcileScheduledWorkflowsWorker},
        {"*/5 * * * *", Robine.Adapters.Background.ReconcileGitHubChecksWorker},
        {"*/5 * * * *", Robine.Adapters.Background.ReconcileRunnerResourcesWorker},
        {"17 * * * *", Robine.Adapters.Background.PruneRetentionWorker}
@@ -111,6 +122,7 @@ config :logger, :default_formatter,
     :attempt_id,
     :runner_id,
     :github_event,
+    :provider,
     :actor_id,
     :trigger,
     :outcome,

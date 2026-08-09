@@ -3,7 +3,7 @@ defmodule RobineWeb.RepositoryLiveTest do
   import Phoenix.LiveViewTest
 
   alias Robine.Repositories
-  alias Robine.Adapters.Persistence.Postgres.Schemas.{GitHubRepository, User}
+  alias Robine.Adapters.Persistence.Postgres.Schemas.{GitHubRepository, Job, Pipeline, User}
   alias Robine.Repo
   alias Robine.Runtime.Dependencies
 
@@ -25,6 +25,60 @@ defmodule RobineWeb.RepositoryLiveTest do
 
     @impl true
     def workflow_files(_repository, _sha), do: {:ok, []}
+    @impl true
+    def source_files(_repository, _sha), do: {:ok, []}
+    @impl true
+    def upsert_check(_repository, _check), do: {:ok, 1}
+    @impl true
+    def installation_permissions(_repository), do: {:ok, %{}}
+  end
+
+  defmodule ManualWorkflowGitHub do
+    @behaviour Robine.Repositories.Ports.GitHub
+
+    @sha String.duplicate("c", 40)
+
+    @impl true
+    def available_repositories, do: {:ok, []}
+
+    @impl true
+    def default_branch_head(_repository), do: {:ok, %{branch: "main", sha: @sha}}
+
+    @impl true
+    def workflow_files(_repository, @sha) do
+      {:ok,
+       [
+         %{
+           path: ".robine-ci/workflows/release.yml",
+           content: """
+           version: 1
+           name: Release
+           on:
+             schedule:
+               - cron: "0 2 * * *"
+             workflow_dispatch:
+               inputs:
+                 environment:
+                   description: Deployment target
+                   type: choice
+                   required: true
+                   options: [staging, production]
+                 version:
+                   type: string
+                   required: true
+                 dry_run:
+                   type: boolean
+                   default: true
+           jobs:
+             release:
+               image: alpine:3.22
+               steps:
+                 - run: echo release
+           """
+         }
+       ]}
+    end
+
     @impl true
     def source_files(_repository, _sha), do: {:ok, []}
     @impl true
@@ -74,7 +128,7 @@ defmodule RobineWeb.RepositoryLiveTest do
 
     conn = signed_in_conn(conn)
     assert {:ok, view, html} = live(conn, ~p"/repositories")
-    assert html =~ "No GitHub access has been queried"
+    assert html =~ "No provider access has been queried"
 
     html = view |> element("#discover-github-repositories") |> render_click()
     assert html =~ "acme/discovered"
@@ -135,6 +189,93 @@ defmodule RobineWeb.RepositoryLiveTest do
 
     assert render_hook(show, "check-github-installation", %{}) =~
              "You do not have permission to check GitHub installations."
+
+    assert render_hook(show, "launch-manual-workflow", %{
+             "workflow_path" => ".robine-ci/workflows/release.yml",
+             "request_id" => "forged-viewer-request",
+             "inputs" => %{"environment" => "production", "version" => "1.0.0"}
+           }) =~ "You do not have permission to launch workflows."
+
+    assert Repo.aggregate(Pipeline, :count) == 0
+  end
+
+  test "discovers and launches a manual workflow at the displayed immutable revision", %{
+    conn: conn
+  } do
+    previous_adapter = Application.fetch_env!(:robine, :github_adapter)
+    Application.put_env(:robine, :github_adapter, ManualWorkflowGitHub)
+    on_exit(fn -> Application.put_env(:robine, :github_adapter, previous_adapter) end)
+
+    conn = signed_in_conn(conn)
+    context = Dependencies.context(%{id: "admin", role: :administrator}, "manual-live")
+
+    assert {:ok, repository} =
+             Repositories.register_github_repository(
+               %{provider_id: 90_001, installation_id: 9, full_name: "acme/manual"},
+               context
+             )
+
+    assert {:ok, show, html} = live(conn, ~p"/repositories/#{repository.id}")
+    assert html =~ "No source-control request has been made"
+
+    html = show |> element("#discover-manual-workflows") |> render_click()
+    assert html =~ String.duplicate("c", 40)
+    assert html =~ "Release"
+    assert has_element?(show, "select[name='inputs[environment]']")
+    assert has_element?(show, "input[name='inputs[version]']")
+
+    invalid_html =
+      render_hook(show, "launch-manual-workflow", %{
+        "workflow_path" => ".robine-ci/workflows/release.yml",
+        "request_id" => "invalid-live-input",
+        "inputs" => %{"environment" => "invalid", "version" => "2.4.0"}
+      })
+
+    assert invalid_html =~ "This input is not an allowed choice."
+    assert has_element?(show, "#manual-input-environment-error[role='alert']")
+
+    form_id = "manual-workflow-#{:erlang.phash2(".robine-ci/workflows/release.yml")}"
+
+    show
+    |> form("##{form_id}", %{
+      "inputs" => %{
+        "environment" => "production",
+        "version" => "2.4.0",
+        "dry_run" => "false"
+      }
+    })
+    |> render_submit()
+
+    pipeline = Repo.one!(Pipeline)
+    assert_redirect(show, ~p"/pipelines/#{pipeline.id}")
+    assert pipeline.commit_sha == String.duplicate("c", 40)
+    assert pipeline.trigger == "workflow_dispatch"
+
+    assert pipeline.inputs == %{
+             "environment" => "production",
+             "version" => "2.4.0",
+             "dry_run" => "false"
+           }
+
+    assert {:ok, pipeline_view, pipeline_html} = live(conn, ~p"/pipelines/#{pipeline.id}")
+    assert has_element?(pipeline_view, "#manual-inputs")
+    assert pipeline_html =~ "production"
+    assert pipeline_html =~ "2.4.0"
+
+    job = Repo.one!(Job)
+
+    assert {:ok, job_view, job_html} =
+             live(conn, ~p"/pipelines/#{pipeline.id}/jobs/#{job.id}")
+
+    assert has_element?(job_view, "#manual-inputs")
+    assert job_html =~ "--input &#39;environment=production&#39;"
+    assert job_html =~ "--input &#39;version=2.4.0&#39;"
+
+    assert {:ok, schedule_show, _html} = live(conn, ~p"/repositories/#{repository.id}")
+    schedule_html = schedule_show |> element("#discover-scheduled-workflows") |> render_click()
+    assert schedule_html =~ String.duplicate("c", 40)
+    assert schedule_html =~ "0 2 * * *"
+    assert has_element?(schedule_show, "#schedule-workflow-head")
   end
 
   defp signed_in_conn(conn) do

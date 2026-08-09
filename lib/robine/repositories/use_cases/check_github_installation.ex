@@ -12,7 +12,8 @@ defmodule Robine.Repositories.UseCases.CheckGitHubInstallation do
       })
       when role in [:administrator, :maintainer] and is_binary(repository_id) do
     with {:ok, repository} <- dependencies.repository.get_by_id(repository_id),
-         {:ok, permissions} <- dependencies.github.installation_permissions(repository) do
+         {:ok, permissions} <-
+           dependencies.source_control.installation_permissions(repository) do
       {:ok, GitHubPermissionPolicy.evaluate(permissions)}
     end
   end

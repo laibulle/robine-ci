@@ -22,6 +22,10 @@ defmodule RobineWeb.Router do
     plug :accepts, ["json"]
   end
 
+  pipeline :runner_api do
+    plug :accepts, ["json", "gz"]
+  end
+
   scope "/", RobineWeb do
     pipe_through :browser
 
@@ -64,6 +68,23 @@ defmodule RobineWeb.Router do
   scope "/api/github", RobineWeb do
     pipe_through :api
     post "/webhooks", GitHubWebhookController, :create
+  end
+
+  scope "/api", RobineWeb do
+    pipe_through :api
+    post "/gitlab/webhooks", SourceControlWebhookController, :gitlab
+    post "/forgejo/webhooks", SourceControlWebhookController, :forgejo
+  end
+
+  scope "/api/v1/runners", RobineWeb do
+    pipe_through :runner_api
+    post "/enroll", RunnerEnrollmentController, :create
+    get "/attempts/:attempt_id/source", RunnerAttemptController, :source
+    get "/attempts/:attempt_id/secrets", RunnerAttemptController, :secrets
+    get "/attempts/:attempt_id/cache", RunnerAttemptController, :restore_cache
+    put "/attempts/:attempt_id/cache", RunnerAttemptController, :save_cache
+    get "/attempts/:attempt_id/artifacts", RunnerAttemptController, :download_artifact
+    put "/attempts/:attempt_id/artifacts", RunnerAttemptController, :upload_artifact
   end
 
   scope "/health", RobineWeb do

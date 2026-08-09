@@ -2,7 +2,7 @@ defmodule Robine.Adapters.Execution.DockerRunnerTest do
   use ExUnit.Case, async: false
 
   alias Robine.Adapters.Execution.DockerRunner
-  alias Robine.Execution.Contracts.{Specification, Step}
+  alias Robine.Execution.Contracts.{Service, Specification, Step}
 
   test "translates bounded runner resources to Docker create arguments" do
     assert DockerRunner.resource_limit_args(
@@ -69,7 +69,327 @@ defmodule Robine.Adapters.Execution.DockerRunnerTest do
   end
 
   @tag :docker
-  test "stops after a command failure and returns its output" do
+  test "runs failure and always steps after an ordinary failure and keeps skipped results" do
+    specification = %Specification{
+      version: 1,
+      attempt_id: "docker-conditions-failure-#{System.unique_integer([:positive])}",
+      image: "alpine:3.22",
+      workspace: "/workspace",
+      shell: "/bin/sh",
+      timeout_ms: 20_000,
+      secrets: %{},
+      steps: [
+        %Step{name: "Primary", kind: :run, value: "printf primary; exit 7"},
+        %Step{name: "Success only", kind: :run, value: "echo must-not-run"},
+        %Step{name: "Failure handler", kind: :run, value: "printf handled", condition: :failure},
+        %Step{
+          name: "Cleanup",
+          kind: :run,
+          value: "printf cleanup-failed; exit 11",
+          condition: :always
+        }
+      ]
+    }
+
+    assert {:ok, result} = DockerRunner.run(specification)
+    assert result.status == :failed
+    assert result.reason == :command_failed
+
+    assert [
+             %{name: "Primary", status: :failed, exit_code: 7, output: "primary"},
+             %{name: "Success only", status: :skipped, exit_code: nil},
+             %{name: "Failure handler", status: :succeeded, output: "handled"},
+             %{name: "Cleanup", status: :failed, exit_code: 11, output: "cleanup-failed"}
+           ] = result.steps
+  end
+
+  @tag :docker
+  test "skips failure steps on success and still runs always steps" do
+    specification = %Specification{
+      version: 1,
+      attempt_id: "docker-conditions-success-#{System.unique_integer([:positive])}",
+      image: "alpine:3.22",
+      workspace: "/workspace",
+      shell: "/bin/sh",
+      timeout_ms: 20_000,
+      secrets: %{},
+      steps: [
+        %Step{name: "Primary", kind: :run, value: "printf ok"},
+        %Step{name: "Failure only", kind: :run, value: "echo must-not-run", condition: :failure},
+        %Step{name: "Cleanup", kind: :run, value: "printf cleaned", condition: :always}
+      ]
+    }
+
+    assert {:ok, result} = DockerRunner.run(specification)
+    assert result.status == :succeeded
+
+    assert [
+             %{name: "Primary", status: :succeeded, output: "ok"},
+             %{name: "Failure only", status: :skipped},
+             %{name: "Cleanup", status: :succeeded, output: "cleaned"}
+           ] = result.steps
+  end
+
+  @tag :docker
+  test "treats an ordinary built-in failure as eligible for diagnostic steps" do
+    specification = %Specification{
+      version: 1,
+      attempt_id: "docker-conditions-builtin-#{System.unique_integer([:positive])}",
+      image: "alpine:3.22",
+      workspace: "/workspace",
+      shell: "/bin/sh",
+      timeout_ms: 20_000,
+      secrets: %{},
+      steps: [
+        %Step{
+          name: "Restore",
+          kind: :builtin,
+          value: "cache/restore",
+          with: %{"key" => "fixture", "paths" => ["deps"]}
+        },
+        %Step{name: "Success only", kind: :run, value: "echo must-not-run"},
+        %Step{name: "Diagnose", kind: :run, value: "printf diagnosed", condition: :failure}
+      ]
+    }
+
+    callback = fn
+      %{type: :builtin} -> {:error, :forced_restore_failure}
+      _log_event -> :ok
+    end
+
+    assert {:ok, result} = DockerRunner.run(specification, callback)
+    assert result.status == :failed
+
+    assert [
+             %{name: "Restore", status: :failed},
+             %{name: "Success only", status: :skipped},
+             %{name: "Diagnose", status: :succeeded, output: "diagnosed"}
+           ] = result.steps
+  end
+
+  @tag :docker
+  test "runs a private PostgreSQL service by DNS without host publication or workspace mount" do
+    attempt_id = "docker-service-#{System.unique_integer([:positive])}"
+    secret = "postgres-service-secret"
+
+    service = %Service{
+      id: "postgres",
+      image: "postgres:18-alpine",
+      user: "postgres",
+      env: %{"POSTGRES_USER" => "robine", "POSTGRES_DB" => "app_test"},
+      secret_env: %{"POSTGRES_PASSWORD" => secret},
+      readiness: %{tcp: 5432, timeout_ms: 30_000}
+    }
+
+    specification = %Specification{
+      version: 1,
+      attempt_id: attempt_id,
+      image: "postgres:18-alpine",
+      workspace: "/workspace",
+      shell: "/bin/sh",
+      timeout_ms: 30_000,
+      secrets: %{"TEST_DB_PASSWORD" => secret},
+      services: [service],
+      steps: [
+        %Step{
+          name: "Use PostgreSQL",
+          kind: :run,
+          value:
+            "sleep 2; test ! -S /var/run/docker.sock; getent hosts postgres; PGPASSWORD=\"$TEST_DB_PASSWORD\" psql -h postgres -U robine -d app_test -Atc 'select 42'"
+        }
+      ]
+    }
+
+    owner = self()
+
+    task =
+      Task.async(fn ->
+        DockerRunner.run(specification, fn event ->
+          send(owner, {:service_event, event})
+          :ok
+        end)
+      end)
+
+    resource = docker_resource(attempt_id)
+    service_resource = resource <> "-svc-postgres"
+    wait_for_container!(service_resource)
+
+    {ports, 0} = System.cmd("docker", ["port", service_resource], stderr_to_stdout: true)
+    assert ports == ""
+
+    {mounts_json, 0} =
+      System.cmd(
+        "docker",
+        ["inspect", "--format", "{{json .Mounts}}", service_resource],
+        stderr_to_stdout: true
+      )
+
+    mounts = Jason.decode!(mounts_json)
+    refute Enum.any?(mounts, &(&1["Destination"] == "/workspace"))
+    refute Enum.any?(mounts, &(&1["Source"] == "/var/run/docker.sock"))
+    anonymous_volumes = for %{"Name" => name, "Type" => "volume"} <- mounts, do: name
+
+    assert {:ok, result} = Task.await(task, 40_000)
+    assert result.status == :succeeded, inspect(result)
+    assert [%{output: output}] = result.steps
+    assert output =~ "postgres"
+    assert output =~ "42"
+    refute inspect(result) =~ secret
+
+    assert_received {:service_event,
+                     %{
+                       phase: :service_preparation,
+                       step_name: "Service postgres",
+                       status: :running
+                     }}
+
+    assert_received {:service_event,
+                     %{
+                       phase: :service_preparation,
+                       step_name: "Service postgres",
+                       status: :succeeded
+                     }}
+
+    assert_service_resources_absent(attempt_id, "postgres")
+    assert Enum.all?(anonymous_volumes, &(docker_status(["volume", "inspect", &1]) == 1))
+  end
+
+  @tag :docker
+  test "fails before user steps with a bounded redacted service diagnostic" do
+    attempt_id = "docker-service-failure-#{System.unique_integer([:positive])}"
+    secret = "service-diagnostic-secret"
+
+    service = %Service{
+      id: "broken",
+      image: "alpine:3.22",
+      secret_env: %{"TOKEN" => secret},
+      command: ["/bin/sh", "-c", "printf '%s' \"$TOKEN\"; exit 2"],
+      readiness: %{tcp: 43210, timeout_ms: 2_000}
+    }
+
+    specification = %Specification{
+      version: 1,
+      attempt_id: attempt_id,
+      image: "alpine:3.22",
+      workspace: "/workspace",
+      shell: "/bin/sh",
+      timeout_ms: 10_000,
+      services: [service],
+      steps: [%Step{name: "Never", kind: :run, value: "echo must-not-run"}]
+    }
+
+    assert {:error,
+            {:docker, {:service_unavailable, "broken", {:service_exited, _status}, diagnostic}}} =
+             DockerRunner.run(specification)
+
+    assert diagnostic =~ "[REDACTED]"
+    refute diagnostic =~ secret
+    refute diagnostic =~ "must-not-run"
+    assert byte_size(diagnostic) <= 64_000
+    assert_service_resources_absent(attempt_id, "broken")
+  end
+
+  @tag :docker
+  test "fails a running step when an already-ready service exits" do
+    attempt_id = "docker-service-loss-#{System.unique_integer([:positive])}"
+
+    service = %Service{
+      id: "short_lived",
+      image: "alpine:3.22",
+      command: ["/bin/sh", "-c", "sleep 1; echo service-stopped; exit 3"]
+    }
+
+    specification = %Specification{
+      version: 1,
+      attempt_id: attempt_id,
+      image: "alpine:3.22",
+      workspace: "/workspace",
+      shell: "/bin/sh",
+      timeout_ms: 15_000,
+      services: [service],
+      steps: [
+        %Step{name: "Wait", kind: :run, value: "echo step-started; sleep 10"},
+        %Step{name: "Never", kind: :run, value: "echo must-not-run", condition: :always}
+      ]
+    }
+
+    started = System.monotonic_time(:millisecond)
+    assert {:ok, result} = DockerRunner.run(specification)
+    assert result.status == :failed
+    assert result.reason == :service_unavailable
+    assert [%{name: "Wait", output: output}] = result.steps
+    assert output =~ "Service short_lived became unavailable"
+    assert output =~ "service-stopped"
+    refute output =~ "must-not-run"
+    assert System.monotonic_time(:millisecond) - started < 5_000
+    assert_service_resources_absent(attempt_id, "short_lived")
+  end
+
+  @tag :docker
+  test "cancels a service readiness wait and cleans its network" do
+    attempt_id = "docker-service-cancel-#{System.unique_integer([:positive])}"
+
+    service = %Service{
+      id: "waiting",
+      image: "alpine:3.22",
+      command: ["sleep", "30"],
+      readiness: %{tcp: 43210, timeout_ms: 30_000}
+    }
+
+    specification = %Specification{
+      version: 1,
+      attempt_id: attempt_id,
+      image: "alpine:3.22",
+      workspace: "/workspace",
+      shell: "/bin/sh",
+      timeout_ms: 30_000,
+      services: [service],
+      steps: [%Step{name: "Never", kind: :run, value: "echo must-not-run"}]
+    }
+
+    started = System.monotonic_time(:millisecond)
+    cancel_requested = fn -> System.monotonic_time(:millisecond) - started > 500 end
+
+    assert {:ok, %{status: :cancelled, steps: []}} =
+             DockerRunner.run(specification, fn _event -> :ok end, cancel_requested)
+
+    assert System.monotonic_time(:millisecond) - started < 5_000
+    assert_service_resources_absent(attempt_id, "waiting")
+  end
+
+  @tag :docker
+  test "times out service readiness before any user command" do
+    attempt_id = "docker-service-timeout-#{System.unique_integer([:positive])}"
+
+    service = %Service{
+      id: "silent",
+      image: "alpine:3.22",
+      command: ["sleep", "30"],
+      readiness: %{tcp: 43210, timeout_ms: 1_000}
+    }
+
+    specification = %Specification{
+      version: 1,
+      attempt_id: attempt_id,
+      image: "alpine:3.22",
+      workspace: "/workspace",
+      shell: "/bin/sh",
+      timeout_ms: 10_000,
+      services: [service],
+      steps: [%Step{name: "Never", kind: :run, value: "echo must-not-run"}]
+    }
+
+    assert {:error,
+            {:docker, {:service_unavailable, "silent", {:readiness_timeout, 1_000}, diagnostic}}} =
+             DockerRunner.run(specification)
+
+    refute diagnostic =~ "must-not-run"
+    assert byte_size(diagnostic) <= 64_000
+    assert_service_resources_absent(attempt_id, "silent")
+  end
+
+  @tag :docker
+  test "records default success steps as skipped after a command failure" do
     attempt_id = "docker-failure-#{System.unique_integer([:positive])}"
 
     specification = %Specification{
@@ -90,7 +410,12 @@ defmodule Robine.Adapters.Execution.DockerRunnerTest do
     assert {:ok, result} = DockerRunner.run(specification)
     assert result.status == :failed
     assert result.reason == :command_failed
-    assert [%{name: "Fail", exit_code: 7, output: "broken\n"}] = result.steps
+
+    assert [
+             %{name: "Fail", status: :failed, exit_code: 7, output: "broken\n"},
+             %{name: "Never", status: :skipped, exit_code: nil}
+           ] = result.steps
+
     assert_resources_absent(attempt_id)
   end
 
@@ -482,12 +807,16 @@ defmodule Robine.Adapters.Execution.DockerRunnerTest do
     active_container = "robine-test-active-#{suffix}"
     orphan_volume = orphan_container <> "-volume"
     active_volume = active_container <> "-volume"
+    orphan_network = orphan_container <> "-network"
+    active_network = active_container <> "-network"
 
     on_exit(fn ->
       System.cmd("docker", ["rm", "--force", orphan_container], stderr_to_stdout: true)
       System.cmd("docker", ["rm", "--force", active_container], stderr_to_stdout: true)
       System.cmd("docker", ["volume", "rm", "--force", orphan_volume], stderr_to_stdout: true)
       System.cmd("docker", ["volume", "rm", "--force", active_volume], stderr_to_stdout: true)
+      System.cmd("docker", ["network", "rm", orphan_network], stderr_to_stdout: true)
+      System.cmd("docker", ["network", "rm", active_network], stderr_to_stdout: true)
     end)
 
     docker!([
@@ -515,16 +844,40 @@ defmodule Robine.Adapters.Execution.DockerRunnerTest do
     docker!(["volume", "create", "--label", "io.robine.attempt=#{orphan_attempt}", orphan_volume])
     docker!(["volume", "create", "--label", "io.robine.attempt=#{active_attempt}", active_volume])
 
-    assert {:ok, %{containers_removed: containers, volumes_removed: volumes}} =
+    docker!([
+      "network",
+      "create",
+      "--label",
+      "io.robine.attempt=#{orphan_attempt}",
+      orphan_network
+    ])
+
+    docker!([
+      "network",
+      "create",
+      "--label",
+      "io.robine.attempt=#{active_attempt}",
+      active_network
+    ])
+
+    assert {:ok,
+            %{
+              containers_removed: containers,
+              volumes_removed: volumes,
+              networks_removed: networks
+            }} =
              DockerRunner.reconcile_resources([active_attempt])
 
     assert containers >= 1
     assert volumes >= 1
+    assert networks >= 1
 
     assert docker_status(["container", "inspect", orphan_container]) == 1
     assert docker_status(["volume", "inspect", orphan_volume]) == 1
     assert docker_status(["container", "inspect", active_container]) == 0
     assert docker_status(["volume", "inspect", active_volume]) == 0
+    assert docker_status(["network", "inspect", orphan_network]) == 1
+    assert docker_status(["network", "inspect", active_network]) == 0
   end
 
   @tag :docker
@@ -547,7 +900,7 @@ defmodule Robine.Adapters.Execution.DockerRunnerTest do
       secrets: %{},
       steps: [
         %Step{name: "Long", kind: :run, value: "echo started; sleep 30"},
-        %Step{name: "Never", kind: :run, value: "echo should-not-run"}
+        %Step{name: "Never", kind: :run, value: "echo should-not-run", condition: :always}
       ]
     }
 
@@ -558,6 +911,44 @@ defmodule Robine.Adapters.Execution.DockerRunnerTest do
     assert result.reason == :cancelled
     assert [%{name: "Long", output: output}] = result.steps
     assert output =~ "job cancelled"
+    refute output =~ "should-not-run"
+    assert System.monotonic_time(:millisecond) - started < 5_000
+
+    suffix =
+      :crypto.hash(:sha256, attempt_id) |> Base.encode16(case: :lower) |> binary_part(0, 20)
+
+    assert docker_status(["container", "inspect", "robine-#{suffix}"]) == 1
+  end
+
+  @tag :docker
+  test "times out the full container process tree and skips remaining steps" do
+    previous = Application.fetch_env!(:robine, :runner_cancellation_grace_ms)
+    Application.put_env(:robine, :runner_cancellation_grace_ms, 1_000)
+    on_exit(fn -> Application.put_env(:robine, :runner_cancellation_grace_ms, previous) end)
+
+    attempt_id = "docker-timeout-#{System.unique_integer([:positive])}"
+    started = System.monotonic_time(:millisecond)
+
+    specification = %Specification{
+      version: 1,
+      attempt_id: attempt_id,
+      image: "alpine:3.22",
+      workspace: "/workspace",
+      shell: "/bin/sh",
+      timeout_ms: 500,
+      env: %{},
+      secrets: %{},
+      steps: [
+        %Step{name: "Long", kind: :run, value: "trap '' TERM; sleep 30 & wait"},
+        %Step{name: "Never", kind: :run, value: "echo should-not-run", condition: :always}
+      ]
+    }
+
+    assert {:ok, result} = DockerRunner.run(specification)
+    assert result.status == :failed
+    assert result.reason == :timeout
+    assert [%{name: "Long", status: :timed_out, output: output}] = result.steps
+    assert output =~ "command timed out"
     refute output =~ "should-not-run"
     assert System.monotonic_time(:millisecond) - started < 5_000
 
@@ -594,10 +985,36 @@ defmodule Robine.Adapters.Execution.DockerRunnerTest do
   end
 
   defp assert_resources_absent(attempt_id) do
+    resource = docker_resource(attempt_id)
+    assert docker_status(["container", "inspect", resource]) == 1
+    assert docker_status(["volume", "inspect", resource <> "-workspace"]) == 1
+  end
+
+  defp assert_service_resources_absent(attempt_id, service_id) do
+    resource = docker_resource(attempt_id)
+    assert_resources_absent(attempt_id)
+    assert docker_status(["container", "inspect", "#{resource}-svc-#{service_id}"]) == 1
+    assert docker_status(["network", "inspect", resource <> "-network"]) == 1
+  end
+
+  defp docker_resource(attempt_id) do
     suffix =
       :crypto.hash(:sha256, attempt_id) |> Base.encode16(case: :lower) |> binary_part(0, 20)
 
-    assert docker_status(["container", "inspect", "robine-#{suffix}"]) == 1
-    assert docker_status(["volume", "inspect", "robine-#{suffix}-workspace"]) == 1
+    "robine-#{suffix}"
+  end
+
+  defp wait_for_container!(resource, attempts \\ 100)
+  defp wait_for_container!(resource, 0), do: flunk("container #{resource} did not appear")
+
+  defp wait_for_container!(resource, attempts) do
+    if docker_status(["container", "inspect", resource]) == 0 do
+      :ok
+    else
+      receive do
+      after
+        50 -> wait_for_container!(resource, attempts - 1)
+      end
+    end
   end
 end

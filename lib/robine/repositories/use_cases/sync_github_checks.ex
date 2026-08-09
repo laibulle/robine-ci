@@ -33,16 +33,22 @@ defmodule Robine.Repositories.UseCases.SyncGitHubChecks do
 
   defp sync_one(repository, check, deps) do
     existing =
-      case deps.repository.get_check(check.external_key) do
+      case deps.repository.get_check(
+             repository.provider,
+             repository.provider_instance,
+             check.external_key
+           ) do
         {:ok, value} -> value
         {:error, :not_found} -> nil
       end
 
     request = Map.put(check.request, :provider_check_id, existing && existing.provider_check_id)
 
-    with {:ok, provider_check_id} <- deps.github.upsert_check(repository, request),
+    with {:ok, provider_check_id} <- deps.source_control.upsert_check(repository, request),
          :ok <-
            deps.repository.upsert_check(%{
+             provider: repository.provider,
+             provider_instance: repository.provider_instance,
              external_key: check.external_key,
              repository_id: repository.id,
              pipeline_id: check.pipeline_id,
@@ -65,11 +71,21 @@ defmodule Robine.Repositories.UseCases.SyncGitHubChecks do
           snapshot.commit_sha,
           snapshot.status,
           "#{public_url}/pipelines/#{snapshot.id}",
-          "Pipeline is #{snapshot.status}",
+          pipeline_summary(snapshot),
           "pipeline:#{snapshot.id}"
         )
     }
   end
+
+  defp pipeline_summary(%{trigger: trigger, status: status})
+       when trigger in [:workflow_dispatch, "workflow_dispatch"],
+       do: "Pipeline is #{status}. Trigger: manual workflow dispatch."
+
+  defp pipeline_summary(%{trigger: trigger, status: status, scheduled_for: scheduled_for})
+       when trigger in [:schedule, "schedule"] and not is_nil(scheduled_for),
+       do: "Pipeline is #{status}. Trigger: schedule for #{DateTime.to_iso8601(scheduled_for)}."
+
+  defp pipeline_summary(%{status: status}), do: "Pipeline is #{status}."
 
   defp job_check(snapshot, job, public_url) do
     %{
@@ -82,11 +98,20 @@ defmodule Robine.Repositories.UseCases.SyncGitHubChecks do
           snapshot.commit_sha,
           job.status,
           "#{public_url}/pipelines/#{snapshot.id}/jobs/#{job.id}",
-          "Job is #{job.status}",
+          job_summary(job),
           "job:#{job.id}"
         )
     }
   end
+
+  defp job_summary(%{matrix_values: values, status: status}) when map_size(values) > 0 do
+    matrix =
+      values |> Enum.sort() |> Enum.map_join(", ", fn {axis, value} -> "#{axis}=#{value}" end)
+
+    "Job is #{status}. Matrix: #{matrix}"
+  end
+
+  defp job_summary(job), do: "Job is #{job.status}"
 
   defp request(name, sha, local_status, details_url, summary, external_id) do
     {status, conclusion} = github_state(local_status)
