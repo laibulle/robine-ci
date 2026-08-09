@@ -18,6 +18,17 @@ defmodule RobineWeb.AdminLive.Index do
 
   def handle_event("refresh-health", _params, socket), do: {:noreply, load_health(socket)}
 
+  def handle_event("github-setup-step", %{"step" => step}, socket) do
+    case Integer.parse(step) do
+      {number, ""} when number in 1..4 -> {:noreply, assign(socket, github_setup_step: number)}
+      _invalid -> {:noreply, socket}
+    end
+  end
+
+  def handle_event("verify-github-setup", _params, socket) do
+    {:noreply, socket |> assign(github_setup_step: 4) |> load_health()}
+  end
+
   def handle_event("create-runner-enrollment", _params, socket) do
     case Runners.create_enrollment_token(%{}, socket.assigns.execution_context) do
       {:ok, enrollment} ->
@@ -198,6 +209,7 @@ defmodule RobineWeb.AdminLive.Index do
         retention: retention_projection(),
         runner_enrollment: Map.get(socket.assigns, :runner_enrollment),
         runner_credential: Map.get(socket.assigns, :runner_credential),
+        github_setup_step: Map.get(socket.assigns, :github_setup_step, 1),
         secret_rotation_cursor: Map.get(socket.assigns, :secret_rotation_cursor)
       )
       |> stream(:runners, runners, reset: true)
@@ -213,6 +225,7 @@ defmodule RobineWeb.AdminLive.Index do
           retention: retention_projection(),
           runner_enrollment: Map.get(socket.assigns, :runner_enrollment),
           runner_credential: Map.get(socket.assigns, :runner_credential),
+          github_setup_step: Map.get(socket.assigns, :github_setup_step, 1),
           secret_rotation_cursor: Map.get(socket.assigns, :secret_rotation_cursor)
         )
         |> stream(:runners, [], reset: true)
@@ -223,9 +236,27 @@ defmodule RobineWeb.AdminLive.Index do
 
   defp load_health(socket) do
     case Operations.health(%{}, socket.assigns.execution_context) do
-      {:ok, health} -> assign(socket, health: health)
-      {:error, _reason} -> assign(socket, health: %{status: :not_ready, checks: %{}})
+      {:ok, health} ->
+        assign(socket, health: health, github_setup: github_setup_projection(health))
+
+      {:error, _reason} ->
+        health = %{status: :not_ready, checks: %{}}
+        assign(socket, health: health, github_setup: github_setup_projection(health))
     end
+  end
+
+  defp github_setup_projection(health) do
+    public_url = Application.fetch_env!(:robine, :public_url) |> String.trim_trailing("/")
+    github_health = get_in(health, [:checks, :github_app])
+
+    %{
+      public_url: public_url,
+      webhook_url: public_url <> "/api/github/webhooks",
+      app_id_configured?: Application.get_env(:robine, :github_app_id) not in [nil, ""],
+      healthy?: is_map(github_health) and github_health.status == :ok,
+      health_detail:
+        if(is_map(github_health), do: github_health.detail, else: "Health check unavailable")
+    }
   end
 
   defp store_source_control_credential(socket, name, value, label) do
@@ -547,48 +578,350 @@ defmodule RobineWeb.AdminLive.Index do
             <pre class="mt-3 overflow-x-auto whitespace-pre-wrap break-all rounded-xl bg-base-300 p-3 text-xs"><code>ROBINE_RUNNER_ENROLLMENT_TOKEN='{@runner_enrollment.token}' robine-runner enroll --server '{Application.fetch_env!(:robine, :public_url)}' --name 'RUNNER_NAME' --config /etc/robine-runner/config.json</code></pre>
           </div>
         </section>
-        <section class="rounded-3xl border border-base-300 bg-base-100 p-6">
-          <h2 class="text-xl font-semibold">GitHub App credentials</h2>
-          <p class="mt-1 max-w-3xl text-sm text-base-content/60">
-            Values are encrypted with the instance secret key, are never displayed again, and override environment bootstrap credentials. Configure the non-secret App ID with <code>GITHUB_APP_ID</code>.
-          </p>
-          <div class="mt-6 grid gap-6 lg:grid-cols-2">
-            <form id="github-private-key-form" phx-submit="save-github-private-key" class="space-y-3">
-              <label for="github-private-key" class="font-semibold">Private key (PEM)</label>
-              <textarea
-                id="github-private-key"
-                name="value"
-                required
-                minlength="8"
-                maxlength="65536"
-                autocomplete="off"
-                spellcheck="false"
-                class="textarea textarea-bordered min-h-32 w-full font-mono text-xs"
-              ></textarea>
-              <button class="btn btn-primary btn-sm" phx-disable-with="Encrypting…">
-                Store private key
-              </button>
-            </form>
-            <form
-              id="github-webhook-secret-form"
-              phx-submit="save-github-webhook-secret"
-              class="space-y-3"
+        <section id="github-setup-assistant" class="surface-panel overflow-hidden rounded-3xl">
+          <div class="border-b border-base-300/70 bg-base-200/40 p-6 sm:p-8">
+            <div class="flex flex-wrap items-start justify-between gap-4">
+              <div>
+                <p class="page-eyebrow">Guided integration</p>
+                <h2 class="mt-3 text-2xl font-semibold">Connect GitHub</h2>
+                <p class="mt-2 max-w-2xl text-sm leading-6 text-base-content/55">
+                  Create a least-privilege GitHub App, connect it securely, then choose which repositories Robine may run.
+                </p>
+              </div>
+              <span class={[
+                "badge gap-2 px-3 py-3",
+                @github_setup.healthy? && "badge-success",
+                !@github_setup.healthy? && "badge-warning"
+              ]}>
+                <span class="size-1.5 rounded-full bg-current"></span>
+                {if @github_setup.healthy?, do: "Connected", else: "Setup required"}
+              </span>
+            </div>
+
+            <ol class="mt-7 grid gap-2 sm:grid-cols-4" aria-label="GitHub setup steps">
+              <li :for={
+                {label, number} <-
+                  Enum.with_index(["Create app", "Permissions", "Credentials", "Verify"], 1)
+              }>
+                <button
+                  id={"github-setup-step-#{number}"}
+                  type="button"
+                  phx-click="github-setup-step"
+                  phx-value-step={number}
+                  aria-current={@github_setup_step == number && "step"}
+                  class={[
+                    "flex w-full items-center gap-2 rounded-xl px-3 py-2.5 text-left text-xs font-bold transition",
+                    @github_setup_step == number && "bg-base-content text-base-100 shadow-sm",
+                    @github_setup_step != number &&
+                      "text-base-content/45 hover:bg-base-100 hover:text-base-content"
+                  ]}
+                >
+                  <span class={[
+                    "grid size-6 shrink-0 place-items-center rounded-full border text-[0.65rem]",
+                    @github_setup_step == number && "border-primary bg-primary text-primary-content",
+                    @github_setup_step != number && "border-base-300"
+                  ]}>{number}</span>
+                  {label}
+                </button>
+              </li>
+            </ol>
+          </div>
+
+          <div class="p-6 sm:p-8">
+            <section
+              :if={@github_setup_step == 1}
+              id="github-setup-create"
+              aria-labelledby="github-setup-create-title"
             >
-              <label for="github-webhook-secret" class="font-semibold">Webhook secret</label>
-              <input
-                id="github-webhook-secret"
-                type="password"
-                name="value"
-                required
-                minlength="8"
-                maxlength="65536"
-                autocomplete="new-password"
-                class="input input-bordered w-full"
-              />
-              <button class="btn btn-primary btn-sm" phx-disable-with="Encrypting…">
-                Store webhook secret
-              </button>
-            </form>
+              <div class="grid gap-8 lg:grid-cols-[1fr_0.85fr]">
+                <div>
+                  <p class="text-xs font-bold uppercase tracking-[0.14em] text-primary">
+                    Step 1 of 4
+                  </p>
+                  <h3 id="github-setup-create-title" class="mt-2 text-xl font-semibold">
+                    Create the GitHub App
+                  </h3>
+                  <p class="mt-2 text-sm leading-6 text-base-content/55">
+                    In GitHub, create a new App owned by the organization that contains the repositories you want to connect.
+                  </p>
+                  <a
+                    href="https://github.com/settings/apps/new"
+                    target="_blank"
+                    rel="noreferrer"
+                    class="btn btn-primary mt-6 gap-2"
+                  >
+                    Create GitHub App <.icon name="hero-arrow-up-right" class="size-4" />
+                  </a>
+                </div>
+                <div class="rounded-2xl border border-base-300/70 bg-base-200/45 p-5">
+                  <p class="text-sm font-semibold">Values to enter in GitHub</p>
+                  <div class="mt-4 space-y-4">
+                    <label
+                      class="block text-xs font-semibold text-base-content/55"
+                      for="github-homepage-url"
+                    >Homepage URL</label>
+                    <input
+                      id="github-homepage-url"
+                      value={@github_setup.public_url}
+                      readonly
+                      class="input input-bordered -mt-2 w-full font-mono text-xs"
+                    />
+                    <label
+                      class="block text-xs font-semibold text-base-content/55"
+                      for="github-webhook-url"
+                    >Webhook URL</label>
+                    <input
+                      id="github-webhook-url"
+                      value={@github_setup.webhook_url}
+                      readonly
+                      class="input input-bordered -mt-2 w-full font-mono text-xs"
+                    />
+                    <p class="flex gap-2 text-xs leading-5 text-base-content/45">
+                      <.icon name="hero-information-circle" class="mt-0.5 size-4 shrink-0" />Keep “Active” enabled. You will create the webhook secret in step 3.
+                    </p>
+                  </div>
+                </div>
+              </div>
+              <div class="mt-8 flex justify-end border-t border-base-300/70 pt-5">
+                <button
+                  type="button"
+                  phx-click="github-setup-step"
+                  phx-value-step="2"
+                  class="btn btn-primary gap-2"
+                >Continue to permissions <.icon name="hero-arrow-right" class="size-4" /></button>
+              </div>
+            </section>
+
+            <section
+              :if={@github_setup_step == 2}
+              id="github-setup-permissions"
+              aria-labelledby="github-setup-permissions-title"
+            >
+              <p class="text-xs font-bold uppercase tracking-[0.14em] text-primary">Step 2 of 4</p>
+              <h3 id="github-setup-permissions-title" class="mt-2 text-xl font-semibold">
+                Apply least-privilege access
+              </h3>
+              <p class="mt-2 text-sm leading-6 text-base-content/55">
+                In “Permissions & events”, configure exactly the following values.
+              </p>
+              <div class="mt-6 grid gap-4 lg:grid-cols-2">
+                <div class="rounded-2xl border border-base-300/70 p-5">
+                  <div class="flex items-center gap-3">
+                    <span class="grid size-9 place-items-center rounded-xl bg-primary/10 text-primary"><.icon
+                      name="hero-key"
+                      class="size-4"
+                    /></span><h4 class="font-semibold">Repository permissions</h4>
+                  </div>
+                  <dl class="mt-5 space-y-3 text-sm">
+                    <div class="flex items-center justify-between gap-4">
+                      <dt>Metadata</dt><dd class="badge badge-ghost">Read-only</dd>
+                    </div>
+                    <div class="flex items-center justify-between gap-4">
+                      <dt>Contents</dt><dd class="badge badge-ghost">Read-only</dd>
+                    </div>
+                    <div class="flex items-center justify-between gap-4">
+                      <dt>Checks</dt><dd class="badge badge-primary">Read & write</dd>
+                    </div>
+                  </dl>
+                </div>
+                <div class="rounded-2xl border border-base-300/70 p-5">
+                  <div class="flex items-center gap-3">
+                    <span class="grid size-9 place-items-center rounded-xl bg-primary/10 text-primary"><.icon
+                      name="hero-bell"
+                      class="size-4"
+                    /></span><h4 class="font-semibold">Subscribe to events</h4>
+                  </div>
+                  <ul class="mt-5 space-y-3 text-sm">
+                    <li class="flex items-center gap-2">
+                      <.icon name="hero-check-circle" class="size-4 text-primary" /> Push
+                    </li>
+                    <li class="flex items-center gap-2">
+                      <.icon name="hero-check-circle" class="size-4 text-primary" /> Pull request
+                    </li>
+                  </ul>
+                  <p class="mt-5 text-xs leading-5 text-base-content/45">
+                    No organization or account permissions are required.
+                  </p>
+                </div>
+              </div>
+              <div class="mt-8 flex justify-between border-t border-base-300/70 pt-5">
+                <button
+                  type="button"
+                  phx-click="github-setup-step"
+                  phx-value-step="1"
+                  class="btn btn-ghost"
+                >Back</button>
+                <button
+                  type="button"
+                  phx-click="github-setup-step"
+                  phx-value-step="3"
+                  class="btn btn-primary gap-2"
+                >Continue to credentials <.icon name="hero-arrow-right" class="size-4" /></button>
+              </div>
+            </section>
+
+            <section
+              :if={@github_setup_step == 3}
+              id="github-setup-credentials"
+              aria-labelledby="github-setup-credentials-title"
+            >
+              <p class="text-xs font-bold uppercase tracking-[0.14em] text-primary">Step 3 of 4</p>
+              <h3 id="github-setup-credentials-title" class="mt-2 text-xl font-semibold">
+                Connect the credentials
+              </h3>
+              <p class="mt-2 max-w-3xl text-sm leading-6 text-base-content/55">
+                Create a private key from the App settings and use the same webhook secret in GitHub and below. Both values are encrypted and write-only.
+              </p>
+
+              <div class="mt-6 rounded-2xl border border-base-300/70 bg-base-200/45 p-4">
+                <div class="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <p class="text-sm font-semibold">App ID</p><p class="mt-1 text-xs text-base-content/50">
+                      Set <code>GITHUB_APP_ID</code> in the Robine server environment, then restart.
+                    </p>
+                  </div>
+                  <span class={[
+                    @github_setup.app_id_configured? && "badge badge-success",
+                    !@github_setup.app_id_configured? && "badge badge-warning"
+                  ]}>{if @github_setup.app_id_configured?, do: "Configured", else: "Missing"}</span>
+                </div>
+              </div>
+
+              <div class="mt-5 grid gap-5 lg:grid-cols-2">
+                <form
+                  id="github-private-key-form"
+                  phx-submit="save-github-private-key"
+                  class="rounded-2xl border border-base-300/70 p-5"
+                >
+                  <label for="github-private-key" class="font-semibold">Private key (PEM)</label>
+                  <p class="mt-1 text-xs leading-5 text-base-content/45">
+                    Download a new private key at the bottom of the App settings page, then paste its full contents.
+                  </p>
+                  <textarea
+                    id="github-private-key"
+                    name="value"
+                    required
+                    minlength="8"
+                    maxlength="65536"
+                    autocomplete="off"
+                    spellcheck="false"
+                    placeholder="-----BEGIN RSA PRIVATE KEY-----"
+                    class="textarea textarea-bordered mt-4 min-h-36 w-full font-mono text-xs"
+                  ></textarea>
+                  <button class="btn btn-primary btn-sm mt-3" phx-disable-with="Encrypting…">Store private key</button>
+                </form>
+                <form
+                  id="github-webhook-secret-form"
+                  phx-submit="save-github-webhook-secret"
+                  class="rounded-2xl border border-base-300/70 p-5"
+                >
+                  <label for="github-webhook-secret" class="font-semibold">Webhook secret</label>
+                  <p class="mt-1 text-xs leading-5 text-base-content/45">
+                    Use a unique random value of at least 32 characters and paste that same value into GitHub.
+                  </p>
+                  <input
+                    id="github-webhook-secret"
+                    type="password"
+                    name="value"
+                    required
+                    minlength="8"
+                    maxlength="65536"
+                    autocomplete="new-password"
+                    placeholder="Paste the shared webhook secret"
+                    class="input input-bordered mt-4 w-full"
+                  />
+                  <button class="btn btn-primary btn-sm mt-3" phx-disable-with="Encrypting…">Store webhook secret</button>
+                </form>
+              </div>
+              <div class="mt-8 flex justify-between border-t border-base-300/70 pt-5">
+                <button
+                  type="button"
+                  phx-click="github-setup-step"
+                  phx-value-step="2"
+                  class="btn btn-ghost"
+                >Back</button>
+                <button
+                  id="verify-github-setup"
+                  type="button"
+                  phx-click="verify-github-setup"
+                  class="btn btn-primary gap-2"
+                  phx-disable-with="Checking…"
+                >Verify connection <.icon name="hero-arrow-path" class="size-4" /></button>
+              </div>
+            </section>
+
+            <section
+              :if={@github_setup_step == 4}
+              id="github-setup-verify"
+              aria-labelledby="github-setup-verify-title"
+            >
+              <p class="text-xs font-bold uppercase tracking-[0.14em] text-primary">Step 4 of 4</p>
+              <h3 id="github-setup-verify-title" class="mt-2 text-xl font-semibold">
+                Verify and install
+              </h3>
+              <div
+                class={[
+                  "mt-6 flex gap-4 rounded-2xl border p-5",
+                  @github_setup.healthy? && "border-success/30 bg-success/10",
+                  !@github_setup.healthy? && "border-warning/30 bg-warning/10"
+                ]}
+                role={if @github_setup.healthy?, do: "status", else: "alert"}
+              >
+                <span class={[
+                  "grid size-10 shrink-0 place-items-center rounded-full",
+                  @github_setup.healthy? && "bg-success text-success-content",
+                  !@github_setup.healthy? && "bg-warning text-warning-content"
+                ]}><.icon
+                  name={
+                    if @github_setup.healthy?, do: "hero-check", else: "hero-exclamation-triangle"
+                  }
+                  class="size-5"
+                /></span>
+                <div>
+                  <p class="font-semibold">
+                    {if @github_setup.healthy?,
+                      do: "GitHub App connected",
+                      else: "Connection needs attention"}
+                  </p><p class="mt-1 text-sm leading-6 opacity-70">{@github_setup.health_detail}</p>
+                </div>
+              </div>
+              <div class="mt-6 grid gap-4 sm:grid-cols-2">
+                <a
+                  href="https://github.com/settings/installations"
+                  target="_blank"
+                  rel="noreferrer"
+                  class="group rounded-2xl border border-base-300/70 p-5 transition hover:border-primary/35 hover:bg-primary/5"
+                ><span class="grid size-9 place-items-center rounded-xl bg-base-200 text-primary"><.icon
+                  name="hero-building-library"
+                  class="size-4"
+                /></span><h4 class="mt-4 font-semibold">Install on repositories</h4><p class="mt-1 text-sm leading-6 text-base-content/50">
+                  Choose the organization and grant access only to repositories Robine should run.
+                </p></a>
+                <.link
+                  navigate={~p"/repositories"}
+                  class="group rounded-2xl border border-base-300/70 p-5 transition hover:border-primary/35 hover:bg-primary/5"
+                ><span class="grid size-9 place-items-center rounded-xl bg-base-200 text-primary"><.icon
+                  name="hero-code-bracket-square"
+                  class="size-4"
+                /></span><h4 class="mt-4 font-semibold">Trust repositories in Robine</h4><p class="mt-1 text-sm leading-6 text-base-content/50">
+                  Discover the installation and explicitly enable your first repository.
+                </p></.link>
+              </div>
+              <div class="mt-8 flex justify-between border-t border-base-300/70 pt-5">
+                <button
+                  type="button"
+                  phx-click="github-setup-step"
+                  phx-value-step="3"
+                  class="btn btn-ghost"
+                >Back to credentials</button>
+                <button
+                  type="button"
+                  phx-click="verify-github-setup"
+                  class="btn btn-outline gap-2"
+                  phx-disable-with="Checking…"
+                ><.icon name="hero-arrow-path" class="size-4" /> Check again</button>
+              </div>
+            </section>
           </div>
         </section>
         <section class="rounded-3xl border border-base-300 bg-base-100 p-6">

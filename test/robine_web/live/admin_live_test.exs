@@ -22,13 +22,26 @@ defmodule RobineWeb.AdminLiveTest do
     assert html =~ "GitLab"
     assert html =~ "Forgejo"
     assert html =~ "Retention policy"
-    assert html =~ "GitHub App credentials"
+    assert html =~ "Connect GitHub"
     assert html =~ "GitLab and Forgejo credentials"
     assert html =~ "Remote runner enrollment"
     assert has_element?(view, "#rotate-secret-keys", "Rotate keys")
     assert html =~ "30 days"
     assert html =~ "admin@example.com"
     refute html =~ "test-bootstrap-token"
+
+    assert has_element?(view, "#github-setup-assistant")
+    assert has_element?(view, "#github-setup-create")
+
+    view |> element("#github-setup-step-2") |> render_click()
+    assert has_element?(view, "#github-setup-permissions")
+    assert has_element?(view, "#github-setup-permissions", "Metadata")
+    assert has_element?(view, "#github-setup-permissions", "Pull request")
+
+    view |> element("#github-setup-step-3") |> render_click()
+    assert has_element?(view, "#github-setup-credentials")
+    assert has_element?(view, "#github-private-key-form")
+    assert has_element?(view, "#github-webhook-secret-form")
 
     html =
       view
@@ -51,6 +64,10 @@ defmodule RobineWeb.AdminLiveTest do
     refute rendered =~ credential
     stored = Repo.get_by!(Secret, name: "GITHUB_WEBHOOK_SECRET", scope: :instance)
     refute stored.ciphertext =~ credential
+
+    view |> element("#verify-github-setup") |> render_click()
+    assert has_element?(view, "#github-setup-verify")
+    assert has_element?(view, "a[href='/repositories']", "Trust repositories in Robine")
 
     gitlab_token = "gitlab-encrypted-token"
 

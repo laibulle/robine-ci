@@ -223,6 +223,7 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - [x] Store private keys and webhook secrets as write-only encrypted instance credentials with environment bootstrap fallback.
 - [x] Implement installation token lifecycle and live least-privilege permission diagnostics with exact corrective actions.
 - [x] Expose integration health without leaking payload or credentials.
+- [x] Replace the flat GitHub credential forms with the ordered GitHub App setup assistant defined by GH-001 UX-4 and UX-5.
 
 ### GH-102 — Implement webhook ingestion
 

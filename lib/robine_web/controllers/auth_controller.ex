@@ -6,7 +6,7 @@ defmodule RobineWeb.AuthController do
   alias RobineWeb.LoginRateLimiter
 
   def new(conn, _params), do: render_sign_in(conn)
-  def bootstrap(conn, _params), do: render(conn, :bootstrap)
+  def bootstrap(conn, _params), do: render_bootstrap(conn)
 
   def create(conn, %{"email" => email, "password" => password}) do
     if LoginRateLimiter.allowed?({conn.remote_ip, :local_login}) do
@@ -101,12 +101,12 @@ defmodule RobineWeb.AuthController do
            context(conn)
          ) do
       {:ok, _user} -> create(conn, %{"email" => email, "password" => password})
-      {:error, reason} -> conn |> put_flash(:error, bootstrap_error(reason)) |> render(:bootstrap)
+      {:error, reason} -> conn |> put_flash(:error, bootstrap_error(reason)) |> render_bootstrap()
     end
   end
 
   def create_bootstrap(conn, _params),
-    do: conn |> put_flash(:error, "All fields are required.") |> render(:bootstrap)
+    do: conn |> put_flash(:error, "All fields are required.") |> render_bootstrap()
 
   def delete(conn, _params) do
     if token = get_session(conn, :session_token) do
@@ -148,6 +148,17 @@ defmodule RobineWeb.AuthController do
       oidc_enabled: oidc_enabled?(),
       form: Phoenix.Component.to_form(%{"email" => "", "password" => ""})
     )
+  end
+
+  defp render_bootstrap(conn) do
+    defaults =
+      Application.get_env(:robine, :dev_setup_form_defaults, %{
+        "token" => "",
+        "email" => "",
+        "password" => ""
+      })
+
+    render(conn, :bootstrap, form: Phoenix.Component.to_form(defaults))
   end
 
   defp identity_event(event, metadata) do

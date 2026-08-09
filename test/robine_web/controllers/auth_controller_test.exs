@@ -22,6 +22,41 @@ defmodule RobineWeb.AuthControllerTest do
              "Create the administrator"
   end
 
+  test "prefills setup from environment-specific form defaults", %{conn: conn} do
+    previous = Application.get_env(:robine, :dev_setup_form_defaults)
+
+    Application.put_env(:robine, :dev_setup_form_defaults, %{
+      "token" => "local-token",
+      "email" => "admin@local.test",
+      "password" => "local-password"
+    })
+
+    on_exit(fn ->
+      if is_nil(previous),
+        do: Application.delete_env(:robine, :dev_setup_form_defaults),
+        else: Application.put_env(:robine, :dev_setup_form_defaults, previous)
+    end)
+
+    document = conn |> get(~p"/setup") |> html_response(200) |> LazyHTML.from_fragment()
+
+    assert LazyHTML.attribute(
+             LazyHTML.query(document, "#setup-form input[name='token']"),
+             "value"
+           ) ==
+             ["local-token"]
+
+    assert LazyHTML.attribute(
+             LazyHTML.query(document, "#setup-form input[name='email']"),
+             "value"
+           ) ==
+             ["admin@local.test"]
+
+    assert LazyHTML.attribute(
+             LazyHTML.query(document, "#setup-form input[name='password']"),
+             "value"
+           ) == ["local-password"]
+  end
+
   test "bootstraps, signs in with a renewed session, and signs out", %{conn: conn} do
     conn =
       post(conn, ~p"/setup", %{

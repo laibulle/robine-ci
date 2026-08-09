@@ -4,7 +4,13 @@ import Config
 # continues to require ROBINE_BOOTSTRAP_TOKEN at runtime.
 config :robine,
   bootstrap_token_hash: :crypto.hash(:sha256, "dev-bootstrap-token"),
-  bootstrap_expires_at: ~U[2100-01-01 00:00:00Z]
+  bootstrap_expires_at: ~U[2100-01-01 00:00:00Z],
+  github_app_id: "4536638",
+  dev_setup_form_defaults: %{
+    "token" => "dev-bootstrap-token",
+    "email" => "admin@robine.local",
+    "password" => "password1234"
+  }
 
 # Fixed development-only key. Runtime environment keys still override this value.
 config :robine, :secret_keyring,

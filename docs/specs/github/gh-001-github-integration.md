@@ -63,6 +63,8 @@ A repository administrator installing the Robine GitHub App and contributors rea
 - **UX-1:** Setup MUST show missing permissions and the exact corrective action.
 - **UX-2:** Repository pages MUST display last webhook time and integration health without exposing payload secrets.
 - **UX-3:** GitHub check summaries MUST identify the failed job and step and link directly to its logs.
+- **UX-4:** Instance administration MUST provide a resumable, ordered GitHub App assistant covering app creation, least-privilege permissions and events, write-only credentials, connection verification, and repository installation.
+- **UX-5:** The assistant MUST provide copyable instance-specific URLs and MUST distinguish actions performed in GitHub from actions performed in Robine.
 
 ### Operational requirements
 
@@ -72,7 +74,7 @@ A repository administrator installing the Robine GitHub App and contributors rea
 
 ## Proposed design
 
-The installation wizard asks the operator for the public callback URL and produces exact manual GitHub App setup instructions. The App ID remains non-secret configuration. Administrators store the private key and webhook secret as write-only instance credentials encrypted by the shared versioned AES-256-GCM secret subsystem; environment values remain bootstrap and break-glass fallbacks. Webhook ingestion stores delivery metadata and a minimal payload, then schedules event normalization. Normalized events select workflow revisions and create pipelines transactionally.
+The installation wizard presents four ordered steps: create the GitHub App with instance-specific URLs, apply the exact repository permissions and subscribed events, configure the non-secret App ID plus write-only credentials, then verify health and install the App on selected repositories. Progress is session-local and every step remains directly revisitable. The App ID remains non-secret configuration. Administrators store the private key and webhook secret as write-only instance credentials encrypted by the shared versioned AES-256-GCM secret subsystem; environment values remain bootstrap and break-glass fallbacks. Webhook ingestion stores delivery metadata and a minimal payload, then schedules event normalization. Normalized events select workflow revisions and create pipelines transactionally.
 
 Installation access-token responses supply the effective permission projection cached with the token expiry. Repository operators can run a live preflight against the accepted least-privilege policy: Metadata read, Contents read, and Checks write. Every mismatch includes its current value and the exact GitHub App permission update and installation-approval action.
 
@@ -105,6 +107,7 @@ Every GitHub API and installation-token request emits bounded latency and outcom
 - [x] A failed job appears as a failed GitHub check with a deep link to logs.
 - [x] A temporary GitHub API failure does not stop local execution and is reconciled later.
 - [x] A fork pull request receives no secret-bearing execution by default.
+- [x] An administrator can follow one ordered assistant from GitHub App creation through connection verification without deriving URLs, permissions, or event subscriptions from external Robine documentation.
 
 ## Open questions
 
