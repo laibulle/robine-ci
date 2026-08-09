@@ -69,7 +69,7 @@ Start Phoenix:
 mix phx.server
 ```
 
-Open [http://localhost:4000](http://localhost:4004).
+Open [http://localhost:4004](http://localhost:4004).
 
 For development, visit `/setup` and use `development-bootstrap-token` unless `ROBINE_BOOTSTRAP_TOKEN` was provided. Production requires a fresh token at startup; it expires after 15 minutes and cannot be reused after the first account is created.
 

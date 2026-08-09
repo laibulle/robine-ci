@@ -128,7 +128,7 @@ case {System.get_env("OIDC_ISSUER"), System.get_env("OIDC_CLIENT_ID"),
       System.get_env("OIDC_CLIENT_SECRET")} do
   {issuer, client_id, client_secret}
   when is_binary(issuer) and is_binary(client_id) and is_binary(client_secret) ->
-    public_url = System.get_env("ROBINE_PUBLIC_URL", "http://localhost:4000")
+    public_url = System.get_env("ROBINE_PUBLIC_URL", "http://localhost:4004")
 
     config :robine,
       public_url: public_url,
