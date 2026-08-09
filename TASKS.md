@@ -220,8 +220,8 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - **Spec:** [GH-001](docs/specs/github/gh-001-github-integration.md)
 - **Depends on:** DEC-004, SEC-101
 - [x] Implement manifest-assisted setup or exact manual instructions.
-- [ ] Store private keys and webhook secrets encrypted. (MVP credentials are supplied out-of-band through environment variables and never persisted; encrypted UI-managed credentials remain.)
-- [ ] Implement installation token lifecycle and least-privilege permission diagnostics. (JWT exchange, expiration-aware caching, and documented least-privilege permissions exist; live permission diagnostics remain.)
+- [x] Store private keys and webhook secrets as write-only encrypted instance credentials with environment bootstrap fallback.
+- [x] Implement installation token lifecycle and live least-privilege permission diagnostics with exact corrective actions.
 - [x] Expose integration health without leaking payload or credentials.
 
 ### GH-102 — Implement webhook ingestion
@@ -243,7 +243,7 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - [x] Deliver updates idempotently through the outbox using stable external keys and persisted provider IDs.
 - [x] Retry with bounded exponential backoff and jitter.
 - [x] Reconcile stale or missing checks after GitHub outages.
-- [ ] Monitor API errors and rate limits.
+- [x] Monitor sanitized GitHub API outcomes, latency, and rate-limit state in telemetry and operator health.
 
 ## Phase 6 — CLI developer experience
 
@@ -252,7 +252,7 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - **Spec:** [CLI-001](docs/specs/cli/cli-001-local-developer-experience.md)
 - **Depends on:** BOOT-001
 - [x] Choose a cross-platform packaging strategy and supported platforms. (Elixir escript for the MVP; requires a compatible Erlang runtime.)
-- [ ] Implement version reporting, checksums, verification instructions, stable exit-code classes, and non-interactive output. (Version, documented exit classes in code, and non-interactive execution exist; release checksums and verification docs remain.)
+- [x] Implement version reporting, deterministic SHA-256 manifests, cross-platform verification instructions, stable exit-code classes, and non-interactive output.
 - [x] Ensure the CLI does not transmit repository data or telemetry by default.
 
 ### CLI-102 — Implement init and validation

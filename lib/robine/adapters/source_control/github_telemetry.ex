@@ -11,6 +11,12 @@ defmodule Robine.Adapters.SourceControl.GitHubTelemetry do
       %{method: method, outcome: outcome, status: status}
     )
 
+    Robine.Adapters.SourceControl.GitHubApiMonitor.record(measurements, %{
+      method: method,
+      outcome: outcome,
+      status: status
+    })
+
     :ok
   end
 

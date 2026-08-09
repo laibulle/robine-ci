@@ -28,7 +28,12 @@ defmodule Robine.MixProject do
 
   def cli do
     [
-      preferred_envs: [precommit: :test, verify: :test]
+      preferred_envs: [
+        precommit: :test,
+        verify: :test,
+        "robine.release": :cli,
+        "robine.verify_checksums": :cli
+      ]
     ]
   end
 

@@ -1,5 +1,5 @@
 defmodule Robine.Adapters.SourceControl.GitHubTelemetryTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Robine.Adapters.SourceControl.GitHubTelemetry
 
@@ -37,5 +37,12 @@ defmodule Robine.Adapters.SourceControl.GitHubTelemetryTest do
     assert measurements.rate_limit_limit == 5000
     assert metadata == %{method: :get, outcome: :http_error, status: 403}
     refute inspect({measurements, metadata}) =~ "fixture-sensitive-body"
+
+    assert %{
+             outcome: :http_error,
+             status: 403,
+             rate_limit_remaining: 0,
+             rate_limit_limit: 5000
+           } = Robine.Adapters.SourceControl.GitHubApiMonitor.snapshot()
   end
 end

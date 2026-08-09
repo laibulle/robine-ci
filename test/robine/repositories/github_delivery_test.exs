@@ -82,6 +82,17 @@ defmodule Robine.Repositories.GitHubDeliveryTest do
     assert Repo.get!(GitHubDelivery, delivery_id).status == :processed
   end
 
+  test "checks installation permissions through the public facade" do
+    context = context_with_fake_github()
+    repository = register(context, 43_434_343)
+
+    assert {:ok, %{status: :ok, missing: []}} =
+             Repositories.check_github_installation(
+               %{repository_id: repository.id},
+               context
+             )
+  end
+
   test "ignores fork pull requests without fetching or creating a pipeline" do
     context = context_with_fake_github()
     provider_id = 52_525_252

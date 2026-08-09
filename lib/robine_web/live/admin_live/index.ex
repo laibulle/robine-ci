@@ -219,7 +219,7 @@ defmodule RobineWeb.AdminLive.Index do
         <section class="rounded-3xl border border-base-300 bg-base-100 p-6">
           <h2 class="text-xl font-semibold">GitHub App credentials</h2>
           <p class="mt-1 max-w-3xl text-sm text-base-content/60">
-            Values are encrypted with the instance secret key, are never displayed again, and override environment bootstrap credentials. Configure the non-secret App ID with <code>ROBINE_GITHUB_APP_ID</code>.
+            Values are encrypted with the instance secret key, are never displayed again, and override environment bootstrap credentials. Configure the non-secret App ID with <code>GITHUB_APP_ID</code>.
           </p>
           <div class="mt-6 grid gap-6 lg:grid-cols-2">
             <form id="github-private-key-form" phx-submit="save-github-private-key" class="space-y-3">

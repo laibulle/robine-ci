@@ -2,10 +2,10 @@
 
 ## Status
 
-- **State:** Draft
+- **State:** Accepted
 - **Owner:** Developer Experience
 - **Target:** MVP
-- **Last updated:** 2026-08-08
+- **Last updated:** 2026-08-09
 
 ## Summary
 
@@ -81,6 +81,8 @@ robine version
 
 The initial detectors target Elixir/Mix, Node package managers, and a generic fallback. Generated files use immutable image references when practical and include comments explaining mutable tags if a digest cannot be selected safely.
 
+The MVP is packaged as a versioned escript for Linux, macOS, and Windows hosts with a compatible Erlang/OTP runtime. `mix robine.release` produces the executable and a deterministic, atomically written `SHA256SUMS`; the release documentation provides native verification commands for every supported host. Exit codes are stable classes: 0 success, 2 configuration or selection, 3 prerequisite or infrastructure, 4 protected mutation, 5 job failure, and 64 command-line usage.
+
 Local secrets are opt-in and never downloaded automatically from the server. A developer may provide an ignored local environment file through an explicit flag; the CLI warns if Git tracks that file.
 
 ## Failure modes and recovery
@@ -110,10 +112,8 @@ Local debug logs contain version, platform, normalized non-secret configuration,
 
 ## Open questions
 
-- Choose CLI distribution formats and whether it is implemented as an Elixir escript, Burrito release, or another packaging strategy.
-- Define exact behavior for running a single later step when prior filesystem state is absent.
+None blocking for the MVP. A selected later step runs only after the local planner has included the state-building steps required by its job; unsupported selection is reported rather than silently approximated.
 
 ## Out of scope / future work
 
 - Remote control-plane administration, remote execution, editor extensions, and automatic secret synchronization.
-

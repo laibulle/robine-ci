@@ -2,7 +2,7 @@
 
 ## Status
 
-- **State:** Draft
+- **State:** Accepted
 - **Owner:** Integrations
 - **Target:** MVP
 - **Last updated:** 2026-08-09
@@ -72,7 +72,9 @@ A repository administrator installing the Robine GitHub App and contributors rea
 
 ## Proposed design
 
-The installation wizard asks the operator for the public callback URL and produces a manifest-based GitHub App setup when supported. App credentials are encrypted. Webhook ingestion stores delivery metadata and a minimal payload, then schedules event normalization. Normalized events select workflow revisions and create pipelines transactionally.
+The installation wizard asks the operator for the public callback URL and produces exact manual GitHub App setup instructions. The App ID remains non-secret configuration. Administrators store the private key and webhook secret as write-only instance credentials encrypted by the shared versioned AES-256-GCM secret subsystem; environment values remain bootstrap and break-glass fallbacks. Webhook ingestion stores delivery metadata and a minimal payload, then schedules event normalization. Normalized events select workflow revisions and create pipelines transactionally.
+
+Installation access-token responses supply the effective permission projection cached with the token expiry. Repository operators can run a live preflight against the accepted least-privilege policy: Metadata read, Contents read, and Checks write. Every mismatch includes its current value and the exact GitHub App permission update and installation-approval action.
 
 Checks are projections of Robine state rather than the source of truth. Delivery failures never roll back local pipeline state. A reconciliation job repairs stale or missing checks.
 
@@ -92,7 +94,7 @@ The app requests only metadata/content read access and checks write access requi
 
 ## Observability
 
-Metrics include webhook verification failures, acknowledgement latency, processing latency, duplicate rate, GitHub API latency/errors, rate-limit remaining, and check reconciliation count.
+Every GitHub API and installation-token request emits bounded latency and outcome dimensions plus rate-limit remaining, limit, and reset values when GitHub supplies them. No URL, repository name, response body, credential, or payload becomes telemetry metadata. The latest sanitized result is retained in process memory and exposed through administrator integration health; exhaustion or API errors degrade the check. The broader metrics catalogue also includes webhook verification failures, acknowledgement latency, processing latency, duplicate rate, and check reconciliation count.
 
 ## Acceptance criteria
 
@@ -104,9 +106,7 @@ Metrics include webhook verification failures, acknowledgement latency, processi
 
 ## Open questions
 
-- Validate the exact GitHub App permission set during implementation.
-- Decide whether draft pull requests run by default.
-- Confirm GitHub Enterprise Server support target.
+None blocking for the MVP. Draft pull requests are ignored until `ready_for_review`; GitHub.com is the supported MVP target.
 
 ## Out of scope / future work
 

@@ -16,6 +16,7 @@ defmodule Robine.Application do
       {DNSCluster, query: Application.get_env(:robine, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: Robine.PubSub},
       RobineWeb.LoginRateLimiter,
+      Robine.Adapters.SourceControl.GitHubApiMonitor,
       Robine.Adapters.SourceControl.GitHubAppTokenCache,
       # Start a worker by calling: Robine.Worker.start_link(arg)
       # {Robine.Worker, arg},

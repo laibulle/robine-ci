@@ -128,16 +128,47 @@ defmodule Robine.Adapters.System.SystemHealth do
 
   defp github_app do
     app_id = Application.get_env(:robine, :github_app_id)
+    rate_limit = Robine.Adapters.SourceControl.GitHubApiMonitor.snapshot()
 
     with true <- is_binary(app_id) and app_id != "",
          {:ok, _private_key} <-
            Robine.Adapters.SourceControl.GitHubCredentials.fetch(:private_key),
          {:ok, _webhook_secret} <-
            Robine.Adapters.SourceControl.GitHubCredentials.fetch(:webhook_secret) do
-      %{status: :ok, detail: "Encrypted or bootstrap credentials configured"}
+      github_health(:ok, "Encrypted or bootstrap credentials configured", rate_limit)
     else
-      _reason -> %{status: :degraded, detail: "GitHub App credentials incomplete"}
+      _reason -> github_health(:degraded, "GitHub App credentials incomplete", rate_limit)
     end
+  end
+
+  defp github_health(status, detail, :not_observed) do
+    %{status: status, detail: detail <> "; no GitHub API request observed", rate_limit: nil}
+  end
+
+  defp github_health(status, detail, rate_limit) do
+    rate_detail =
+      case {rate_limit.rate_limit_remaining, rate_limit.rate_limit_limit} do
+        {remaining, limit} when is_integer(remaining) and is_integer(limit) ->
+          "; API rate limit #{remaining}/#{limit} remaining"
+
+        _unknown ->
+          "; API rate limit headers unavailable"
+      end
+
+    api_unhealthy =
+      rate_limit.outcome == :transport_error or rate_limit.status in [401, 403, 429] or
+        (is_integer(rate_limit.status) and rate_limit.status >= 500)
+
+    effective_status =
+      if api_unhealthy or rate_limit.rate_limit_remaining == 0,
+        do: :degraded,
+        else: status
+
+    %{
+      status: effective_status,
+      detail: detail <> rate_detail,
+      rate_limit: rate_limit
+    }
   end
 
   defp optional_configuration(key) do

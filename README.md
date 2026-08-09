@@ -104,7 +104,7 @@ export GITHUB_APP_PRIVATE_KEY="$(cat /secure/path/robine-app.pem)"
 export GITHUB_WEBHOOK_SECRET="..."
 ```
 
-The private key and webhook secret stay outside PostgreSQL. Installation access tokens are short-lived and cached only until shortly before GitHub expires them.
+`GITHUB_APP_PRIVATE_KEY` and `GITHUB_WEBHOOK_SECRET` are bootstrap and break-glass inputs. After the first administrator signs in, the Administration page can store replacements encrypted in PostgreSQL with the versioned instance AES-256-GCM key; encrypted values take precedence and are never displayed again. `GITHUB_APP_ID` remains non-secret configuration. Installation access tokens and their granted-permission projection are cached only until shortly before GitHub expires them.
 
 ## OpenID Connect
 
@@ -119,6 +119,8 @@ export OIDC_CLIENT_SECRET="..."
 OIDC uses Authorization Code with PKCE, state, nonce, issuer/audience/signature validation, and provider JWKS. New identities require a provider-verified email and start as viewers. Email collisions never auto-link accounts; local administrator sign-in remains available for recovery.
 
 ## Verification
+
+CLI release bundles include `SHA256SUMS`. Build, platform verification, installation, and stable exit-code instructions are documented in [Install and verify the Robine CLI](docs/cli-installation.md).
 
 With PostgreSQL running:
 

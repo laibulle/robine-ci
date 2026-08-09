@@ -35,3 +35,5 @@ robine-*.tar
 npm-debug.log
 /assets/node_modules/
 /var/
+/dist/
+/robine
