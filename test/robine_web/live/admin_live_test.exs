@@ -36,6 +36,7 @@ defmodule RobineWeb.AdminLiveTest do
     view |> element("#github-setup-step-2") |> render_click()
     assert has_element?(view, "#github-setup-permissions")
     assert has_element?(view, "#github-setup-permissions", "Metadata")
+    assert has_element?(view, "#github-setup-permissions", "Pull requests")
     assert has_element?(view, "#github-setup-permissions", "Pull request")
 
     view |> element("#github-setup-step-3") |> render_click()
@@ -105,13 +106,24 @@ defmodule RobineWeb.AdminLiveTest do
   end
 
   test "prefills the GitHub private key from development-only configuration", %{conn: conn} do
-    previous = Application.get_env(:robine, :dev_github_private_key_form_default)
+    previous_key = Application.get_env(:robine, :dev_github_private_key_form_default)
+    previous_webhook = Application.get_env(:robine, :dev_github_webhook_secret_form_default)
     Application.put_env(:robine, :dev_github_private_key_form_default, "development-private-key")
+    Application.put_env(:robine, :dev_github_webhook_secret_form_default, "development-webhook")
 
     on_exit(fn ->
-      if is_nil(previous),
+      if is_nil(previous_key),
         do: Application.delete_env(:robine, :dev_github_private_key_form_default),
-        else: Application.put_env(:robine, :dev_github_private_key_form_default, previous)
+        else: Application.put_env(:robine, :dev_github_private_key_form_default, previous_key)
+
+      if is_nil(previous_webhook),
+        do: Application.delete_env(:robine, :dev_github_webhook_secret_form_default),
+        else:
+          Application.put_env(
+            :robine,
+            :dev_github_webhook_secret_form_default,
+            previous_webhook
+          )
     end)
 
     assert {:ok, view, _html} = conn |> signed_in_conn() |> live(~p"/admin")
@@ -122,6 +134,9 @@ defmodule RobineWeb.AdminLiveTest do
     assert document
            |> LazyHTML.query("#github-private-key")
            |> LazyHTML.text() == "development-private-key"
+
+    assert LazyHTML.attribute(LazyHTML.query(document, "#github-webhook-secret"), "value") ==
+             ["development-webhook"]
   end
 
   test "administers an enrolled runner from the fleet view", %{conn: conn} do

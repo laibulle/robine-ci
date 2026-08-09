@@ -253,6 +253,8 @@ defmodule RobineWeb.AdminLive.Index do
       public_url: public_url,
       webhook_url: public_url <> "/api/github/webhooks",
       private_key_default: Application.get_env(:robine, :dev_github_private_key_form_default, ""),
+      webhook_secret_default:
+        Application.get_env(:robine, :dev_github_webhook_secret_form_default, ""),
       app_id_configured?: Application.get_env(:robine, :github_app_id) not in [nil, ""],
       healthy?: is_map(github_health) and github_health.status == :ok,
       health_detail:
@@ -721,6 +723,9 @@ defmodule RobineWeb.AdminLive.Index do
                       <dt>Contents</dt><dd class="badge badge-ghost">Read-only</dd>
                     </div>
                     <div class="flex items-center justify-between gap-4">
+                      <dt>Pull requests</dt><dd class="badge badge-ghost">Read-only</dd>
+                    </div>
+                    <div class="flex items-center justify-between gap-4">
                       <dt>Checks</dt><dd class="badge badge-primary">Read & write</dd>
                     </div>
                   </dl>
@@ -824,6 +829,7 @@ defmodule RobineWeb.AdminLive.Index do
                     id="github-webhook-secret"
                     type="password"
                     name="value"
+                    value={@github_setup.webhook_secret_default}
                     required
                     minlength="8"
                     maxlength="65536"

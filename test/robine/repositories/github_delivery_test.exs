@@ -84,7 +84,14 @@ defmodule Robine.Repositories.GitHubDeliveryTest do
 
     @impl true
     def installation_permissions(_repository),
-      do: {:ok, %{"metadata" => "read", "contents" => "read", "checks" => "write"}}
+      do:
+        {:ok,
+         %{
+           "metadata" => "read",
+           "contents" => "read",
+           "pull_requests" => "read",
+           "checks" => "write"
+         }}
   end
 
   defmodule ReusableGitHub do

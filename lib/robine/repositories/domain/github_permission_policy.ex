@@ -1,7 +1,12 @@
 defmodule Robine.Repositories.Domain.GitHubPermissionPolicy do
   @moduledoc "Evaluates the least-privilege GitHub App installation contract."
 
-  @required %{"metadata" => "read", "contents" => "read", "checks" => "write"}
+  @required %{
+    "metadata" => "read",
+    "contents" => "read",
+    "pull_requests" => "read",
+    "checks" => "write"
+  }
 
   @spec evaluate(map()) :: map()
   def evaluate(permissions) when is_map(permissions) do

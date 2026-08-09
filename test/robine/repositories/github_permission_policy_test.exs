@@ -8,6 +8,7 @@ defmodule Robine.Repositories.GitHubPermissionPolicyTest do
              GitHubPermissionPolicy.evaluate(%{
                "metadata" => "read",
                "contents" => "read",
+               "pull_requests" => "read",
                "checks" => "write"
              })
   end
@@ -17,10 +18,11 @@ defmodule Robine.Repositories.GitHubPermissionPolicyTest do
              GitHubPermissionPolicy.evaluate(%{
                "metadata" => "read",
                "contents" => "none",
+               "pull_requests" => "none",
                "checks" => "read"
              })
 
-    assert Enum.map(missing, & &1.permission) == ["checks", "contents"]
+    assert Enum.map(missing, & &1.permission) == ["checks", "contents", "pull_requests"]
     assert Enum.all?(missing, &(&1.corrective_action =~ "approve the installation"))
     assert Enum.find(missing, &(&1.permission == "checks")).required == "write"
   end
