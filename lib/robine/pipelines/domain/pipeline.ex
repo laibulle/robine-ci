@@ -3,8 +3,28 @@ defmodule Robine.Pipelines.Domain.Pipeline do
 
   @statuses [:created, :queued, :running, :cancelling, :succeeded, :failed, :cancelled, :invalid]
 
-  @enforce_keys [:id, :repository_id, :workflow_name, :commit_sha, :status, :inserted_at]
-  defstruct [:id, :repository_id, :workflow_name, :commit_sha, :status, :inserted_at]
+  @enforce_keys [
+    :id,
+    :repository_id,
+    :workflow_name,
+    :commit_sha,
+    :trigger,
+    :actor,
+    :status,
+    :inserted_at
+  ]
+  defstruct [
+    :id,
+    :repository_id,
+    :workflow_name,
+    :commit_sha,
+    :trigger,
+    :actor,
+    :status,
+    :inserted_at,
+    :started_at,
+    :finished_at
+  ]
 
   @type status ::
           :created
@@ -21,8 +41,12 @@ defmodule Robine.Pipelines.Domain.Pipeline do
           repository_id: String.t(),
           workflow_name: String.t(),
           commit_sha: String.t(),
+          trigger: String.t(),
+          actor: String.t(),
           status: status(),
-          inserted_at: DateTime.t()
+          inserted_at: DateTime.t(),
+          started_at: DateTime.t() | nil,
+          finished_at: DateTime.t() | nil
         }
 
   @spec create(map(), String.t(), DateTime.t()) :: {:ok, t()} | {:error, term()}
@@ -36,8 +60,12 @@ defmodule Robine.Pipelines.Domain.Pipeline do
          repository_id: repository_id,
          workflow_name: workflow_name,
          commit_sha: commit_sha,
+         trigger: optional_label(input, :trigger, "manual"),
+         actor: optional_label(input, :actor, "system"),
          status: :created,
-         inserted_at: DateTime.truncate(now, :microsecond)
+         inserted_at: DateTime.truncate(now, :microsecond),
+         started_at: nil,
+         finished_at: nil
        }}
     end
   end
@@ -46,50 +74,57 @@ defmodule Robine.Pipelines.Domain.Pipeline do
   def statuses, do: @statuses
 
   @spec transition(t(), status()) :: {:ok, t()} | {:error, term()}
-  def transition(%__MODULE__{status: current} = pipeline, target) do
+  def transition(%__MODULE__{status: current} = pipeline, target, now \\ nil) do
     if allowed_transition?(current, target) do
-      {:ok, %{pipeline | status: target}}
+      {:ok, apply_timing(%{pipeline | status: target}, target, now)}
     else
       {:error, {:invalid_transition, :pipeline, current, target}}
     end
   end
 
   @spec request_cancellation(t()) :: {:ok, t()} | {:error, term()}
-  def request_cancellation(%__MODULE__{status: :created} = pipeline),
-    do: transition(pipeline, :cancelled)
+  def request_cancellation(pipeline, now \\ nil)
 
-  def request_cancellation(%__MODULE__{status: :queued} = pipeline),
-    do: transition(pipeline, :cancelled)
+  def request_cancellation(%__MODULE__{status: :created} = pipeline, now),
+    do: transition(pipeline, :cancelled, now)
 
-  def request_cancellation(%__MODULE__{status: :running} = pipeline),
-    do: transition(pipeline, :cancelling)
+  def request_cancellation(%__MODULE__{status: :queued} = pipeline, now),
+    do: transition(pipeline, :cancelled, now)
 
-  def request_cancellation(%__MODULE__{status: :cancelling} = pipeline), do: {:ok, pipeline}
+  def request_cancellation(%__MODULE__{status: :running} = pipeline, now),
+    do: transition(pipeline, :cancelling, now)
 
-  def request_cancellation(%__MODULE__{status: status}),
+  def request_cancellation(%__MODULE__{status: :cancelling} = pipeline, _now), do: {:ok, pipeline}
+
+  def request_cancellation(%__MODULE__{status: status}, _now),
     do: {:error, {:pipeline_terminal, status}}
 
   @spec reopen_for_retry(t()) :: {:ok, t()} | {:error, term()}
-  def reopen_for_retry(%__MODULE__{status: status} = pipeline)
-      when status in [:failed, :cancelled],
-      do: {:ok, %{pipeline | status: :running}}
+  def reopen_for_retry(pipeline, now \\ nil)
 
-  def reopen_for_retry(%__MODULE__{status: status}),
+  def reopen_for_retry(%__MODULE__{status: status} = pipeline, now)
+      when status in [:failed, :cancelled],
+      do:
+        {:ok, apply_timing(%{pipeline | status: :running, finished_at: nil}, :running, now, true)}
+
+  def reopen_for_retry(%__MODULE__{status: status}, _now),
     do: {:error, {:pipeline_not_retryable, status}}
 
   @spec complete_from_jobs(t(), [Robine.Pipelines.Domain.Job.t()]) ::
           {:ok, t()} | {:error, term()}
-  def complete_from_jobs(%__MODULE__{status: status} = pipeline, jobs)
+  def complete_from_jobs(pipeline, jobs, now \\ nil)
+
+  def complete_from_jobs(%__MODULE__{status: status} = pipeline, jobs, now)
       when status in [:running, :cancelling] and is_list(jobs) do
     if jobs != [] and Enum.all?(jobs, &Robine.Pipelines.Domain.Job.terminal?/1) do
       target = aggregate_job_result(status, jobs)
-      transition(pipeline, target)
+      transition(pipeline, target, now)
     else
       {:ok, pipeline}
     end
   end
 
-  def complete_from_jobs(%__MODULE__{} = pipeline, _jobs), do: {:ok, pipeline}
+  def complete_from_jobs(%__MODULE__{} = pipeline, _jobs, _now), do: {:ok, pipeline}
 
   defp aggregate_job_result(:cancelling, _jobs), do: :cancelled
 
@@ -126,4 +161,31 @@ defmodule Robine.Pipelines.Domain.Pipeline do
       error -> error
     end
   end
+
+  defp optional_label(input, field, default) do
+    case Map.get(input, field) do
+      value when is_binary(value) and value != "" ->
+        String.slice(value, 0, 255)
+
+      value when is_atom(value) and not is_nil(value) ->
+        value |> to_string() |> String.slice(0, 255)
+
+      _ ->
+        default
+    end
+  end
+
+  defp apply_timing(pipeline, target, now, force \\ false)
+
+  defp apply_timing(pipeline, :running, %DateTime{} = now, force) do
+    if force or is_nil(pipeline.started_at),
+      do: %{pipeline | started_at: DateTime.truncate(now, :microsecond)},
+      else: pipeline
+  end
+
+  defp apply_timing(pipeline, target, %DateTime{} = now, _force)
+       when target in [:succeeded, :failed, :cancelled, :invalid],
+       do: %{pipeline | finished_at: DateTime.truncate(now, :microsecond)}
+
+  defp apply_timing(pipeline, _target, _now, _force), do: pipeline
 end

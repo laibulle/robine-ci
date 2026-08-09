@@ -43,6 +43,8 @@ defmodule Robine.TestSupport.PortContracts.PipelineRepositoryContract do
           repository_id: Ecto.UUID.generate(),
           workflow_name: "Port contract",
           commit_sha: String.duplicate("c", 40),
+          trigger: "manual",
+          actor: "port-contract",
           status: :created,
           inserted_at: ~U[2026-08-09 12:00:00.000000Z]
         }

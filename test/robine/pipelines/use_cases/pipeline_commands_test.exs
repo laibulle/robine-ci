@@ -35,6 +35,8 @@ defmodule Robine.Pipelines.UseCases.PipelineCommandsTest do
         repository_id: "repository",
         workflow_name: "CI",
         commit_sha: String.duplicate("a", 40),
+        trigger: "manual",
+        actor: "developer",
         status: status,
         inserted_at: ~U[2026-08-08 12:00:00Z]
       }

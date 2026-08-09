@@ -11,6 +11,8 @@ defmodule Robine.Adapters.SourceControl.GitHubAppTokenCache do
   def permissions(installation_id),
     do: GenServer.call(__MODULE__, {:permissions, installation_id}, 30_000)
 
+  def app_token, do: app_jwt(DateTime.utc_now())
+
   @impl true
   def init(state), do: {:ok, state}
 

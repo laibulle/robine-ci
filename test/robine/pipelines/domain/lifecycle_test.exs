@@ -28,6 +28,22 @@ defmodule Robine.Pipelines.Domain.LifecycleTest do
              Pipeline.complete_from_jobs(pipeline(:running), [job(:failed), skipped])
   end
 
+  test "pipeline timing starts on execution and finishes on terminal aggregation" do
+    started_at = ~U[2026-08-09 12:00:00Z]
+    finished_at = DateTime.add(started_at, 75, :second)
+
+    assert {:ok, running} = Pipeline.transition(pipeline(:queued), :running, started_at)
+    assert running.started_at == started_at
+    assert running.finished_at == nil
+
+    assert {:ok, completed} =
+             Pipeline.complete_from_jobs(running, [job(:succeeded)], finished_at)
+
+    assert completed.status == :succeeded
+    assert completed.started_at == started_at
+    assert completed.finished_at == finished_at
+  end
+
   test "jobs release only after dependencies succeed and skip after dependency failure" do
     assert {:ok, blocked} =
              Job.new(%{
@@ -101,6 +117,8 @@ defmodule Robine.Pipelines.Domain.LifecycleTest do
       repository_id: "repository",
       workflow_name: "CI",
       commit_sha: String.duplicate("a", 40),
+      trigger: "manual",
+      actor: "developer",
       status: status,
       inserted_at: ~U[2026-08-08 12:00:00Z]
     }

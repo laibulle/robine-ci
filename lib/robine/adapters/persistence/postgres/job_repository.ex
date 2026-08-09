@@ -245,7 +245,9 @@ defmodule Robine.Adapters.Persistence.Postgres.JobRepository do
       status: schema.status,
       lease_expires_at: schema.lease_expires_at,
       last_sequence: schema.last_sequence,
-      result_reason: schema.result_reason
+      result_reason: schema.result_reason,
+      inserted_at: schema.inserted_at,
+      updated_at: schema.updated_at
     })
   end
 

@@ -27,6 +27,7 @@ defmodule Robine.Pipelines.UseCases.AppendLogEvent do
       %{
         attempt_id: attempt_id,
         sequence: sequence,
+        phase: phase(input),
         step_position: position,
         step_name: name,
         step_status: to_string(status),
@@ -38,6 +39,11 @@ defmodule Robine.Pipelines.UseCases.AppendLogEvent do
   end
 
   def call(_input, %ExecutionContext{}), do: {:error, :invalid_log_event}
+
+  defp phase(%{phase: phase}) when phase in [:image_acquisition, :execution, :cleanup],
+    do: to_string(phase)
+
+  defp phase(_input), do: "execution"
 
   defp sanitize(content) do
     if String.valid?(content),

@@ -83,6 +83,69 @@ defmodule Robine.Adapters.SourceControl.GitHubClient do
     GitHubAppTokenCache.permissions(repository.installation_id)
   end
 
+  @impl true
+  def available_repositories do
+    with {:ok, app_token} <- GitHubAppTokenCache.app_token(),
+         {:ok, installations} <-
+           paginated("#{@api}/app/installations", app_token, &installation_page/1) do
+      installations
+      |> Enum.reject(&(not is_nil(&1["suspended_at"])))
+      |> Enum.reduce_while({:ok, []}, fn installation, {:ok, repositories} ->
+        case installation_repositories(installation["id"]) do
+          {:ok, values} -> {:cont, {:ok, repositories ++ values}}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+      end)
+    else
+      {:error, _reason} = error -> error
+      _other -> {:error, :invalid_github_installations_response}
+    end
+  end
+
+  defp installation_repositories(installation_id) when is_integer(installation_id) do
+    with {:ok, token} <- GitHubAppTokenCache.token(installation_id),
+         {:ok, repositories} <-
+           paginated("#{@api}/installation/repositories", token, &repository_page/1) do
+      {:ok,
+       Enum.map(repositories, fn repository ->
+         %{
+           provider_id: repository["id"],
+           installation_id: installation_id,
+           full_name: repository["full_name"],
+           private: repository["private"] == true
+         }
+       end)}
+    else
+      {:error, _reason} = error -> error
+      _other -> {:error, :invalid_github_repositories_response}
+    end
+  end
+
+  defp paginated(url, token, page_decoder, page \\ 1, accumulated \\ [])
+
+  defp paginated(_url, _token, _page_decoder, page, _accumulated) when page > 100,
+    do: {:error, :github_pagination_limit}
+
+  defp paginated(url, token, page_decoder, page, accumulated) do
+    with {:ok, %{body: body}} <-
+           request(:get, url, token, params: [per_page: 100, page: page]),
+         {:ok, values} <- page_decoder.(body) do
+      combined = accumulated ++ values
+
+      if length(values) == 100,
+        do: paginated(url, token, page_decoder, page + 1, combined),
+        else: {:ok, combined}
+    end
+  end
+
+  defp installation_page(installations) when is_list(installations), do: {:ok, installations}
+  defp installation_page(_body), do: {:error, :invalid_github_installations_response}
+
+  defp repository_page(%{"repositories" => repositories}) when is_list(repositories),
+    do: {:ok, repositories}
+
+  defp repository_page(_body), do: {:error, :invalid_github_repositories_response}
+
   defp workflow_directory_url(repository),
     do: "#{@api}/repos/#{repository.owner}/#{repository.name}/contents/.robine-ci/workflows"
 

@@ -32,6 +32,8 @@ config :robine,
   public_url: "http://localhost:4000",
   bootstrap_token_hash: :crypto.hash(:sha256, "development-bootstrap-token"),
   bootstrap_expires_at: ~U[2030-01-01 00:00:00Z],
+  github_adapter: Robine.Adapters.SourceControl.GitHubClient,
+  oidc_adapter: Robine.Adapters.Identity.AssentOIDC,
   oidc_config: nil
 
 config :robine, Oban,

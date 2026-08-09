@@ -123,6 +123,94 @@ defmodule RobineWeb.CoreComponents do
     end
   end
 
+  @doc "Renders a textual, non-color-only status indicator with consistent semantics."
+  attr :status, :any, required: true
+  attr :size, :string, values: ~w(sm md lg), default: "md"
+  attr :class, :any, default: nil
+
+  def status_badge(assigns) do
+    label = assigns.status |> to_string() |> String.replace("_", " ")
+
+    assigns =
+      assigns
+      |> assign(:label, label)
+      |> assign(:status_class, status_class(assigns.status))
+
+    ~H"""
+    <span
+      class={[
+        "badge gap-2 capitalize",
+        @size == "sm" && "badge-sm",
+        @size == "lg" && "badge-lg",
+        @status_class,
+        @class
+      ]}
+      aria-label={"Status: #{@label}"}
+    >
+      <span aria-hidden="true">●</span>{@label}
+    </span>
+    """
+  end
+
+  defp status_class(status)
+       when status in [:succeeded, :success, :ready, "succeeded", "success", "ready"],
+       do: "badge-success"
+
+  defp status_class(status)
+       when status in [:failed, :error, :runner_lost, "failed", "error", "runner_lost"],
+       do: "badge-error"
+
+  defp status_class(status) when status in [:running, :preparing, "running", "preparing"],
+    do: "badge-info"
+
+  defp status_class(status)
+       when status in [
+              :cancelled,
+              :timed_out,
+              :cancelling,
+              "cancelled",
+              "timed_out",
+              "cancelling"
+            ],
+       do: "badge-warning"
+
+  defp status_class(_status), do: "badge-ghost"
+
+  @doc "Renders a consistent empty, loading, degraded, or error state."
+  attr :kind, :atom, required: true, values: [:empty, :loading, :degraded, :error]
+  attr :title, :string, required: true
+  attr :class, :any, default: nil
+  slot :inner_block
+  slot :actions
+
+  def ui_state(assigns) do
+    ~H"""
+    <section
+      class={[
+        "rounded-2xl border p-8 text-center",
+        @kind in [:empty, :loading] && "border-dashed border-base-300 text-base-content/65",
+        @kind == :degraded && "border-warning/40 bg-warning/10 text-warning-content",
+        @kind == :error && "border-error/40 bg-error/10 text-error-content",
+        @class
+      ]}
+      role={@kind in [:degraded, :error] && "alert"}
+      aria-busy={@kind == :loading && "true"}
+      aria-live={@kind == :loading && "polite"}
+    >
+      <.icon
+        :if={@kind == :loading}
+        name="hero-arrow-path"
+        class="mx-auto size-6 motion-safe:animate-spin"
+      />
+      <h2 class="text-lg font-semibold">{@title}</h2>
+      <div :if={@inner_block != []} class="mt-2 text-sm">{render_slot(@inner_block)}</div>
+      <div :if={@actions != []} class="mt-5 flex justify-center gap-3">
+        {render_slot(@actions)}
+      </div>
+    </section>
+    """
+  end
+
   @doc """
   Renders an input with label and error messages.
 

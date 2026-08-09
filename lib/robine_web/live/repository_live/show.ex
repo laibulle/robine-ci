@@ -38,7 +38,14 @@ defmodule RobineWeb.RepositoryLive.Show do
         socket.assigns.execution_context
       )
 
-    {:noreply, assign(socket, github_preflight: result)}
+    case result do
+      {:error, :forbidden} ->
+        {:noreply,
+         put_flash(socket, :error, "You do not have permission to check GitHub installations.")}
+
+      result ->
+        {:noreply, assign(socket, github_preflight: result)}
+    end
   end
 
   @impl true
@@ -132,7 +139,7 @@ defmodule RobineWeb.RepositoryLive.Show do
                   <.link
                     navigate={~p"/pipelines/#{pipeline.id}"}
                     class="font-semibold link link-hover"
-                  >{pipeline.workflow_name}</.link><span class="badge">{pipeline.status}</span>
+                  >{pipeline.workflow_name}</.link><.status_badge status={pipeline.status} />
                 </div><code class="mt-2 block text-xs">{String.slice(pipeline.commit_sha, 0, 12)}</code>
               </li>
             </ul>

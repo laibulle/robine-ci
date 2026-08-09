@@ -13,7 +13,9 @@ defmodule Robine.Pipelines.Domain.Attempt do
     :status,
     :lease_expires_at,
     :last_sequence,
-    :result_reason
+    :result_reason,
+    :inserted_at,
+    :updated_at
   ]
 
   @type status ::
@@ -27,7 +29,9 @@ defmodule Robine.Pipelines.Domain.Attempt do
           status: status(),
           lease_expires_at: DateTime.t(),
           last_sequence: non_neg_integer() | nil,
-          result_reason: reason() | nil
+          result_reason: reason() | nil,
+          inserted_at: DateTime.t() | nil,
+          updated_at: DateTime.t() | nil
         }
 
   @spec statuses() :: [status()]

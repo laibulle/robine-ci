@@ -51,10 +51,12 @@ defmodule Robine.Adapters.Background.RunNextJobWorkerTest do
 
     assert Enum.any?(
              chunks,
-             &(&1.step_name == "Image acquisition" and &1.step_status == "succeeded")
+             &(&1.phase == "image_acquisition" and &1.step_name == "Image acquisition" and
+                 &1.step_status == "succeeded")
            )
 
     command_chunks = Enum.filter(chunks, &(&1.step_name == "Test"))
+    assert Enum.all?(command_chunks, &(&1.phase == "execution"))
     assert Enum.map_join(command_chunks, & &1.content) == "hello robine"
     assert Enum.map(command_chunks, & &1.step_status) == ["running", "succeeded"]
   end

@@ -64,7 +64,8 @@ defmodule Robine.Repositories.GitHubDeliveryTest do
     payload = %{
       "repository" => %{"id" => provider_id},
       "after" => sha,
-      "ref" => "refs/heads/main"
+      "ref" => "refs/heads/main",
+      "sender" => %{"login" => "octocat"}
     }
 
     accept(delivery_id, "push", payload, context)
@@ -76,7 +77,13 @@ defmodule Robine.Repositories.GitHubDeliveryTest do
 
     repository_id = repository.id
 
-    assert %Pipeline{id: ^pipeline_id, repository_id: ^repository_id, commit_sha: ^sha} =
+    assert %Pipeline{
+             id: ^pipeline_id,
+             repository_id: ^repository_id,
+             commit_sha: ^sha,
+             trigger: "push",
+             actor: "github:octocat"
+           } =
              Repo.get!(Pipeline, pipeline_id)
 
     assert Repo.get!(GitHubDelivery, delivery_id).status == :processed

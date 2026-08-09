@@ -57,6 +57,7 @@ defmodule Robine.Pipelines.LogsTest do
 
     assert length(second.chunks) == 1
     refute second.has_more
+    assert Enum.all?(first.chunks ++ second.chunks, &(&1.phase == "execution"))
     assert Enum.map_join(first.chunks ++ second.chunks, & &1.content) == output
 
     assert {:ok, %{attempt: %{id: attempt_id}, job: %{id: job_id}}} =

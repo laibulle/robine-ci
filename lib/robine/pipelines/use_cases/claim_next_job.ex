@@ -19,7 +19,7 @@ defmodule Robine.Pipelines.UseCases.ClaimNextJob do
       deps.unit_of_work.transaction(fn ->
         with {:ok, job} <- repository.next_queued(global_limit, repository_limit),
              {:ok, pipeline} <- deps.pipeline_repository.get(job.pipeline_id),
-             {:ok, running_pipeline} <- start_pipeline(pipeline),
+             {:ok, running_pipeline} <- start_pipeline(pipeline, deps.clock.now()),
              {:ok, running_job} <- Job.transition(job, :running),
              {:ok, attempt} <- new_attempt(job, lease_seconds, deps, repository),
              :ok <- deps.pipeline_repository.update(running_pipeline),
@@ -44,11 +44,11 @@ defmodule Robine.Pipelines.UseCases.ClaimNextJob do
     })
   end
 
-  defp start_pipeline(%Robine.Pipelines.Domain.Pipeline{status: :running} = pipeline),
+  defp start_pipeline(%Robine.Pipelines.Domain.Pipeline{status: :running} = pipeline, _now),
     do: {:ok, pipeline}
 
-  defp start_pipeline(pipeline),
-    do: Robine.Pipelines.Domain.Pipeline.transition(pipeline, :running)
+  defp start_pipeline(pipeline, now),
+    do: Robine.Pipelines.Domain.Pipeline.transition(pipeline, :running, now)
 
   defp positive(input, key, default) do
     case Map.get(input, key, default) do

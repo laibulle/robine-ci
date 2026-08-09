@@ -56,7 +56,7 @@ defmodule Robine.Runtime.Dependencies do
       repositories: %RepositoryDependencies{
         repository: Robine.Adapters.Persistence.Postgres.GitHubRepository,
         signature_verifier: Robine.Adapters.SourceControl.GitHubSignatureVerifier,
-        github: Robine.Adapters.SourceControl.GitHubClient,
+        github: Application.fetch_env!(:robine, :github_adapter),
         clock: Robine.Adapters.System.Clock,
         id_generator: Robine.Adapters.System.IdGenerator,
         public_url: Application.fetch_env!(:robine, :public_url)
@@ -111,7 +111,7 @@ defmodule Robine.Runtime.Dependencies do
     RepositoryDependencies.validate!(%RepositoryDependencies{
       repository: Robine.Adapters.Persistence.Postgres.GitHubRepository,
       signature_verifier: Robine.Adapters.SourceControl.GitHubSignatureVerifier,
-      github: Robine.Adapters.SourceControl.GitHubClient,
+      github: Application.fetch_env!(:robine, :github_adapter),
       clock: Robine.Adapters.System.Clock,
       id_generator: Robine.Adapters.System.IdGenerator,
       public_url: Application.fetch_env!(:robine, :public_url)
@@ -122,7 +122,7 @@ defmodule Robine.Runtime.Dependencies do
     %IdentityDependencies{
       repository: Robine.Adapters.Persistence.Postgres.IdentityRepository,
       passwords: Robine.Adapters.Security.Argon2Passwords,
-      oidc: Robine.Adapters.Identity.AssentOIDC,
+      oidc: Application.fetch_env!(:robine, :oidc_adapter),
       oidc_config: Application.fetch_env!(:robine, :oidc_config),
       clock: Robine.Adapters.System.Clock,
       id_generator: Robine.Adapters.System.IdGenerator,

@@ -21,12 +21,18 @@ defmodule Robine.Pipelines.UseCases.RecordRunnerEvent do
     deps.unit_of_work.transaction(fn ->
       with {:ok, attempt} <- repository.get_attempt_by_token(token),
            {:ok, updated_attempt} <-
-             Attempt.record_event(attempt, sequence, status, Map.get(input, :reason)),
-           :ok <- repository.update_attempt(updated_attempt),
-           :ok <- reconcile_job(updated_attempt, repository),
-           {:ok, pipeline_id} <- reconcile_graph(updated_attempt.job_id, deps),
-           :ok <- maybe_project(attempt, updated_attempt, pipeline_id, deps) do
-        {:ok, updated_attempt}
+             Attempt.record_event(attempt, sequence, status, Map.get(input, :reason)) do
+        if updated_attempt == attempt do
+          {:ok, attempt}
+        else
+          with :ok <- repository.update_attempt(updated_attempt),
+               :ok <- reconcile_job(updated_attempt, repository),
+               {:ok, pipeline_id} <- reconcile_graph(updated_attempt.job_id, deps),
+               :ok <- maybe_project(attempt, updated_attempt, pipeline_id, deps),
+               {:ok, persisted_attempt} <- repository.get_attempt_by_token(token) do
+            {:ok, persisted_attempt}
+          end
+        end
       end
     end)
   end
@@ -52,7 +58,8 @@ defmodule Robine.Pipelines.UseCases.RecordRunnerEvent do
          :ok <- release_jobs(jobs, repository),
          {:ok, refreshed_jobs} <- repository.list_jobs(source_job.pipeline_id),
          {:ok, pipeline} <- deps.pipeline_repository.get(source_job.pipeline_id),
-         {:ok, completed_pipeline} <- Pipeline.complete_from_jobs(pipeline, refreshed_jobs),
+         {:ok, completed_pipeline} <-
+           Pipeline.complete_from_jobs(pipeline, refreshed_jobs, deps.clock.now()),
          :ok <- persist_if_changed(pipeline, completed_pipeline, deps.pipeline_repository) do
       {:ok, source_job.pipeline_id}
     end

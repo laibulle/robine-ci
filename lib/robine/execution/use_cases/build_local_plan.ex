@@ -26,6 +26,11 @@ defmodule Robine.Execution.UseCases.BuildLocalPlan do
          specifications: specifications,
          selected_jobs: selected_ids,
          dependencies_omitted: Map.get(input, :no_deps, false),
+         local_secret_count:
+           specifications
+           |> Enum.flat_map(&Map.keys(&1.secrets))
+           |> Enum.uniq()
+           |> length(),
          ci_only_inputs_omitted: ["GitHub event payload", "server-side secrets", "remote caches"]
        }}
     end
@@ -61,6 +66,7 @@ defmodule Robine.Execution.UseCases.BuildLocalPlan do
       job = workflow.jobs[job_id]
 
       with {:ok, steps} <- select_steps(job.steps, Map.get(input, :step)),
+           {:ok, local_secrets} <- local_secrets(job.secrets, input),
            steps = omit_checkout(steps),
            true <- steps != [],
            {:ok, execution_steps} <- execution_steps(steps, source_path) do
@@ -74,6 +80,7 @@ defmodule Robine.Execution.UseCases.BuildLocalPlan do
           timeout_ms: timeout_ms(job.timeout),
           source_path: Path.expand(source_path),
           env: job.env,
+          secrets: local_secrets,
           metadata: %{"job_id" => job_id, "local" => true}
         }
 
@@ -96,6 +103,16 @@ defmodule Robine.Execution.UseCases.BuildLocalPlan do
 
     if selected, do: {:ok, [selected]}, else: {:error, {:unknown_step, selector}}
   end
+
+  defp local_secrets(required, %{local_secret_file: true, local_secrets: available}) do
+    missing = required -- Map.keys(available)
+
+    if missing == [],
+      do: {:ok, Map.take(available, required)},
+      else: {:error, {:local_secrets_missing, missing}}
+  end
+
+  defp local_secrets(_required, _input), do: {:ok, %{}}
 
   defp omit_checkout(steps),
     do: Enum.reject(steps, &(&1.kind == :builtin and &1.value == "checkout"))

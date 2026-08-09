@@ -8,4 +8,17 @@ defmodule Robine.Repositories.Ports.GitHub do
               {:ok, integer()} | {:error, term()}
   @callback installation_permissions(Robine.Repositories.Domain.Repository.t()) ::
               {:ok, map()} | {:error, term()}
+  @callback available_repositories() ::
+              {:ok,
+               [
+                 %{
+                   provider_id: integer(),
+                   installation_id: integer(),
+                   full_name: String.t(),
+                   private: boolean()
+                 }
+               ]}
+              | {:error, term()}
+
+  @optional_callbacks available_repositories: 0
 end

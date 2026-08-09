@@ -3,16 +3,40 @@ defmodule Robine.Pipelines.Contracts.PipelineView do
 
   alias Robine.Pipelines.Domain.Pipeline
 
-  @enforce_keys [:id, :repository_id, :workflow_name, :commit_sha, :status, :inserted_at]
-  defstruct [:id, :repository_id, :workflow_name, :commit_sha, :status, :inserted_at]
+  @enforce_keys [
+    :id,
+    :repository_id,
+    :workflow_name,
+    :commit_sha,
+    :trigger,
+    :actor,
+    :status,
+    :inserted_at
+  ]
+  defstruct [
+    :id,
+    :repository_id,
+    :workflow_name,
+    :commit_sha,
+    :trigger,
+    :actor,
+    :status,
+    :inserted_at,
+    :started_at,
+    :finished_at
+  ]
 
   @type t :: %__MODULE__{
           id: String.t(),
           repository_id: String.t(),
           workflow_name: String.t(),
           commit_sha: String.t(),
+          trigger: String.t(),
+          actor: String.t(),
           status: Pipeline.status(),
-          inserted_at: DateTime.t()
+          inserted_at: DateTime.t(),
+          started_at: DateTime.t() | nil,
+          finished_at: DateTime.t() | nil
         }
 
   @spec from_domain(Pipeline.t()) :: t()

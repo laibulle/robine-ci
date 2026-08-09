@@ -99,6 +99,44 @@
 /* Use the data attribute for dark mode  */
 @custom-variant dark (&:where([data-theme=dark], [data-theme=dark] *));
 
+/* Robine semantic design tokens. Components consume these names instead of
+   coupling product meaning to a particular light or dark palette. */
+@theme inline {
+  --color-surface: var(--color-base-100);
+  --color-surface-muted: var(--color-base-200);
+  --color-border-subtle: var(--color-base-300);
+  --color-content: var(--color-base-content);
+  --color-action: var(--color-primary);
+  --color-action-content: var(--color-primary-content);
+  --color-positive: var(--color-success);
+  --color-caution: var(--color-warning);
+  --color-negative: var(--color-error);
+  --color-informative: var(--color-info);
+  --radius-control: var(--radius-field);
+  --radius-panel: 1.5rem;
+  --shadow-panel: 0 1rem 3rem color-mix(in oklab, var(--color-base-content) 12%, transparent);
+  --spacing-page-x: 1.5rem;
+  --spacing-section: 2rem;
+}
+
+@layer base {
+  :where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
+    outline: 3px solid var(--color-primary);
+    outline-offset: 3px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      scroll-behavior: auto !important;
+      transition-duration: 0.01ms !important;
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+    }
+  }
+}
+
 /* Make LiveView wrapper divs transparent for layout */
 [data-phx-session], [data-phx-teleported-src] { display: contents }
 

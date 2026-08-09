@@ -33,6 +33,11 @@ defmodule RobineWeb.ConnCase do
 
   setup tags do
     Robine.DataCase.setup_sandbox(tags)
-    {:ok, conn: Phoenix.ConnTest.build_conn()}
+    unique = System.unique_integer([:positive])
+
+    remote_ip =
+      {127, rem(div(unique, 65_536), 254) + 1, rem(div(unique, 256), 256), rem(unique, 256)}
+
+    {:ok, conn: %{Phoenix.ConnTest.build_conn() | remote_ip: remote_ip}}
   end
 end

@@ -71,7 +71,8 @@ defmodule RobineWeb.Layouts do
       </nav>
     </header>
 
-    <main class="px-4 py-10 sm:px-6 lg:px-8">
+    <div id="page-loading-status" class="sr-only" aria-live="polite"></div>
+    <main id="main-content" class="px-4 py-10 sm:px-6 lg:px-8">
       <div class="mx-auto max-w-7xl space-y-4">
         {render_slot(@inner_block)}
       </div>
@@ -142,6 +143,8 @@ defmodule RobineWeb.Layouts do
 
       <button
         class="flex p-2 cursor-pointer w-1/3"
+        type="button"
+        aria-label="Use system theme"
         phx-click={JS.dispatch("phx:set-theme")}
         data-phx-theme="system"
       >
@@ -150,6 +153,8 @@ defmodule RobineWeb.Layouts do
 
       <button
         class="flex p-2 cursor-pointer w-1/3"
+        type="button"
+        aria-label="Use light theme"
         phx-click={JS.dispatch("phx:set-theme")}
         data-phx-theme="light"
       >
@@ -158,6 +163,8 @@ defmodule RobineWeb.Layouts do
 
       <button
         class="flex p-2 cursor-pointer w-1/3"
+        type="button"
+        aria-label="Use dark theme"
         phx-click={JS.dispatch("phx:set-theme")}
         data-phx-theme="dark"
       >

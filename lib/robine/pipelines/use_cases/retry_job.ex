@@ -14,7 +14,7 @@ defmodule Robine.Pipelines.UseCases.RetryJob do
            {:ok, jobs} <- deps.job_repository.list_jobs(job.pipeline_id),
            :ok <- dependencies_available(job, jobs),
            {:ok, pipeline} <- deps.pipeline_repository.get(job.pipeline_id),
-           {:ok, reopened_pipeline} <- Pipeline.reopen_for_retry(pipeline),
+           {:ok, reopened_pipeline} <- Pipeline.reopen_for_retry(pipeline, deps.clock.now()),
            {:ok, result} <- retry_strategy(job, jobs, input, deps),
            :ok <- deps.pipeline_repository.update(reopened_pipeline),
            :ok <- deps.event_outbox.append(projection_event(reopened_pipeline.id, deps)) do

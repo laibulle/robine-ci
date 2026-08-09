@@ -31,6 +31,7 @@ defmodule Robine.Adapters.Persistence.Postgres.LogRepository do
           limit: ^limit,
           select: %{
             sequence: chunk.sequence,
+            phase: chunk.phase,
             step_position: chunk.step_position,
             step_name: chunk.step_name,
             step_status: chunk.step_status,

@@ -76,6 +76,8 @@ The installation wizard asks the operator for the public callback URL and produc
 
 Installation access-token responses supply the effective permission projection cached with the token expiry. Repository operators can run a live preflight against the accepted least-privilege policy: Metadata read, Contents read, and Checks write. Every mismatch includes its current value and the exact GitHub App permission update and installation-approval action.
 
+The repository selection UI discovers active installations and all paginated repositories directly through GitHub App credentials. Selecting a repository sends only an untrusted candidate tuple; the application rediscovers current App access and requires an exact repository ID, installation ID, and full-name match before creating the trusted-repository record. Suspended installations are excluded and discovery failures never fall back to browser-supplied metadata.
+
 Checks are projections of Robine state rather than the source of truth. Delivery failures never roll back local pipeline state. A reconciliation job repairs stale or missing checks.
 
 ## Failure modes and recovery

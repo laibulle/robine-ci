@@ -21,11 +21,6 @@ defmodule RobineWeb.PipelineLive.Index do
     end
   end
 
-  defp status_class(:succeeded), do: "badge-success"
-  defp status_class(:failed), do: "badge-error"
-  defp status_class(:running), do: "badge-info"
-  defp status_class(_status), do: "badge-ghost"
-
   @impl true
   def render(assigns) do
     ~H"""
@@ -39,17 +34,17 @@ defmodule RobineWeb.PipelineLive.Index do
           </div>
           <span class="text-sm text-base-content/60">Signed in as {@current_actor.email}</span>
         </header>
-        <div :if={@load_error} class="alert alert-error" role="alert">
-          Pipelines are temporarily unavailable. Retrying automatically.
-        </div>
-        <div
+        <.ui_state :if={@load_error} kind={:error} title="Pipelines are temporarily unavailable">
+          Retrying automatically. Existing CI work continues in the background.
+        </.ui_state>
+        <.ui_state
           :if={@pipelines == [] and is_nil(@load_error)}
-          class="rounded-3xl border border-dashed border-base-300 p-12 text-center"
+          kind={:empty}
+          title="No pipelines yet"
+          class="rounded-3xl p-12"
         >
-          <h2 class="text-xl font-semibold">No pipelines yet</h2><p class="mt-2 text-base-content/60">
-            Connect a trusted GitHub repository and push a workflow.
-          </p>
-        </div>
+          Connect a trusted GitHub repository and push a workflow.
+        </.ui_state>
         <div
           :if={@pipelines != []}
           class="overflow-x-auto rounded-3xl border border-base-300 bg-base-100"
@@ -67,7 +62,7 @@ defmodule RobineWeb.PipelineLive.Index do
                 class="hover:bg-base-200/60"
               >
                 <td>
-                  <span class={["badge gap-2", status_class(pipeline.status)]}><span aria-hidden="true">●</span>{pipeline.status}</span>
+                  <.status_badge status={pipeline.status} />
                 </td>
                 <td>
                   <.link

@@ -7,6 +7,7 @@ defmodule Robine.Adapters.Persistence.Postgres.Schemas.LogChunk do
   schema "log_chunks" do
     field :attempt_id, :binary_id
     field :sequence, :integer
+    field :phase, :string
     field :step_position, :integer
     field :step_name, :string
     field :step_status, :string
@@ -21,6 +22,7 @@ defmodule Robine.Adapters.Persistence.Postgres.Schemas.LogChunk do
     |> cast(attributes, [
       :attempt_id,
       :sequence,
+      :phase,
       :step_position,
       :step_name,
       :step_status,
@@ -31,6 +33,7 @@ defmodule Robine.Adapters.Persistence.Postgres.Schemas.LogChunk do
     |> validate_required([
       :attempt_id,
       :sequence,
+      :phase,
       :step_position,
       :step_name,
       :step_status,

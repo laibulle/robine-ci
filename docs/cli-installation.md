@@ -69,3 +69,5 @@ On Windows, invoke the escript through the installed Erlang runtime or place an 
 | 64 | Usage | The command line or option combination is invalid. |
 
 Commands print their result to standard output without prompts except where `init` deliberately previews a mutation. Scripts should use `init --yes`, `validate --format json`, and explicit `run` selectors.
+
+For local-only secrets, add a dedicated file such as `.robine.env` to `.gitignore`, declare each required name in the workflow job, then run `robine run --env-file .robine.env`. Robine refuses files whose ignored status cannot be proven and never downloads server-side secrets.

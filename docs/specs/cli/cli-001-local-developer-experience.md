@@ -83,7 +83,11 @@ The initial detectors target Elixir/Mix, Node package managers, and a generic fa
 
 The MVP is packaged as a versioned escript for Linux, macOS, and Windows hosts with a compatible Erlang/OTP runtime. `mix robine.release` produces the executable and a deterministic, atomically written `SHA256SUMS`; the release documentation provides native verification commands for every supported host. Exit codes are stable classes: 0 success, 2 configuration or selection, 3 prerequisite or infrastructure, 4 protected mutation, 5 job failure, and 64 command-line usage.
 
-Local secrets are opt-in and never downloaded automatically from the server. A developer may provide an ignored local environment file through an explicit flag; the CLI warns if Git tracks that file.
+CI workers and equivalence tests construct persisted runner inputs through `Robine.Execution.build_ci_specification/2`; local execution uses `build_local_plan/2`, and both return the same versioned `Specification` contract. The Docker-backed equivalence corpus compares image, shell, timeout, environment, `/workspace`, ordered commands, output, exit code, and terminal reason for both successful and failing jobs. Transport-only fields such as attempt ID, idempotency token, and source materialization path are deliberately excluded.
+
+Local secrets are opt-in and are never downloaded from the server. `robine run --env-file .robine.env` accepts only a regular file inside the current Git worktree for which `git check-ignore` succeeds; tracked, visible, external, linked, oversized, or malformed files are refused before their contents are read into an execution plan. The file is limited to 1 MiB and uses literal `NAME=VALUE` lines with optional single or double quotes and no interpolation, command substitution, or shell execution.
+
+Every value must satisfy the shared 8-byte through 64-KiB masking policy. A job receives only names listed in its workflow `secrets` declaration, undeclared file entries are ignored, and an explicitly supplied file missing a required name fails planning. Values enter the normalized `Specification.secrets` field only in memory, are masked by the same streaming redactor as CI, are omitted from debug inspection, and are never persisted or transmitted. Output reports only the count injected.
 
 ## Failure modes and recovery
 
@@ -104,11 +108,11 @@ Local debug logs contain version, platform, normalized non-secret configuration,
 
 ## Acceptance criteria
 
-- [ ] `robine init` generates a valid workflow for a representative Elixir and Node repository without overwriting files.
-- [ ] Every server-side invalid fixture produces the same diagnostic code through `robine validate`.
-- [ ] A representative job has equivalent command, environment, workspace, image, and exit behavior locally and in CI.
-- [ ] JSON output is stable enough for an editor integration fixture test.
-- [ ] No default command sends repository or usage data externally.
+- [x] `robine init` generates a valid workflow for a representative Elixir and Node repository without overwriting files.
+- [x] Every server-side invalid fixture produces the same diagnostic code through `robine validate`.
+- [x] Representative successful and failing jobs have equivalent command, environment, workspace, image, timeout, output, and exit behavior locally and in CI.
+- [x] JSON output is stable enough for an editor integration fixture test.
+- [x] No default command sends repository or usage data externally.
 
 ## Open questions
 

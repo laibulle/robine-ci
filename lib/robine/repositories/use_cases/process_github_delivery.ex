@@ -43,13 +43,24 @@ defmodule Robine.Repositories.UseCases.ProcessGitHubDelivery do
 
   def call(_input, %ExecutionContext{}), do: {:error, :forbidden}
 
-  defp normalize("push", %{
-         "repository" => %{"id" => repository_id},
-         "after" => sha,
-         "ref" => "refs/heads/" <> branch
-       })
+  defp normalize(
+         "push",
+         %{
+           "repository" => %{"id" => repository_id},
+           "after" => sha,
+           "ref" => "refs/heads/" <> branch
+         } = payload
+       )
        when is_integer(repository_id) and is_binary(sha),
-       do: {:ok, %{type: :push, repository_id: repository_id, sha: sha, branch: branch}}
+       do:
+         {:ok,
+          %{
+            type: :push,
+            repository_id: repository_id,
+            sha: sha,
+            branch: branch,
+            actor: github_actor(payload)
+          }}
 
   defp normalize("pull_request", %{"action" => action}) when action not in @pull_request_actions,
     do: {:ignore, :pull_request_action}
@@ -64,7 +75,15 @@ defmodule Robine.Repositories.UseCases.ProcessGitHubDelivery do
            "base" => %{"ref" => branch, "repo" => %{"full_name" => base_name}}
          } <- pull_request do
       if head_name == base_name,
-        do: {:ok, %{type: :pull_request, repository_id: repository_id, sha: sha, branch: branch}},
+        do:
+          {:ok,
+           %{
+             type: :pull_request,
+             repository_id: repository_id,
+             sha: sha,
+             branch: branch,
+             actor: github_actor(payload)
+           }},
         else: {:ignore, :fork_pull_request}
     else
       _ -> {:error, {:invalid_webhook, :pull_request_payload}}
@@ -82,6 +101,8 @@ defmodule Robine.Repositories.UseCases.ProcessGitHubDelivery do
               repository_id: repository.id,
               workflow_name: validated.workflow.name,
               commit_sha: event.sha,
+              trigger: event.type,
+              actor: event.actor,
               jobs: validated.workflow.jobs,
               workflow_revision: %{path: file.path, source: file.content}
             }
@@ -110,4 +131,12 @@ defmodule Robine.Repositories.UseCases.ProcessGitHubDelivery do
       _configuration -> true
     end
   end
+
+  defp github_actor(%{"sender" => %{"login" => login}}) when is_binary(login) and login != "",
+    do: "github:#{String.slice(login, 0, 248)}"
+
+  defp github_actor(%{"pusher" => %{"name" => name}}) when is_binary(name) and name != "",
+    do: "github:#{String.slice(name, 0, 248)}"
+
+  defp github_actor(_payload), do: "github:unknown"
 end

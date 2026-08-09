@@ -11,22 +11,54 @@ defmodule Robine.Pipelines.UseCases.GetPipelineSnapshot do
       when role in [:administrator, :maintainer, :viewer] and is_binary(pipeline_id) do
     with {:ok, pipeline} <- deps.pipeline_repository.get(pipeline_id),
          {:ok, jobs} <- deps.job_repository.list_jobs(pipeline_id) do
+      now = deps.clock.now()
+
       {:ok,
        %{
          id: pipeline.id,
          repository_id: pipeline.repository_id,
          workflow_name: pipeline.workflow_name,
          commit_sha: pipeline.commit_sha,
+         trigger: pipeline.trigger,
+         actor: pipeline.actor,
          status: pipeline.status,
          inserted_at: pipeline.inserted_at,
-         jobs:
-           Enum.map(
-             jobs,
-             &Map.take(Map.from_struct(&1), [:id, :job_key, :status, :position, :needs])
-           )
+         started_at: pipeline.started_at,
+         finished_at: pipeline.finished_at,
+         duration_ms: duration_ms(pipeline.started_at, pipeline.finished_at || now),
+         jobs: Enum.map(jobs, &job_projection(&1, deps.job_repository, now))
        }}
     end
   end
 
   def call(_input, %ExecutionContext{}), do: {:error, :forbidden}
+
+  defp job_projection(job, repository, now) do
+    attempt =
+      case repository.latest_attempt(job.id) do
+        {:ok, value} -> value
+        {:error, :not_found} -> nil
+      end
+
+    job
+    |> Map.from_struct()
+    |> Map.take([:id, :job_key, :status, :position, :needs])
+    |> Map.merge(%{
+      phase: attempt && attempt.status,
+      result_reason: attempt && attempt.result_reason,
+      infrastructure_failure: attempt && attempt.result_reason in [:runner_lost, :system_failure],
+      duration_ms: attempt && duration_ms(attempt.inserted_at, terminal_time(attempt, now))
+    })
+  end
+
+  defp terminal_time(%{status: status, updated_at: updated_at}, _now)
+       when status in [:succeeded, :failed, :cancelled] and not is_nil(updated_at),
+       do: updated_at
+
+  defp terminal_time(_attempt, now), do: now
+
+  defp duration_ms(%DateTime{} = started_at, %DateTime{} = finished_at),
+    do: max(DateTime.diff(finished_at, started_at, :millisecond), 0)
+
+  defp duration_ms(_started_at, _finished_at), do: nil
 end

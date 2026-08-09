@@ -46,6 +46,7 @@ defmodule Robine.Pipelines.UseCases.AppendExecutionLogs do
        when is_binary(name) and is_atom(status) and is_integer(duration_ms) and duration_ms >= 0 do
     {:ok,
      %{
+       phase: "execution",
        step_name: name,
        step_status: to_string(status),
        exit_code: Map.get(step, :exit_code),

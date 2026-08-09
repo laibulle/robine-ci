@@ -5,7 +5,7 @@
 - **State:** Draft
 - **Owner:** Web
 - **Target:** MVP
-- **Last updated:** 2026-08-08
+- **Last updated:** 2026-08-09
 
 ## Summary
 
@@ -75,9 +75,15 @@ A developer diagnosing a build and an operator configuring repositories, identit
 
 ## Proposed design
 
+The UI follows the semantic token and component contracts in `docs/design-system.md`. Light and dark themes implement the palette, while product templates consume intent-level surface, content, action, and status semantics. All interactive controls share a visible keyboard focus treatment, status text never depends on color alone, and operating-system reduced-motion preferences override decorative transitions.
+
 The primary navigation contains Repositories, Pipelines, and Administration. Repository pages show integration health, workflows, recent runs, secrets, and settings. Pipeline pages use a compact graph on desktop and an ordered dependency list on small screens.
 
+The MVP graph representation is an accessible dependency-ordered list: every job names its prerequisites, durable status, latest runner phase, elapsed duration, and terminal reason. Pipeline metadata persists the source trigger, initiating actor, exact commit, execution start, and terminal finish. Runner-loss and system-failure reasons are elevated as infrastructure failures and are visually and textually distinct from repository command failures and timeouts. This list is the canonical accessible graph; a decorative node-edge rendering may be layered on later without replacing it.
+
 The log viewer stores neither all output in a LiveView socket nor all rendered nodes in the browser. It requests bounded segments by sequence cursor, appends live events, and offers server-side search. ANSI output is sanitized and rendered through a restricted parser. Raw log download is available subject to authorization and retention.
+
+Every persisted log segment carries an explicit runner phase (`image_acquisition`, `execution`, or `cleanup`) in addition to its step position. The job page renders phase sections containing expandable step groups; both levels have stable anchors, and search preserves the phase context of every match.
 
 ## Failure modes and recovery
 
@@ -107,11 +113,9 @@ Measure LiveView connection count, reconnect rate, page latency, log segment lat
 
 ## Open questions
 
-- Select the graph rendering approach while preserving accessibility and LiveView compatibility.
 - Define log search indexing and raw download behavior for the MVP.
 - Create the initial visual design tokens before feature implementation.
 
 ## Out of scope / future work
 
 - Visual workflow authoring, annotations, organization dashboards, and custom themes.
-

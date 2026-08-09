@@ -38,8 +38,11 @@ defmodule RobineWeb.RepositoryLive.Secrets do
          |> assign(form: to_form(%{"name" => "", "value" => ""}))
          |> load_secrets()}
 
-      {:error, reason} ->
-        {:noreply, put_flash(socket, :error, "Cannot store secret: #{inspect(reason)}")}
+      {:error, :forbidden} ->
+        {:noreply, put_flash(socket, :error, "You do not have permission to store secrets.")}
+
+      {:error, _reason} ->
+        {:noreply, put_flash(socket, :error, "The secret could not be stored.")}
     end
   end
 

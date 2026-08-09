@@ -1,8 +1,19 @@
 defmodule RobineWeb.AuthControllerTest do
   use RobineWeb.ConnCase, async: false
+  import Phoenix.LiveViewTest
 
-  alias Robine.Adapters.Persistence.Postgres.Schemas.Session
+  alias Robine.Adapters.Persistence.Postgres.Schemas.{OIDCIdentity, Session, User}
   alias Robine.Repo
+
+  defmodule ProviderOutageOIDC do
+    @behaviour Robine.Identities.Ports.OIDC
+
+    @impl true
+    def authorize_url(_config), do: {:error, :provider_unavailable}
+
+    @impl true
+    def callback(_config, _params), do: {:error, :provider_unavailable}
+  end
 
   test "renders sign-in and first-run setup", %{conn: conn} do
     assert conn |> get(~p"/sign-in") |> html_response(200) =~ "Sign in"
@@ -36,5 +47,72 @@ defmodule RobineWeb.AuthControllerTest do
     conn = post(conn, ~p"/sign-in", %{"email" => "missing@example.com", "password" => "wrong"})
     assert redirected_to(conn) == ~p"/sign-in"
     assert Phoenix.Flash.get(conn.assigns.flash, :error) == "Invalid email or password."
+  end
+
+  test "provider outage creates no partial identity and preserves local administrator recovery",
+       %{
+         conn: conn
+       } do
+    previous_adapter = Application.fetch_env!(:robine, :oidc_adapter)
+    previous_config = Application.fetch_env!(:robine, :oidc_config)
+
+    Application.put_env(:robine, :oidc_adapter, ProviderOutageOIDC)
+
+    Application.put_env(:robine, :oidc_config,
+      base_url: "https://unavailable-id.example",
+      client_id: "client",
+      redirect_uri: "http://localhost/auth/oidc/callback"
+    )
+
+    on_exit(fn ->
+      Application.put_env(:robine, :oidc_adapter, previous_adapter)
+      Application.put_env(:robine, :oidc_config, previous_config)
+    end)
+
+    conn =
+      post(conn, ~p"/setup", %{
+        "token" => "test-bootstrap-token",
+        "email" => "admin@example.com",
+        "password" => "a secure password"
+      })
+
+    conn = conn |> recycle() |> delete(~p"/sign-out")
+    baseline_sessions = Repo.aggregate(Session, :count)
+
+    oidc_conn = conn |> recycle() |> get(~p"/auth/oidc")
+    assert redirected_to(oidc_conn) == ~p"/sign-in"
+
+    assert Phoenix.Flash.get(oidc_conn.assigns.flash, :error) ==
+             "OpenID Connect is currently unavailable. Use local recovery sign-in."
+
+    callback_conn =
+      conn
+      |> recycle()
+      |> init_test_session(%{oidc_session_params: %{state: "state", nonce: "nonce"}})
+      |> get(~p"/auth/oidc/callback", %{"code" => "unreachable"})
+
+    assert redirected_to(callback_conn) == ~p"/sign-in"
+
+    assert Phoenix.Flash.get(callback_conn.assigns.flash, :error) ==
+             "SSO sign-in could not be verified. Please try again or use local recovery sign-in."
+
+    assert get_session(callback_conn, :oidc_session_params) == nil
+    assert Repo.aggregate(User, :count) == 1
+    assert Repo.aggregate(OIDCIdentity, :count) == 0
+    assert Repo.aggregate(Session, :count) == baseline_sessions
+
+    recovery_conn =
+      conn
+      |> recycle()
+      |> post(~p"/sign-in", %{
+        "email" => "admin@example.com",
+        "password" => "a secure password"
+      })
+
+    assert redirected_to(recovery_conn) == ~p"/"
+    assert get_session(recovery_conn, :session_token)
+    assert Repo.aggregate(Session, :count) == baseline_sessions + 1
+    assert {:ok, _view, html} = live(recovery_conn, ~p"/admin")
+    assert html =~ "Administration"
   end
 end

@@ -17,6 +17,8 @@ defmodule Robine.Pipelines.UseCases.CreatePipeline do
       pipeline_id = deps.id_generator.generate()
       jobs = Map.get(input, :jobs, %{})
 
+      input = Map.put_new(input, :actor, actor.id)
+
       with {:ok, pipeline} <- Pipeline.create(input, pipeline_id, now),
            {:ok, revision} <- workflow_revision(input, jobs, pipeline_id, now, deps),
            :ok <- deps.pipeline_repository.insert(pipeline),
@@ -76,8 +78,7 @@ defmodule Robine.Pipelines.UseCases.CreatePipeline do
     %{
       "image" => Map.get(definition, :image, Map.get(definition, "image")),
       "env" => Map.get(definition, :env, Map.get(definition, "env", %{})),
-      "timeout_ms" =>
-        Map.get(definition, :timeout_ms, Map.get(definition, "timeout_ms", 1_200_000)),
+      "timeout_ms" => normalized_timeout_ms(definition),
       "shell" => Map.get(definition, :shell, Map.get(definition, "shell", "/bin/sh")),
       "secret_names" => Map.get(definition, :secrets, Map.get(definition, "secrets", [])),
       "steps" =>
@@ -98,6 +99,24 @@ defmodule Robine.Pipelines.UseCases.CreatePipeline do
       "with" => Map.get(step, :with, Map.get(step, "with", %{}))
     }
   end
+
+  defp normalized_timeout_ms(definition) do
+    case Map.get(definition, :timeout_ms, Map.get(definition, "timeout_ms")) do
+      value when is_integer(value) and value > 0 -> value
+      _missing -> duration_ms(Map.get(definition, :timeout, Map.get(definition, "timeout")))
+    end
+  end
+
+  defp duration_ms(value) when is_binary(value) do
+    case Regex.run(~r/\A(\d+)(s|m|h)\z/, value) do
+      [_, amount, "s"] -> String.to_integer(amount) * 1_000
+      [_, amount, "m"] -> String.to_integer(amount) * 60_000
+      [_, amount, "h"] -> String.to_integer(amount) * 3_600_000
+      _invalid -> 1_200_000
+    end
+  end
+
+  defp duration_ms(_value), do: 1_200_000
 
   defp workflow_revision(input, jobs, pipeline_id, now, deps) do
     graph = normalized_graph(jobs)

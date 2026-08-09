@@ -33,4 +33,16 @@ defmodule Robine.Repositories do
   defdelegate check_github_installation(input, context),
     to: UseCases.CheckGitHubInstallation,
     as: :call
+
+  @spec discover_github_repositories(map(), ExecutionContext.t()) ::
+          {:ok, [map()]} | {:error, term()}
+  defdelegate discover_github_repositories(input, context),
+    to: UseCases.DiscoverGitHubRepositories,
+    as: :call
+
+  @spec trust_github_repository(map(), ExecutionContext.t()) ::
+          {:ok, RepositoryView.t()} | {:error, term()}
+  defdelegate trust_github_repository(input, context),
+    to: UseCases.TrustGitHubRepository,
+    as: :call
 end

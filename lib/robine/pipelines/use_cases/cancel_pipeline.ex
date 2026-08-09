@@ -14,7 +14,7 @@ defmodule Robine.Pipelines.UseCases.CancelPipeline do
       when is_binary(id) and role in [:administrator, :maintainer] do
     deps.unit_of_work.transaction(fn ->
       with {:ok, pipeline} <- deps.pipeline_repository.get(id),
-           {:ok, cancelled} <- Pipeline.request_cancellation(pipeline),
+           {:ok, cancelled} <- Pipeline.request_cancellation(pipeline, deps.clock.now()),
            :ok <- cancel_jobs(id, deps),
            :ok <- deps.pipeline_repository.update(cancelled),
            :ok <- deps.event_outbox.append(projection_event(cancelled.id, deps)) do

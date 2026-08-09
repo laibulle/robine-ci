@@ -1,6 +1,7 @@
 defmodule RobineWeb.JobLive.Show do
   use RobineWeb, :live_view
   alias Robine.Pipelines
+  @log_window 50
 
   @impl true
   def mount(%{"id" => pipeline_id, "job_id" => job_id}, _session, socket) do
@@ -51,8 +52,11 @@ defmodule RobineWeb.JobLive.Show do
            "Retry refused; unavailable artifacts: #{Enum.join(inputs, ", ")}."
          )}
 
-      {:error, reason} ->
-        {:noreply, put_flash(socket, :error, "Cannot retry job: #{inspect(reason)}")}
+      {:error, :forbidden} ->
+        {:noreply, put_flash(socket, :error, "You do not have permission to retry jobs.")}
+
+      {:error, _reason} ->
+        {:noreply, put_flash(socket, :error, "The job could not be retried.")}
     end
   end
 
@@ -71,8 +75,11 @@ defmodule RobineWeb.JobLive.Show do
          )
          |> load()}
 
-      {:error, reason} ->
-        {:noreply, put_flash(socket, :error, "Cannot rerun dependencies: #{inspect(reason)}")}
+      {:error, :forbidden} ->
+        {:noreply, put_flash(socket, :error, "You do not have permission to retry jobs.")}
+
+      {:error, _reason} ->
+        {:noreply, put_flash(socket, :error, "The dependency jobs could not be rerun.")}
     end
   end
 
@@ -102,12 +109,12 @@ defmodule RobineWeb.JobLive.Show do
         else: socket
 
     case Pipelines.list_job_logs(
-           %{job_id: socket.assigns.job_id, after: socket.assigns.log_cursor, limit: 200},
+           %{job_id: socket.assigns.job_id, after: socket.assigns.log_cursor, limit: @log_window},
            socket.assigns.execution_context
          ) do
       {:ok, page} ->
         assign(socket,
-          log_chunks: Enum.take(socket.assigns.log_chunks ++ page.chunks, -200),
+          log_chunks: Enum.take(socket.assigns.log_chunks ++ page.chunks, -@log_window),
           log_cursor: page.next_cursor
         )
 
@@ -116,24 +123,41 @@ defmodule RobineWeb.JobLive.Show do
     end
   end
 
-  defp visible_groups(chunks, query) do
-    groups =
-      chunks
-      |> Enum.chunk_by(& &1.step_position)
-      |> Enum.map(fn step_chunks ->
-        first = hd(step_chunks)
-        last = List.last(step_chunks)
+  defp visible_phases(chunks, query) do
+    chunks
+    |> Enum.chunk_by(& &1.phase)
+    |> Enum.map(fn phase_chunks ->
+      phase = hd(phase_chunks).phase
 
-        %{
-          position: first.step_position,
-          name: first.step_name,
-          status: last.step_status,
-          duration_ms: last.duration_ms,
-          chunks: step_chunks
-        }
-      end)
+      %{
+        key: phase,
+        label: phase_label(phase),
+        groups: phase_chunks |> step_groups(phase) |> filter_groups(query)
+      }
+    end)
+    |> Enum.reject(&(&1.groups == []))
+  end
 
-    filter_groups(groups, query)
+  defp step_groups(chunks, phase) do
+    chunks
+    |> Enum.chunk_by(& &1.step_position)
+    |> Enum.map(fn step_chunks ->
+      first = hd(step_chunks)
+      last = List.last(step_chunks)
+
+      %{
+        id:
+          if(phase == "execution",
+            do: "step-#{first.step_position}",
+            else: "phase-#{phase}-step-#{first.step_position}"
+          ),
+        position: first.step_position,
+        name: first.step_name,
+        status: last.step_status,
+        duration_ms: last.duration_ms,
+        chunks: step_chunks
+      }
+    end)
   end
 
   defp filter_groups(groups, ""), do: groups
@@ -147,6 +171,11 @@ defmodule RobineWeb.JobLive.Show do
     end)
   end
 
+  defp phase_label("image_acquisition"), do: "Image acquisition"
+  defp phase_label("execution"), do: "Execution"
+  defp phase_label("cleanup"), do: "Cleanup"
+  defp phase_label(phase), do: phase |> to_string() |> String.replace("_", " ")
+
   @impl true
   def render(assigns) do
     ~H"""
@@ -155,7 +184,10 @@ defmodule RobineWeb.JobLive.Show do
         <header>
           <.link navigate={~p"/pipelines/#{@pipeline.id}"} class="link text-sm">← {@pipeline.workflow_name}</.link>
           <div class="mt-4 flex items-center gap-3">
-            <h1 class="text-4xl font-bold">{@job.job_key}</h1><span class="badge badge-lg">{@job.status}</span>
+            <h1 class="text-4xl font-bold">{@job.job_key}</h1><.status_badge
+              status={@job.status}
+              size="lg"
+            />
             <button
               :if={
                 @current_actor.role in [:administrator, :maintainer] and
@@ -206,7 +238,7 @@ defmodule RobineWeb.JobLive.Show do
           <div class="flex flex-wrap items-center justify-between gap-3">
             <div>
               <h2 class="text-xl font-semibold">Logs</h2><p class="text-sm text-base-content/60">
-                Showing at most 200 recent 64 KB segments.
+                Showing at most 50 recent 64 KB segments.
               </p>
             </div>
             <form phx-change="filter">
@@ -222,24 +254,37 @@ defmodule RobineWeb.JobLive.Show do
               /></label>
             </form>
           </div>
-          <div id="log-segments" class="space-y-3">
-            <details
-              :for={group <- visible_groups(@log_chunks, @query)}
-              id={"step-#{group.position}"}
-              open
-              class="overflow-hidden rounded-2xl border border-base-300 bg-neutral text-neutral-content"
+          <div id="log-segments" class="space-y-6">
+            <section
+              :for={phase <- visible_phases(@log_chunks, @query)}
+              id={"phase-#{phase.key}"}
+              aria-labelledby={"phase-#{phase.key}-title"}
+              class="space-y-3"
             >
-              <summary class="flex cursor-pointer list-none flex-wrap items-center justify-between gap-3 border-b border-neutral-content/15 px-4 py-3">
-                <a href={"#step-#{group.position}"} class="font-semibold hover:underline">{group.name}</a><span class="text-xs opacity-70">{group.status} · {group.duration_ms} ms</span>
-              </summary>
-              <pre
-                class="max-h-96 overflow-auto whitespace-pre-wrap break-words p-4 text-sm"
-                tabindex="0"
-              ><code><span :for={chunk <- group.chunks} id={"log-#{chunk.sequence}"}>{chunk.content}</span></code></pre>
-            </details>
+              <h3
+                id={"phase-#{phase.key}-title"}
+                class="text-sm font-semibold uppercase tracking-wide"
+              >
+                <a href={"#phase-#{phase.key}"} class="hover:underline">{phase.label}</a>
+              </h3>
+              <details
+                :for={group <- phase.groups}
+                id={group.id}
+                open
+                class="overflow-hidden rounded-2xl border border-base-300 bg-neutral text-neutral-content"
+              >
+                <summary class="flex cursor-pointer list-none flex-wrap items-center justify-between gap-3 border-b border-neutral-content/15 px-4 py-3">
+                  <a href={"##{group.id}"} class="font-semibold hover:underline">{group.name}</a><span class="text-xs opacity-70">{group.status} · {group.duration_ms} ms</span>
+                </summary>
+                <pre
+                  class="max-h-96 overflow-auto whitespace-pre-wrap break-words p-4 text-sm"
+                  tabindex="0"
+                ><code><span :for={chunk <- group.chunks} id={"log-#{chunk.sequence}"}>{chunk.content}</span></code></pre>
+              </details>
+            </section>
           </div>
           <p
-            :if={@query != "" and visible_groups(@log_chunks, @query) == []}
+            :if={@query != "" and visible_phases(@log_chunks, @query) == []}
             class="rounded-2xl border border-dashed border-base-300 p-8 text-center"
           >
             No visible log segment matches “{@query}”.

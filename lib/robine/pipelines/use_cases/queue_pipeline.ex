@@ -14,7 +14,7 @@ defmodule Robine.Pipelines.UseCases.QueuePipeline do
       when is_binary(id) and role in [:administrator, :maintainer] do
     deps.unit_of_work.transaction(fn ->
       with {:ok, pipeline} <- deps.pipeline_repository.get(id),
-           {:ok, queued} <- queue(pipeline),
+           {:ok, queued} <- queue(pipeline, deps.clock.now()),
            :ok <- deps.pipeline_repository.update(queued) do
         {:ok, PipelineView.from_domain(queued)}
       end
@@ -23,7 +23,7 @@ defmodule Robine.Pipelines.UseCases.QueuePipeline do
 
   def call(_input, %ExecutionContext{}), do: {:error, :forbidden}
 
-  defp queue(%Pipeline{status: :queued} = pipeline), do: {:ok, pipeline}
-  defp queue(%Pipeline{status: :running} = pipeline), do: {:ok, pipeline}
-  defp queue(pipeline), do: Pipeline.transition(pipeline, :queued)
+  defp queue(%Pipeline{status: :queued} = pipeline, _now), do: {:ok, pipeline}
+  defp queue(%Pipeline{status: :running} = pipeline, _now), do: {:ok, pipeline}
+  defp queue(pipeline, now), do: Pipeline.transition(pipeline, :queued, now)
 end

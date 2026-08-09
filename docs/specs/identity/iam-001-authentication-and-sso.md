@@ -5,7 +5,7 @@
 - **State:** Draft
 - **Owner:** Identity
 - **Target:** MVP
-- **Last updated:** 2026-08-08
+- **Last updated:** 2026-08-09
 
 ## Summary
 
@@ -74,6 +74,20 @@ Identity records separate users from authentication identities. A user can hold 
 
 OIDC is part of the AGPL-licensed self-hosted product. The supported MVP surface is standards-based OIDC only; the product should call it “SSO with OpenID Connect,” not imply SAML or LDAP support.
 
+The OIDC protocol client is selected at the application composition root and consumed through the identity OIDC port. Provider failures MUST remain ordinary use-case errors: the web boundary clears transient OIDC session parameters, creates neither a user, an OIDC identity, nor a local session, and directs the operator to local recovery sign-in. OIDC availability MUST NOT be a dependency of local password authentication, session resolution, or administrator authorization.
+
+### Server-side web authorization matrix
+
+| Surface | Minimum role | Server-side enforcement |
+|---|---|---|
+| Pipeline, job, workflow revision, repository reads | Viewer | Authenticated LiveView session plus read-use-case policy |
+| Cancel pipeline, retry job, check installation permissions | Maintainer | Mutation/use-case role guard; forged LiveView events are refused |
+| Repository secrets | Maintainer | Maintainer LiveView session plus secret use-case policy |
+| Repository discovery/trust | Administrator | Discovery/trust use-case policy; browser metadata is revalidated against GitHub |
+| Identity, health, retention, and instance credentials | Administrator | Administrator LiveView session plus each application use-case policy |
+
+Visibility of a button is never an authorization boundary. Every LiveView event calls a facade use case with the session-derived actor, and tests issue hidden events directly to prove the underlying policy still rejects them.
+
 ## Failure modes and recovery
 
 | Failure | Expected behavior | Recovery |
@@ -97,7 +111,8 @@ Metrics include login success/failure by method, OIDC discovery/JWKS failures, s
 - [ ] OIDC login validates issuer, audience, signature, nonce, state, and PKCE.
 - [ ] Email collision cannot silently take over an existing local account.
 - [ ] The last usable administrator cannot remove their own recovery path accidentally.
-- [ ] Every protected LiveView route and action performs server-side authorization.
+- [x] Every protected LiveView route and action performs server-side authorization, including forged hidden-event coverage.
+- [x] A provider outage during authorization or callback creates no partial identity/session, and a local administrator can still sign in and reach instance administration.
 
 ## Open questions
 
@@ -108,4 +123,3 @@ Metrics include login success/failure by method, OIDC discovery/JWKS failures, s
 ## Out of scope / future work
 
 - SAML, LDAP, SCIM, multiple providers, group mapping, and custom roles.
-

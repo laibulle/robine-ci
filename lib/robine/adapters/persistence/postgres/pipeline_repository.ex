@@ -82,8 +82,12 @@ defmodule Robine.Adapters.Persistence.Postgres.PipelineRepository do
       repository_id: schema.repository_id,
       workflow_name: schema.workflow_name,
       commit_sha: schema.commit_sha,
+      trigger: schema.trigger,
+      actor: schema.actor,
       status: schema.status,
-      inserted_at: schema.inserted_at
+      inserted_at: schema.inserted_at,
+      started_at: schema.started_at,
+      finished_at: schema.finished_at
     })
   end
 

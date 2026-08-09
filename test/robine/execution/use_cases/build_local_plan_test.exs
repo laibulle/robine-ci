@@ -46,6 +46,39 @@ defmodule Robine.Execution.UseCases.BuildLocalPlanTest do
     assert [%{steps: [%{name: "Test", value: "mix test"}]}] = plan.specifications
   end
 
+  test "injects only explicitly declared local secrets and rejects missing declarations" do
+    context = ExecutionContext.new(%{id: "developer", role: :maintainer}, "local-secrets", %{})
+
+    assert {:ok, plan} =
+             Execution.build_local_plan(
+               %{
+                 validated_workflow: validated(workflow()),
+                 source_path: "/tmp/project",
+                 job_id: "test",
+                 step: nil,
+                 local_secret_file: true,
+                 local_secrets: %{"TOKEN" => "local-secret", "UNUSED" => "unused-secret"}
+               },
+               context
+             )
+
+    assert [%{secrets: %{}}, %{secrets: %{"TOKEN" => "local-secret"}}] = plan.specifications
+    assert plan.local_secret_count == 1
+
+    assert {:error, {:local_secrets_missing, ["TOKEN"]}} =
+             Execution.build_local_plan(
+               %{
+                 validated_workflow: validated(workflow()),
+                 source_path: "/tmp/project",
+                 job_id: "test",
+                 step: nil,
+                 local_secret_file: true,
+                 local_secrets: %{}
+               },
+               context
+             )
+  end
+
   defp validated(workflow),
     do: %ValidatedWorkflow{
       path: "/tmp/project/.robine-ci/workflows/ci.yml",
@@ -73,6 +106,7 @@ defmodule Robine.Execution.UseCases.BuildLocalPlanTest do
           id: "test",
           image: "elixir:1.18",
           needs: ["build"],
+          secrets: ["TOKEN"],
           steps: [%Step{name: "Test", kind: :run, value: "mix test"}]
         }
       }

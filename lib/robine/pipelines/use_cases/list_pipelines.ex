@@ -18,8 +18,12 @@ defmodule Robine.Pipelines.UseCases.ListPipelines do
            :repository_id,
            :workflow_name,
            :commit_sha,
+           :trigger,
+           :actor,
            :status,
-           :inserted_at
+           :inserted_at,
+           :started_at,
+           :finished_at
          ])
        end)}
     end

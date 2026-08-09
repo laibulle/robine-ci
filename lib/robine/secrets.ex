@@ -20,6 +20,9 @@ defmodule Robine.Secrets do
   @spec redact_output(map()) :: {:ok, String.t()} | {:error, term()}
   defdelegate redact_output(input), to: UseCases.RedactOutput, as: :call
 
+  @spec validate_values(map()) :: :ok | {:error, term()}
+  defdelegate validate_values(input), to: UseCases.ValidateValues, as: :call
+
   @spec list_secrets(map(), ExecutionContext.t()) :: {:ok, [map()]} | {:error, term()}
   defdelegate list_secrets(input, context), to: UseCases.ListSecrets, as: :call
 

@@ -80,7 +80,7 @@ Every container defaults to 2 vCPU, 4 GiB of memory with swap disabled beyond th
 
 Cancellation is durable at pipeline level. Undispatched jobs become cancelled immediately and active jobs become cancelling. The runner polls the projection at most every 250 ms while a command is active, asks Docker to stop the full container, waits five seconds by default, and relies on Docker's forced kill after the grace period. Configure the grace with `ROBINE_RUNNER_CANCELLATION_GRACE_MS`.
 
-The local CLI calls the same execution library and constructs the same normalized execution specification. Differences, such as CI-provided metadata and secrets, are explicit inputs rather than hidden branches.
+The local CLI calls the same execution library and constructs the same normalized execution specification. The background worker no longer owns a private contract mapper: it calls the public `Execution.build_ci_specification/2` use case, while the CLI calls `build_local_plan/2`. Docker-backed success and failure fixtures compare every execution-semantic field and terminal result. Differences, such as attempt identity, CI-provided metadata, materialized source path, and secrets, are explicit inputs rather than hidden branches.
 
 ## Failure modes and recovery
 

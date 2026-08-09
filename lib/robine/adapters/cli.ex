@@ -4,6 +4,7 @@ defmodule Robine.Adapters.CLI do
   alias Robine.ExecutionContext
   alias Robine.Execution
   alias Robine.Execution.Dependencies, as: ExecutionDependencies
+  alias Robine.Adapters.CLI.LocalSecretFile
   alias Robine.Workflows
   alias Robine.Workflows.Dependencies
 
@@ -57,7 +58,7 @@ defmodule Robine.Adapters.CLI do
   def run(["run" | arguments], directory) do
     {options, jobs, invalid} =
       OptionParser.parse(arguments,
-        strict: [workflow: :string, no_deps: :boolean, step: :string],
+        strict: [workflow: :string, no_deps: :boolean, step: :string, env_file: :string],
         aliases: [w: :workflow]
       )
 
@@ -131,7 +132,8 @@ defmodule Robine.Adapters.CLI do
   defp execute_local(directory, job_id, options) do
     path = Path.expand(options[:workflow] || @workflow_path, directory)
 
-    with {:ok, source} <- File.read(path),
+    with {:ok, local_secrets} <- load_local_secrets(options[:env_file], directory),
+         {:ok, source} <- File.read(path),
          {:ok, validated} <- Workflows.validate(%{source: source, path: path}, context()),
          {:ok, plan} <-
            Execution.build_local_plan(
@@ -140,7 +142,9 @@ defmodule Robine.Adapters.CLI do
                source_path: directory,
                job_id: job_id,
                no_deps: options[:no_deps] == true,
-               step: options[:step]
+               step: options[:step],
+               local_secret_file: not is_nil(options[:env_file]),
+               local_secrets: local_secrets
              },
              context()
            ) do
@@ -158,10 +162,57 @@ defmodule Robine.Adapters.CLI do
       {:error, {:unknown_step, step}} ->
         {2, "Unknown step #{step}. Use a stable step name or one-based index."}
 
+      {:error, {:local_secrets_missing, names}} ->
+        {2, "Local secret file is missing required names: #{Enum.join(names, ", ")}."}
+
+      {:error, reason}
+      when reason in [
+             :git_repository_required,
+             :git_unavailable,
+             :local_secret_file_outside_repository,
+             :local_secret_file_not_found,
+             :unsafe_local_secret_file,
+             :local_secret_file_not_ignored,
+             :git_ignore_check_failed,
+             :local_secret_file_too_large
+           ] ->
+        {2, local_secret_error(reason)}
+
+      {:error, {:invalid_local_secret_file, line}} ->
+        {2, "Invalid local secret file syntax at #{inspect(line)}; use one NAME=VALUE per line."}
+
+      {:error, {:invalid_secret_value, name, reason}} ->
+        {2, "Local secret #{name} violates the masking policy: #{reason}."}
+
       {:error, reason} ->
         {3, "Cannot prepare local execution: #{inspect(reason)}"}
     end
   end
+
+  defp load_local_secrets(nil, _directory), do: {:ok, %{}}
+  defp load_local_secrets(path, directory), do: LocalSecretFile.load(path, directory)
+
+  defp local_secret_error(:git_repository_required),
+    do: "--env-file requires a Git repository so ignore status can be proven."
+
+  defp local_secret_error(:git_unavailable), do: "Git is required to verify --env-file."
+
+  defp local_secret_error(:local_secret_file_outside_repository),
+    do: "--env-file must be inside the repository."
+
+  defp local_secret_error(:local_secret_file_not_found), do: "Local secret file does not exist."
+
+  defp local_secret_error(:unsafe_local_secret_file),
+    do: "Local secret file must be a regular file, not a link or special file."
+
+  defp local_secret_error(:local_secret_file_not_ignored),
+    do: "Refusing local secret file because Git does not ignore it; add it to .gitignore first."
+
+  defp local_secret_error(:git_ignore_check_failed),
+    do: "Git could not prove that the local secret file is ignored."
+
+  defp local_secret_error(:local_secret_file_too_large),
+    do: "Local secret file exceeds the 1 MiB safety limit."
 
   defp execute_plan(plan, context) do
     source_path = plan.specifications |> List.first() |> Map.fetch!(:source_path)
@@ -177,6 +228,11 @@ defmodule Robine.Adapters.CLI do
     header =
       if plan.dependencies_omitted,
         do: header ++ ["Warning: required job dependencies were explicitly omitted."],
+        else: header
+
+    header =
+      if plan.local_secret_count > 0,
+        do: header ++ ["Local secrets: #{plan.local_secret_count} declared values injected."],
         else: header
 
     Enum.reduce_while(plan.specifications, {0, header, local_state}, fn specification,
@@ -360,6 +416,6 @@ defmodule Robine.Adapters.CLI do
 
   defp usage_error(message) do
     {64,
-     "#{message}\nUsage: robine init [--yes] [--force] | validate [path] [--format human|json] | run [job-id] [--workflow path] [--no-deps] [--step name-or-index] | version"}
+     "#{message}\nUsage: robine init [--yes] [--force] | validate [path] [--format human|json] | run [job-id] [--workflow path] [--no-deps] [--step name-or-index] [--env-file ignored-path] | version"}
   end
 end

@@ -212,6 +212,7 @@ defmodule Robine.Adapters.Execution.DockerRunner do
   defp emit_phase(callback, sequence, status, started, content) do
     callback.(%{
       sequence: sequence,
+      phase: :image_acquisition,
       step_position: 0,
       step_name: "Image acquisition",
       status: status,
@@ -599,6 +600,7 @@ defmodule Robine.Adapters.Execution.DockerRunner do
   defp emit_output(on_output, step, position, started, chunk, chunk_index) do
     on_output.(%{
       sequence: position * 1_000_000 + chunk_index,
+      phase: :execution,
       step_position: position,
       step_name: step.name,
       status: :running,
@@ -610,6 +612,7 @@ defmodule Robine.Adapters.Execution.DockerRunner do
   defp emit_terminal(on_output, step, position, chunk_index, status, exit_code, duration) do
     on_output.(%{
       sequence: position * 1_000_000 + chunk_index,
+      phase: :execution,
       step_position: position,
       step_name: step.name,
       status: status,

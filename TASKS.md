@@ -271,8 +271,8 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - [x] Run a workflow, selected job with dependencies, or selected step.
 - [x] Use the same normalized execution contract and local Docker adapter as CI.
 - [x] Show image, working directory, revision, and omitted CI-only inputs.
-- [ ] Support explicit ignored local secret files without server-side secret download. (Local cache and artifact built-ins run without server access; explicit secret files remain.)
-- [ ] Prove command, environment, workspace, image, and exit equivalence with CI fixtures. (A Docker-backed multi-job cache/artifact fixture proves core local data semantics; the full equivalence corpus remains.)
+- [x] Support explicit Git-ignored local secret files with declaration filtering, shared masking bounds, and no server-side secret download.
+- [x] Prove command, environment, workspace, image, timeout, output, and success/failure exit equivalence with shared CI/local Docker fixtures.
 
 ## Phase 7 — Identity and complete web experience
 
@@ -294,23 +294,23 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - [x] Implement metadata/JWKS refresh and bounded clock skew.
 - [x] Link identities by issuer and subject, never silently by email alone.
 - [x] Add provider preflight test and exact redirect URI guidance.
-- [ ] Test provider outage and break-glass recovery. (The paths are independent and errors preserve local sign-in; explicit outage integration coverage remains.)
+- [x] Test provider outage and break-glass recovery, including failed authorization and callback, no partial identity/session, and local administrator access during the incident.
 
 ### WEB-101 — Implement setup and administration
 
 - **Specs:** [WEB-001](docs/specs/web/web-001-pipeline-experience.md), [IAM-001](docs/specs/identity/iam-001-authentication-and-sso.md)
 - **Depends on:** IAM-102, GH-101, SEC-101
-- [ ] Define Tailwind design tokens and accessible base components. (Responsive navigation, status labels, semantic tables, alerts, and form components exist; the documented token layer remains.)
-- [ ] Build first-run, sign-in, repository selection, secrets, identity, retention, and instance-health pages. (First-run, sign-in, repository browsing, write-only secrets, identity administration, retention controls, and instance health are complete; installation selection remains.)
-- [ ] Design every empty, loading, disconnected, degraded, and error state.
-- [ ] Enforce server-side authorization for routes and LiveView events. (Authenticated pipeline routes use a server-side on-mount hook; future administration routes and events remain.)
+- [x] Define semantic Tailwind design tokens and accessible base-component contracts for focus, motion, forms, alerts, tables, themes, and non-color-only statuses.
+- [x] Build first-run, sign-in, live GitHub installation/repository selection, secrets, identity, retention, and instance-health pages.
+- [x] Design shared empty, loading, disconnected, degraded, and error states with distinct recovery copy and assistive semantics.
+- [x] Enforce server-side authorization for every route and LiveView event, with route-role and forged hidden-event tests.
 
 ### WEB-102 — Implement repository and pipeline views
 
 - **Spec:** [WEB-001](docs/specs/web/web-001-pipeline-experience.md)
 - **Depends on:** WEB-101, EXEC-103, GH-103
 - [x] Build repository, immutable workflow-revision, pipeline-history, pipeline-detail, and job-detail pages.
-- [ ] Display dependency graph/list, status, trigger, actor, commit, phases, duration, and infrastructure failures.
+- [x] Display the accessible dependency graph/list, status, trigger, actor, exact commit, runner phases, durable duration, and distinct infrastructure failures.
 - [x] Implement authorized cancellation and job retry with confirmation.
 - [x] Show copyable local reproduction commands and omitted CI-only inputs.
 - [x] Preserve stable deep links across state changes.
@@ -321,7 +321,7 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - **Depends on:** WEB-102, SEC-102
 - [x] Persist and request logs by sequence cursor.
 - [x] Reconnect without duplicate or missing chunks.
-- [ ] Group by phase and step with expand, collapse, search, and deep links. (Step grouping, accessible expand/collapse, bounded search, and stable segment anchors exist; explicit runner-phase grouping remains.)
+- [x] Group persisted logs explicitly by runner phase and step with accessible expand/collapse, bounded search, and stable phase/step/segment deep links.
 - [x] Sanitize ANSI output before HTML rendering.
 - [x] Avoid loading complete logs into a LiveView process or browser DOM.
 - [ ] Pass the 100 MB navigation criterion and accessibility checks.
