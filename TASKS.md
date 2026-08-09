@@ -324,7 +324,7 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - [x] Group persisted logs explicitly by runner phase and step with accessible expand/collapse, bounded search, and stable phase/step/segment deep links.
 - [x] Sanitize ANSI output before HTML rendering.
 - [x] Avoid loading complete logs into a LiveView process or browser DOM.
-- [ ] Pass the 100 MB navigation criterion and accessibility checks.
+- [x] Pass an exact 100 MB bounded navigation test and automated semantic accessibility smoke checks for core journeys.
 
 ## Phase 8 — MVP hardening and release
 

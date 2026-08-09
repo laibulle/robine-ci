@@ -85,6 +85,8 @@ The log viewer stores neither all output in a LiveView socket nor all rendered n
 
 Every persisted log segment carries an explicit runner phase (`image_acquisition`, `execution`, or `cleanup`) in addition to its step position. The job page renders phase sections containing expandable step groups; both levels have stable anchors, and search preserves the phase context of every match.
 
+The log navigation performance fixture persists exactly 100,000,000 bytes and verifies that initial navigation renders at most 50 × 64 KB segments, produces less than 4 MB of HTML, and keeps the LiveView process below 30 MB. Automated semantic smoke checks cover setup, sign-in, navigation, history, and pipeline detail: one main landmark and page heading, unique IDs, named navigation and controls, labelled form fields, image alternatives, and textual status labels.
+
 ## Failure modes and recovery
 
 | Failure | Expected behavior | Recovery |
@@ -106,7 +108,7 @@ Measure LiveView connection count, reconnect rate, page latency, log segment lat
 
 - [ ] A user can complete all MVP administration through the UI.
 - [ ] A running job updates without manual refresh and reconnects without duplicate log lines.
-- [ ] A 100 MB test log can be navigated without loading 100 MB into a LiveView process or browser DOM.
+- [x] A 100 MB test log can be navigated without loading 100 MB into a LiveView process or browser DOM.
 - [ ] A failed step is apparent from the pipeline page and directly linkable.
 - [ ] All core journeys pass automated keyboard and accessibility checks, plus a manual screen-reader smoke test.
 - [ ] Retry clearly handles present and expired dependency artifacts.

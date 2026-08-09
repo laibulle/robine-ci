@@ -2,6 +2,7 @@ defmodule RobineWeb.GitHubWebhookController do
   use RobineWeb, :controller
 
   alias Robine.Repositories
+  alias Robine.Observability.Log
   alias Robine.Runtime.Dependencies
 
   def create(conn, _params) do
@@ -16,10 +17,20 @@ defmodule RobineWeb.GitHubWebhookController do
         delivery_id || Ecto.UUID.generate()
       )
 
-    case Repositories.accept_github_webhook(
-           %{delivery_id: delivery_id, event: event, signature: signature, body: raw_body},
-           context
-         ) do
+    result =
+      Repositories.accept_github_webhook(
+        %{delivery_id: delivery_id, event: event, signature: signature, body: raw_body},
+        context
+      )
+
+    Log.event(log_level(result), "github.webhook.received", %{
+      correlation_id: context.correlation_id,
+      delivery_id: delivery_id,
+      github_event: event,
+      outcome: outcome(result)
+    })
+
+    case result do
       {:ok, :accepted} ->
         conn |> put_status(:accepted) |> json(%{status: "accepted"})
 
@@ -36,4 +47,10 @@ defmodule RobineWeb.GitHubWebhookController do
         conn |> put_status(:service_unavailable) |> json(%{error: "temporarily unavailable"})
     end
   end
+
+  defp log_level({:ok, _result}), do: :info
+  defp log_level({:error, _reason}), do: :warning
+  defp outcome({:ok, result}), do: result
+  defp outcome({:error, :invalid_signature}), do: :invalid_signature
+  defp outcome({:error, _reason}), do: :error
 end

@@ -4,6 +4,7 @@ defmodule Robine.Adapters.Background.RunNextJobWorker do
 
   alias Robine.Execution
   alias Robine.Adapters.Background.RunnerControl
+  alias Robine.Observability.Log
   alias Robine.Pipelines
   alias Robine.Repositories
   alias Robine.Runtime.Dependencies
@@ -23,7 +24,17 @@ defmodule Robine.Adapters.Background.RunNextJobWorker do
            %{lease_seconds: Keyword.fetch!(runner_control, :lease_seconds)},
            context
          ) do
-      {:ok, attempt} -> execute(attempt, context)
+      {:ok, attempt} ->
+        attempt_context = %{context | correlation_id: "attempt:#{attempt.id}"}
+
+        Log.event(:info, "runner.attempt.claimed", %{
+          correlation_id: attempt_context.correlation_id,
+          attempt_id: attempt.id,
+          runner_id: "local",
+          outcome: :claimed
+        })
+
+        execute(attempt, attempt_context)
       {:error, :none} -> :ok
       {:error, :capacity} -> {:snooze, 1}
       {:error, reason} -> {:error, reason}
@@ -34,6 +45,7 @@ defmodule Robine.Adapters.Background.RunNextJobWorker do
     with {:ok, _preparing} <- record(attempt, 1, :preparing, nil, context),
          {:ok, raw_specification} <-
            Pipelines.job_execution(%{idempotency_token: attempt.idempotency_token}, context),
+         :ok <- log_execution_start(attempt, raw_specification, context),
          {:ok, source_path} <- materialize_source(raw_specification, context),
          {:ok, specification} <-
            Execution.build_ci_specification(
@@ -48,19 +60,41 @@ defmodule Robine.Adapters.Background.RunNextJobWorker do
     else
       {:error, reason} ->
         _ = record(attempt, 3, :failed, :system_failure, context)
+
+        Log.event(:error, "runner.attempt.completed", %{
+          correlation_id: context.correlation_id,
+          attempt_id: attempt.id,
+          runner_id: "local",
+          outcome: :system_failure
+        })
+
         {:error, reason}
     end
   end
 
   defp execute_specification(attempt, raw, specification, context) do
-    with {:ok, _running} <- record(attempt, 2, :running, nil, context),
-         {:ok, result} <- run_with_control(attempt, raw, specification, context),
-         {:ok, _terminal} <- record_result(attempt, result, context) do
-      enqueue_next()
-    else
-      {:error, reason} ->
-        _ = record(attempt, 3, :failed, :system_failure, context)
-        {:error, reason}
+    execution_result =
+      with {:ok, _running} <- record(attempt, 2, :running, nil, context),
+           {:ok, result} <- run_with_control(attempt, raw, specification, context),
+           {:ok, _terminal} <- record_result(attempt, result, context),
+           :ok <- enqueue_next() do
+        {:ok, result.status}
+      else
+        {:error, reason} ->
+          _ = record(attempt, 3, :failed, :system_failure, context)
+          {:error, reason}
+      end
+
+    Log.event(
+      if(match?({:ok, _status}, execution_result), do: :info, else: :error),
+      "runner.attempt.completed",
+      execution_metadata(attempt, raw, context)
+      |> Map.put(:outcome, execution_outcome(execution_result))
+    )
+
+    case execution_result do
+      {:ok, _status} -> :ok
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -249,4 +283,26 @@ defmodule Robine.Adapters.Background.RunNextJobWorker do
       {:error, reason} -> {:error, reason}
     end
   end
+
+  defp log_execution_start(attempt, raw, context) do
+    Log.event(
+      :info,
+      "runner.attempt.started",
+      Map.put(execution_metadata(attempt, raw, context), :outcome, :started)
+    )
+  end
+
+  defp execution_metadata(attempt, raw, context) do
+    %{
+      correlation_id: context.correlation_id,
+      pipeline_id: raw["pipeline_id"],
+      repository_id: raw["repository_id"],
+      job_id: raw["job_id"],
+      attempt_id: attempt.id,
+      runner_id: "local"
+    }
+  end
+
+  defp execution_outcome({:ok, status}), do: status
+  defp execution_outcome({:error, _reason}), do: :system_failure
 end

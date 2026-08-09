@@ -17,6 +17,14 @@ defmodule Robine.Adapters.SourceControl.GitHubTelemetry do
       status: status
     })
 
+    Robine.Observability.Log.event(
+      if(outcome == :ok, do: :info, else: :warning),
+      "github.api.request",
+      measurements
+      |> Map.take([:rate_limit_remaining, :rate_limit_limit])
+      |> Map.merge(%{method: method, outcome: outcome, status: status})
+    )
+
     :ok
   end
 
