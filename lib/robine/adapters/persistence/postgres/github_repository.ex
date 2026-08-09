@@ -4,7 +4,13 @@ defmodule Robine.Adapters.Persistence.Postgres.GitHubRepository do
   import Ecto.Query
 
   alias Robine.Adapters.Background.ProcessGitHubDeliveryWorker
-  alias Robine.Adapters.Persistence.Postgres.Schemas.{GitHubDelivery, GitHubRepository}
+
+  alias Robine.Adapters.Persistence.Postgres.Schemas.{
+    GitHubCheck,
+    GitHubDelivery,
+    GitHubRepository
+  }
+
   alias Robine.Repo
 
   @impl true
@@ -35,6 +41,22 @@ defmodule Robine.Adapters.Persistence.Postgres.GitHubRepository do
       nil -> {:error, :not_found}
       schema -> {:ok, repository_to_domain(schema)}
     end
+  end
+
+  @impl true
+  def get_by_id(id) do
+    case Repo.get(GitHubRepository, id) do
+      nil -> {:error, :not_found}
+      schema -> {:ok, repository_to_domain(schema)}
+    end
+  end
+
+  @impl true
+  def list do
+    repositories =
+      Repo.all(from repository in GitHubRepository, order_by: [asc: repository.full_name])
+
+    {:ok, Enum.map(repositories, &repository_to_domain/1)}
   end
 
   @impl true
@@ -83,6 +105,31 @@ defmodule Robine.Adapters.Persistence.Postgres.GitHubRepository do
         |> Repo.update()
         |> normalize(:delivery_persistence)
     end
+  end
+
+  @impl true
+  def get_check(external_key) do
+    case Repo.one(from check in GitHubCheck, where: check.external_key == ^external_key) do
+      nil -> {:error, :not_found}
+      check -> {:ok, Map.from_struct(check) |> Map.drop([:__meta__])}
+    end
+  end
+
+  @impl true
+  def upsert_check(attributes) do
+    GitHubCheck.changeset(%GitHubCheck{}, attributes)
+    |> Repo.insert(
+      on_conflict: [
+        set: [
+          provider_check_id: attributes.provider_check_id,
+          status: attributes.status,
+          conclusion: attributes.conclusion,
+          updated_at: DateTime.utc_now()
+        ]
+      ],
+      conflict_target: [:external_key]
+    )
+    |> normalize(:check_persistence)
   end
 
   defp normalize({:ok, _schema}, _tag), do: :ok

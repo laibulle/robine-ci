@@ -17,4 +17,14 @@ defmodule Robine.Repositories do
   defdelegate process_github_delivery(input, context),
     to: UseCases.ProcessGitHubDelivery,
     as: :call
+
+  @spec sync_github_checks(map(), ExecutionContext.t()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  defdelegate sync_github_checks(input, context), to: UseCases.SyncGitHubChecks, as: :call
+
+  @spec fetch_source(map(), ExecutionContext.t()) :: {:ok, map()} | {:error, term()}
+  defdelegate fetch_source(input, context), to: UseCases.FetchSource, as: :call
+
+  @spec list_repositories(map(), ExecutionContext.t()) :: {:ok, [map()]} | {:error, term()}
+  defdelegate list_repositories(input, context), to: UseCases.ListRepositories, as: :call
 end

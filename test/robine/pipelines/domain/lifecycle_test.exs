@@ -63,6 +63,28 @@ defmodule Robine.Pipelines.Domain.LifecycleTest do
     assert Attempt.lease_expired?(failed, ~U[2026-08-08 12:06:00Z])
   end
 
+  test "heartbeats extend active leases without consuming an event sequence" do
+    {:ok, attempt} =
+      Attempt.new(%{
+        id: "attempt",
+        job_id: "job",
+        number: 1,
+        idempotency_token: "token",
+        lease_expires_at: ~U[2026-08-08 12:05:00Z]
+      })
+
+    assert {:ok, renewed} = Attempt.heartbeat(attempt, ~U[2026-08-08 12:04:30Z], 120)
+    assert renewed.lease_expires_at == ~U[2026-08-08 12:06:30Z]
+    assert renewed.last_sequence == attempt.last_sequence
+
+    assert {:ok, ^renewed} = Attempt.heartbeat(renewed, ~U[2026-08-08 12:04:00Z], 60)
+
+    {:ok, terminal} = Attempt.record_event(attempt, 1, :failed, :runner_lost)
+
+    assert {:error, {:attempt_terminal, :failed}} =
+             Attempt.heartbeat(terminal, DateTime.utc_now(), 60)
+  end
+
   test "step exit codes agree with terminal status" do
     step = %Step{id: "step", attempt_id: "attempt", name: "Test", position: 0, status: :pending}
 

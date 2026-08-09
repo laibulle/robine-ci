@@ -1,0 +1,11 @@
+version: 1
+name: Unsafe cache
+on: {push: {}}
+jobs:
+  test:
+    image: alpine:3.22
+    steps:
+      - uses: cache/save
+        with:
+          key: deps
+          paths: [../outside]

@@ -1,0 +1,3 @@
+defmodule Robine.Pipelines.UseCases.ForbiddenFixture do
+  alias Robine.Adapters.Persistence.Postgres.JobRepository
+end

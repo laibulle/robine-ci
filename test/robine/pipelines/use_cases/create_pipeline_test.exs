@@ -24,6 +24,9 @@ defmodule Robine.Pipelines.UseCases.CreatePipelineTest do
 
     @impl true
     def update(_pipeline), do: :ok
+
+    @impl true
+    def list_recent(_limit), do: {:ok, []}
   end
 
   defmodule FakeEventOutbox do

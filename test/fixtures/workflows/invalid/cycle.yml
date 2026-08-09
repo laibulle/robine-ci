@@ -1,0 +1,12 @@
+version: 1
+name: Cycle
+on: {push: {}}
+jobs:
+  first:
+    image: alpine:3.22
+    needs: second
+    steps: [{run: "true"}]
+  second:
+    image: alpine:3.22
+    needs: first
+    steps: [{run: "true"}]

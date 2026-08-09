@@ -4,7 +4,7 @@ defmodule Robine.Pipelines.UseCases.CancelPipeline do
   alias Robine.ExecutionContext
   alias Robine.Pipelines.Contracts.PipelineView
   alias Robine.Pipelines.Dependencies
-  alias Robine.Pipelines.Domain.Pipeline
+  alias Robine.Pipelines.Domain.{Job, Pipeline}
 
   @spec call(map(), ExecutionContext.t()) :: {:ok, PipelineView.t()} | {:error, term()}
   def call(%{pipeline_id: id}, %ExecutionContext{
@@ -15,6 +15,7 @@ defmodule Robine.Pipelines.UseCases.CancelPipeline do
     deps.unit_of_work.transaction(fn ->
       with {:ok, pipeline} <- deps.pipeline_repository.get(id),
            {:ok, cancelled} <- Pipeline.request_cancellation(pipeline),
+           :ok <- cancel_jobs(id, deps),
            :ok <- deps.pipeline_repository.update(cancelled) do
         {:ok, PipelineView.from_domain(cancelled)}
       end
@@ -22,4 +23,31 @@ defmodule Robine.Pipelines.UseCases.CancelPipeline do
   end
 
   def call(_input, %ExecutionContext{}), do: {:error, :forbidden}
+
+  defp cancel_jobs(_pipeline_id, %{job_repository: nil}), do: :ok
+
+  defp cancel_jobs(pipeline_id, deps) do
+    with {:ok, jobs} <- deps.job_repository.list_jobs(pipeline_id) do
+      Enum.reduce_while(jobs, :ok, fn job, :ok ->
+        case cancellation_target(job) do
+          nil ->
+            {:cont, :ok}
+
+          target ->
+            with {:ok, changed} <- Job.transition(job, target),
+                 :ok <- deps.job_repository.update_job(changed) do
+              {:cont, :ok}
+            else
+              {:error, reason} -> {:halt, {:error, reason}}
+            end
+        end
+      end)
+    end
+  end
+
+  defp cancellation_target(%Job{status: status}) when status in [:blocked, :queued],
+    do: :cancelled
+
+  defp cancellation_target(%Job{status: :running}), do: :cancelling
+  defp cancellation_target(%Job{}), do: nil
 end

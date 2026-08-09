@@ -8,6 +8,7 @@ defmodule RobineWeb.Router do
     plug :put_root_layout, html: {RobineWeb.Layouts, :root}
     plug :protect_from_forgery
     plug :put_secure_browser_headers
+    plug RobineWeb.Plugs.FetchCurrentActor
   end
 
   pipeline :api do
@@ -18,11 +19,49 @@ defmodule RobineWeb.Router do
     pipe_through :browser
 
     get "/", PageController, :home
+    get "/sign-in", AuthController, :new
+    post "/sign-in", AuthController, :create
+    delete "/sign-out", AuthController, :delete
+    get "/auth/oidc", AuthController, :oidc
+    get "/auth/oidc/callback", AuthController, :oidc_callback
+    get "/setup", AuthController, :bootstrap
+    post "/setup", AuthController, :create_bootstrap
+
+    live_session :authenticated,
+      on_mount: [{RobineWeb.UserAuth, :require_authenticated}] do
+      live "/pipelines", PipelineLive.Index, :index
+      live "/pipelines/:id", PipelineLive.Show, :show
+      live "/pipelines/:id/jobs/:job_id", JobLive.Show, :show
+      live "/repositories", RepositoryLive.Index, :index
+      live "/repositories/:id", RepositoryLive.Show, :show
+    end
+
+    live_session :maintainer,
+      on_mount: [
+        {RobineWeb.UserAuth, :require_authenticated},
+        {RobineWeb.UserAuth, :require_maintainer}
+      ] do
+      live "/repositories/:id/secrets", RepositoryLive.Secrets, :index
+    end
+
+    live_session :administrator,
+      on_mount: [
+        {RobineWeb.UserAuth, :require_authenticated},
+        {RobineWeb.UserAuth, :require_administrator}
+      ] do
+      live "/admin", AdminLive.Index, :index
+    end
   end
 
   scope "/api/github", RobineWeb do
     pipe_through :api
     post "/webhooks", GitHubWebhookController, :create
+  end
+
+  scope "/health", RobineWeb do
+    pipe_through :api
+    get "/live", HealthController, :live
+    get "/ready", HealthController, :ready
   end
 
   # Other scopes may use custom stacks.

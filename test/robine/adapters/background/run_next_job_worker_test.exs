@@ -5,7 +5,7 @@ defmodule Robine.Adapters.Background.RunNextJobWorkerTest do
   import Ecto.Query
 
   alias Robine.Adapters.Background.{OutboxDeliveryWorker, RunNextJobWorker}
-  alias Robine.Adapters.Persistence.Postgres.Schemas.{Attempt, Pipeline}
+  alias Robine.Adapters.Persistence.Postgres.Schemas.{Attempt, LogChunk, Pipeline}
   alias Robine.Pipelines
   alias Robine.Runtime.Dependencies
   alias Robine.Secrets
@@ -47,6 +47,16 @@ defmodule Robine.Adapters.Background.RunNextJobWorkerTest do
 
     assert Repo.get!(Pipeline, pipeline.id).status == :succeeded
     assert Repo.one!(Attempt).status == :succeeded
+    chunks = Repo.all(from chunk in LogChunk, order_by: [asc: chunk.sequence])
+
+    assert Enum.any?(
+             chunks,
+             &(&1.step_name == "Image acquisition" and &1.step_status == "succeeded")
+           )
+
+    command_chunks = Enum.filter(chunks, &(&1.step_name == "Test"))
+    assert Enum.map_join(command_chunks, & &1.content) == "hello robine"
+    assert Enum.map(command_chunks, & &1.step_status) == ["running", "succeeded"]
   end
 
   @tag :docker

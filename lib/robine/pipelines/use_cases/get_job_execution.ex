@@ -19,7 +19,12 @@ defmodule Robine.Pipelines.UseCases.GetJobExecution do
       {:ok,
        job.execution
        |> Map.put("attempt_id", attempt.id)
+       |> Map.put("job_id", job.id)
+       |> Map.put("job_key", job.job_key)
+       |> Map.put("needs", job.needs)
        |> Map.put("idempotency_token", attempt.idempotency_token)
+       |> Map.put("pipeline_id", pipeline.id)
+       |> Map.put("commit_sha", pipeline.commit_sha)
        |> Map.put("repository_id", pipeline.repository_id)}
     else
       false -> {:error, :execution_specification_missing}

@@ -5,6 +5,31 @@ This is a web application written using the Phoenix web framework.
 - Use `mix precommit` alias when you are done with all changes and fix any pending issues
 - Use the already included and available `:req` (`Req`) library for HTTP requests, **avoid** `:httpoison`, `:tesla`, and `:httpc`. Req is included by default and is the preferred HTTP client for Phoenix apps
 
+### Product specifications and task tracking
+
+- Write specifications in English under `docs/specs/<domain>/<feat-id>-<feature-name>.md`.
+- Start every new specification from `docs/specs/TEMPLATE.md`; use stable uppercase feature IDs in prose and lowercase kebab-case file names.
+- Treat accepted specifications as the source of truth for product behavior. Resolve blocking open questions before changing a specification to `Accepted`.
+- Track implementation in `TASKS.md`. Mark an item `[x]` only after its exit criteria are implemented and verified; annotate partial work instead of overstating completion.
+- When implementation changes a documented contract, update the specification and `TASKS.md` in the same change.
+
+### Clean architecture
+
+- Keep Robine as one Mix/OTP application for the MVP. Boundaries are module-level and enforced by architecture tests.
+- Organize each bounded context under `Robine.<Context>` with `domain/`, `use_cases/`, `ports/`, optional `contracts/` or `queries/`, and one public facade module.
+- Expose every public operation from its context facade with an explicit, documented `defdelegate` to one `UseCases.*.call/2` function. Facades contain no business logic.
+- Put business invariants and state transitions in pure domain modules. Domain code must not depend on Phoenix, LiveView, Ecto, Oban, Docker, HTTP, filesystems, or `Robine.Adapters`.
+- Use cases accept an input and typed `Robine.ExecutionContext`, coordinate domain policies and context-owned ports, own transaction boundaries, and return `{:ok, value}` or `{:error, reason}` for expected outcomes.
+- Use cases must not reference concrete adapters or delivery frameworks. Do not read application configuration, process state, or global mocks from use cases.
+- Define outbound ports as behaviours owned by the bounded context and named after business capabilities. Put concrete implementations under `Robine.Adapters`.
+- Phoenix, LiveView, Oban, webhook, and CLI delivery code calls context facades only. It must not call use-case modules, repositories, Ecto schemas, or infrastructure adapters directly.
+- Cross-context calls target the other context's facade or a deliberately published contract, never its internal domain, use cases, ports, schemas, or adapters.
+- Assemble and validate concrete dependencies only in `Robine.Runtime.Dependencies`.
+- Keep external effects outside database transactions. Persist required effects atomically through an outbox and deliver them after commit.
+- Read projections also pass through named query use cases and the context facade; delivery code must never issue arbitrary Ecto queries.
+
+Temporary architecture exceptions require an explicit allowlist entry in the relevant architecture test, an owner, a removal condition, and a linked unchecked item in `TASKS.md`. Do not suppress a dependency rule with an undocumented broad pattern. Remove the exception as soon as the tracked migration is complete.
+
 ### Phoenix v1.8 guidelines
 
 - **Always** begin your LiveView templates with `<Layouts.app flash={@flash} ...>` which wraps all inner content

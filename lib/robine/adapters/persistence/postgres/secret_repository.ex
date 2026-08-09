@@ -59,6 +59,27 @@ defmodule Robine.Adapters.Persistence.Postgres.SecretRepository do
     {:ok, Enum.map(schemas, &to_domain/1)}
   end
 
+  @impl true
+  def list_metadata(repository_id) do
+    metadata =
+      Repo.all(
+        from secret in SecretSchema,
+          where:
+            (secret.scope == :repository and secret.repository_id == ^repository_id) or
+              (secret.scope == :instance and ^repository_id in secret.allowed_repository_ids),
+          order_by: [asc: secret.name],
+          select: %{
+            id: secret.id,
+            name: secret.name,
+            scope: secret.scope,
+            repository_id: secret.repository_id,
+            inserted_at: secret.inserted_at
+          }
+      )
+
+    {:ok, metadata}
+  end
+
   defp to_domain(schema) do
     struct!(Robine.Secrets.Domain.Secret, %{
       id: schema.id,

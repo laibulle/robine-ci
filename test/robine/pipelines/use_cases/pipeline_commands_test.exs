@@ -25,6 +25,8 @@ defmodule Robine.Pipelines.UseCases.PipelineCommandsTest do
       :ok
     end
 
+    def list_recent(_limit), do: {:ok, []}
+
     defp pipeline(id, status) do
       %Pipeline{
         id: id,

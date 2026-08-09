@@ -1,0 +1,7 @@
+{
+  "valid/minimal.yml": {"valid": true},
+  "valid/builtins.yml": {"valid": true},
+  "invalid/unknown-key.yml": {"valid": false, "codes": ["workflow.unknown_key"]},
+  "invalid/cycle.yml": {"valid": false, "codes": ["workflow.cycle", "workflow.cycle"]},
+  "invalid/unsafe-cache.yml": {"valid": false, "codes": ["step.cache_inputs"]}
+}

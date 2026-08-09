@@ -25,7 +25,7 @@ defmodule Robine.Storage.UseCases.SaveCache do
            expires_at: DateTime.add(now, values.retention_seconds, :second),
            last_restored_at: nil
          },
-         :ok <- deps.repository.upsert_cache(cache) do
+         :ok <- deps.repository.upsert_cache(cache, quotas(deps)) do
       {:ok,
        struct!(
          CacheMetadata,
@@ -35,6 +35,13 @@ defmodule Robine.Storage.UseCases.SaveCache do
   end
 
   def call(_input, %ExecutionContext{}), do: {:error, :forbidden}
+
+  defp quotas(deps) do
+    %{
+      instance_bytes: deps.instance_quota_bytes,
+      repository_bytes: deps.repository_quota_bytes
+    }
+  end
 
   defp validate(input) do
     values = %{

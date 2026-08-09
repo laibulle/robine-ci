@@ -3,5 +3,7 @@ defmodule Robine.Execution.Ports.Runner do
 
   alias Robine.Execution.Contracts.{Result, Specification}
 
-  @callback run(Specification.t()) :: {:ok, Result.t()} | {:error, term()}
+  @callback run(Specification.t(), (map() -> term()), (-> boolean())) ::
+              {:ok, Result.t()} | {:error, term()}
+  @callback reconcile_resources([String.t()]) :: {:ok, map()} | {:error, term()}
 end

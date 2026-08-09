@@ -52,4 +52,35 @@ defmodule Robine.Pipelines.UseCases.ClaimNextJobTest do
     assert {:error, :capacity} =
              Pipelines.claim_next_job(%{global_limit: 1, repository_limit: 1}, context)
   end
+
+  test "disk pressure refuses admission before creating an attempt or changing job state" do
+    previous = Application.fetch_env!(:robine, :runner_admission)
+
+    Application.put_env(:robine, :runner_admission,
+      min_free_bytes: 9_223_372_036_854_775_807,
+      max_used_percent: 95
+    )
+
+    on_exit(fn -> Application.put_env(:robine, :runner_admission, previous) end)
+    context = Dependencies.context(%{id: "admin", role: :administrator}, "disk-pressure")
+
+    assert {:ok, pipeline} =
+             Pipelines.create_pipeline(
+               %{
+                 repository_id: Ecto.UUID.generate(),
+                 workflow_name: "CI",
+                 commit_sha: String.duplicate("e", 40),
+                 jobs: %{"build" => %{needs: []}}
+               },
+               context
+             )
+
+    assert {:ok, _} = Pipelines.queue_pipeline(%{pipeline_id: pipeline.id}, context)
+    assert {:error, :disk_pressure} = Pipelines.claim_next_job(%{}, context)
+
+    assert %Job{status: :queued} =
+             Repo.one!(from job in Job, where: job.pipeline_id == ^pipeline.id)
+
+    assert Repo.aggregate(Robine.Adapters.Persistence.Postgres.Schemas.Attempt, :count) == 0
+  end
 end

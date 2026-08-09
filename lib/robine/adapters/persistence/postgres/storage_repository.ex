@@ -2,18 +2,44 @@ defmodule Robine.Adapters.Persistence.Postgres.StorageRepository do
   @moduledoc false
   @behaviour Robine.Storage.Ports.Repository
   import Ecto.Query
-  alias Robine.Adapters.Persistence.Postgres.Schemas.{Artifact, CacheEntry}
+  alias Robine.Adapters.Persistence.Postgres.Schemas.{Artifact, Attempt, CacheEntry, Job}
   alias Robine.Repo
 
   @impl true
-  def insert_artifact(artifact) do
-    artifact
-    |> Map.from_struct()
-    |> then(&Artifact.changeset(%Artifact{}, &1))
-    |> Repo.insert()
-    |> case do
-      {:ok, _schema} -> :ok
-      {:error, changeset} -> {:error, {:artifact_persistence, changeset}}
+  def insert_artifact(artifact, quotas) do
+    quota_transaction(artifact.repository_id, artifact.size, fn -> 0 end, quotas, fn ->
+      artifact
+      |> Map.from_struct()
+      |> then(&Artifact.changeset(%Artifact{}, &1))
+      |> Repo.insert()
+      |> case do
+        {:ok, _schema} -> :ok
+        {:error, changeset} -> Repo.rollback({:artifact_persistence, changeset})
+      end
+    end)
+  end
+
+  defp quota_transaction(repository_id, added_bytes, replaced_bytes, quotas, operation) do
+    case Repo.transaction(fn ->
+           Repo.query!("SELECT pg_advisory_xact_lock(hashtext($1))", ["robine:storage-quota"])
+
+           instance_usage = logical_usage(nil)
+           repository_usage = logical_usage(repository_id)
+           delta = added_bytes - replaced_bytes.()
+
+           cond do
+             instance_usage + delta > quotas.instance_bytes ->
+               Repo.rollback({:quota_exceeded, :instance, quotas.instance_bytes})
+
+             repository_usage + delta > quotas.repository_bytes ->
+               Repo.rollback({:quota_exceeded, :repository, quotas.repository_bytes})
+
+             true ->
+               operation.()
+           end
+         end) do
+      {:ok, :ok} -> :ok
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -33,29 +59,83 @@ defmodule Robine.Adapters.Persistence.Postgres.StorageRepository do
   end
 
   @impl true
-  def upsert_cache(cache) do
-    attributes = Map.from_struct(cache)
-
-    CacheEntry.changeset(%CacheEntry{}, attributes)
-    |> Repo.insert(
-      on_conflict: [
-        set: [
-          id: cache.id,
-          blob_id: cache.blob_id,
-          digest: cache.digest,
-          size: cache.size,
-          created_at: cache.created_at,
-          expires_at: cache.expires_at,
-          last_restored_at: nil
-        ]
-      ],
-      conflict_target: [:repository_id, :key]
-    )
-    |> case do
-      {:ok, _schema} -> :ok
-      {:error, changeset} -> {:error, {:cache_persistence, changeset}}
+  def get_dependency_artifact(pipeline_id, job_key, name) do
+    case Repo.one(
+           from artifact in Artifact,
+             join: attempt in Attempt,
+             on: attempt.id == artifact.attempt_id,
+             join: job in Job,
+             on: job.id == attempt.job_id,
+             where:
+               job.pipeline_id == ^pipeline_id and job.job_key == ^job_key and
+                 attempt.status == :succeeded and artifact.name == ^name,
+             order_by: [desc: attempt.number],
+             limit: 1,
+             select: artifact
+         ) do
+      nil -> {:error, :not_found}
+      schema -> {:ok, artifact_domain(schema)}
     end
   end
+
+  @impl true
+  def upsert_cache(cache, quotas) do
+    replaced_bytes = fn ->
+      Repo.one(
+        from entry in CacheEntry,
+          where: entry.repository_id == ^cache.repository_id and entry.key == ^cache.key,
+          select: entry.size
+      ) || 0
+    end
+
+    quota_transaction(cache.repository_id, cache.size, replaced_bytes, quotas, fn ->
+      attributes = Map.from_struct(cache)
+
+      CacheEntry.changeset(%CacheEntry{}, attributes)
+      |> Repo.insert(
+        on_conflict: [
+          set: [
+            id: cache.id,
+            blob_id: cache.blob_id,
+            digest: cache.digest,
+            size: cache.size,
+            created_at: cache.created_at,
+            expires_at: cache.expires_at,
+            last_restored_at: nil
+          ]
+        ],
+        conflict_target: [:repository_id, :key]
+      )
+      |> case do
+        {:ok, _schema} -> :ok
+        {:error, changeset} -> Repo.rollback({:cache_persistence, changeset})
+      end
+    end)
+  end
+
+  defp logical_usage(nil) do
+    sum_size(Artifact, nil) + sum_size(CacheEntry, nil)
+  end
+
+  defp logical_usage(repository_id) do
+    sum_size(Artifact, repository_id) + sum_size(CacheEntry, repository_id)
+  end
+
+  defp sum_size(schema, nil) do
+    Repo.one(from row in schema, select: coalesce(sum(row.size), 0)) |> integer_size()
+  end
+
+  defp sum_size(schema, repository_id) do
+    Repo.one(
+      from row in schema,
+        where: row.repository_id == ^repository_id,
+        select: coalesce(sum(row.size), 0)
+    )
+    |> integer_size()
+  end
+
+  defp integer_size(%Decimal{} = size), do: Decimal.to_integer(size)
+  defp integer_size(size) when is_integer(size), do: size
 
   @impl true
   def get_cache(repository_id, key) do
@@ -91,4 +171,8 @@ defmodule Robine.Adapters.Persistence.Postgres.StorageRepository do
 
   defp normalize({:ok, _schema}), do: :ok
   defp normalize({:error, changeset}), do: {:error, {:cache_persistence, changeset}}
+
+  defp artifact_domain(schema) do
+    struct!(Robine.Storage.Domain.Artifact, Map.from_struct(schema) |> Map.drop([:__meta__]))
+  end
 end

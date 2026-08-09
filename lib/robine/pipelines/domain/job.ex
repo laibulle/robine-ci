@@ -80,6 +80,20 @@ defmodule Robine.Pipelines.Domain.Job do
   @spec terminal?(t()) :: boolean()
   def terminal?(%__MODULE__{status: status}), do: status in @terminal
 
+  @spec retry(t()) :: {:ok, t()} | {:error, term()}
+  def retry(%__MODULE__{status: status} = job) when status in [:failed, :cancelled],
+    do: {:ok, %{job | status: :queued}}
+
+  def retry(%__MODULE__{status: status}), do: {:error, {:job_not_retryable, status}}
+
+  @spec reset_for_rerun(t(), :queued | :blocked) :: {:ok, t()} | {:error, term()}
+  def reset_for_rerun(%__MODULE__{status: status} = job, target)
+      when status in @terminal and target in [:queued, :blocked],
+      do: {:ok, %{job | status: target}}
+
+  def reset_for_rerun(%__MODULE__{status: status}, _target),
+    do: {:error, {:job_not_rerunnable, status}}
+
   defp allowed?(:blocked, target), do: target in [:queued, :cancelled, :skipped]
   defp allowed?(:queued, target), do: target in [:running, :cancelled]
   defp allowed?(:running, target), do: target in [:cancelling, :succeeded, :failed, :cancelled]

@@ -15,18 +15,20 @@ defmodule Robine.Pipelines.UseCases.ClaimNextJob do
     repository_limit = positive(input, :repository_limit, 2)
     lease_seconds = positive(input, :lease_seconds, 60)
 
-    deps.unit_of_work.transaction(fn ->
-      with {:ok, job} <- repository.next_queued(global_limit, repository_limit),
-           {:ok, pipeline} <- deps.pipeline_repository.get(job.pipeline_id),
-           {:ok, running_pipeline} <- start_pipeline(pipeline),
-           {:ok, running_job} <- Job.transition(job, :running),
-           {:ok, attempt} <- new_attempt(job, lease_seconds, deps, repository),
-           :ok <- deps.pipeline_repository.update(running_pipeline),
-           :ok <- repository.update_job(running_job),
-           :ok <- repository.insert_attempt(attempt) do
-        {:ok, attempt}
-      end
-    end)
+    with :ok <- admit(deps) do
+      deps.unit_of_work.transaction(fn ->
+        with {:ok, job} <- repository.next_queued(global_limit, repository_limit),
+             {:ok, pipeline} <- deps.pipeline_repository.get(job.pipeline_id),
+             {:ok, running_pipeline} <- start_pipeline(pipeline),
+             {:ok, running_job} <- Job.transition(job, :running),
+             {:ok, attempt} <- new_attempt(job, lease_seconds, deps, repository),
+             :ok <- deps.pipeline_repository.update(running_pipeline),
+             :ok <- repository.update_job(running_job),
+             :ok <- repository.insert_attempt(attempt) do
+          {:ok, attempt}
+        end
+      end)
+    end
   end
 
   def call(_input, %ExecutionContext{}), do: {:error, :forbidden}
@@ -53,4 +55,7 @@ defmodule Robine.Pipelines.UseCases.ClaimNextJob do
       _ -> default
     end
   end
+
+  defp admit(%Dependencies{admission: nil}), do: :ok
+  defp admit(%Dependencies{admission: admission}), do: admission.check()
 end

@@ -8,7 +8,10 @@ defmodule RobineWeb.Endpoint do
     store: :cookie,
     key: "_robine_key",
     signing_salt: "qI6QyZ/V",
-    same_site: "Lax"
+    encryption_salt: "WgEHHO9u",
+    http_only: true,
+    secure: Application.compile_env(:robine, :secure_cookies, false),
+    same_site: "Strict"
   ]
 
   socket "/live", Phoenix.LiveView.Socket,

@@ -1,0 +1,3 @@
+defmodule RobineWeb.ForbiddenFixture do
+  alias Robine.Pipelines.UseCases.CreatePipeline
+end

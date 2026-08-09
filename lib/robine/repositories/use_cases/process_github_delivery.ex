@@ -54,6 +54,9 @@ defmodule Robine.Repositories.UseCases.ProcessGitHubDelivery do
   defp normalize("pull_request", %{"action" => action}) when action not in @pull_request_actions,
     do: {:ignore, :pull_request_action}
 
+  defp normalize("pull_request", %{"pull_request" => %{"draft" => true}}),
+    do: {:ignore, :draft_pull_request}
+
   defp normalize("pull_request", payload) do
     with %{"repository" => %{"id" => repository_id}, "pull_request" => pull_request} <- payload,
          %{

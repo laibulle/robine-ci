@@ -20,4 +20,19 @@ defmodule Robine.Workflows.Domain.Diagnostic do
   def warning(code, message, path) do
     %__MODULE__{code: code, message: message, path: path, severity: :warning}
   end
+
+  @spec locate(t(), map()) :: t()
+  def locate(%__MODULE__{} = diagnostic, locations) when is_map(locations) do
+    case nearest_location(diagnostic.path, locations) do
+      %{line: line, column: column} -> %{diagnostic | line: line, column: column}
+      nil -> diagnostic
+    end
+  end
+
+  defp nearest_location(path, locations) do
+    case Map.get(locations, path) do
+      nil when path != [] -> nearest_location(Enum.drop(path, -1), locations)
+      location -> location
+    end
+  end
 end

@@ -15,6 +15,8 @@ defmodule Robine.Application do
       {Oban, Application.fetch_env!(:robine, Oban)},
       {DNSCluster, query: Application.get_env(:robine, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: Robine.PubSub},
+      RobineWeb.LoginRateLimiter,
+      Robine.Adapters.SourceControl.GitHubAppTokenCache,
       # Start a worker by calling: Robine.Worker.start_link(arg)
       # {Robine.Worker, arg},
       # Start to serve requests, typically the last entry

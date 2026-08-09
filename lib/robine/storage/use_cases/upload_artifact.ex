@@ -26,7 +26,7 @@ defmodule Robine.Storage.UseCases.UploadArtifact do
            created_at: now,
            expires_at: DateTime.add(now, values.retention_seconds, :second)
          },
-         :ok <- deps.repository.insert_artifact(artifact) do
+         :ok <- deps.repository.insert_artifact(artifact, quotas(deps)) do
       {:ok,
        struct!(
          ArtifactMetadata,
@@ -43,6 +43,13 @@ defmodule Robine.Storage.UseCases.UploadArtifact do
   end
 
   def call(_input, %ExecutionContext{}), do: {:error, :forbidden}
+
+  defp quotas(deps) do
+    %{
+      instance_bytes: deps.instance_quota_bytes,
+      repository_bytes: deps.repository_quota_bytes
+    }
+  end
 
   defp validate(input) do
     values = %{

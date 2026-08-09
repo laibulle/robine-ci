@@ -7,4 +7,10 @@ defmodule Robine.Execution do
 
   @spec run_job(map(), ExecutionContext.t()) :: {:ok, Result.t()} | {:error, term()}
   defdelegate run_job(input, context), to: UseCases.RunJob, as: :call
+
+  @spec build_local_plan(map(), ExecutionContext.t()) :: {:ok, map()} | {:error, term()}
+  defdelegate build_local_plan(input, context), to: UseCases.BuildLocalPlan, as: :call
+
+  @spec reconcile_resources(map(), ExecutionContext.t()) :: {:ok, map()} | {:error, term()}
+  defdelegate reconcile_resources(input, context), to: UseCases.ReconcileResources, as: :call
 end

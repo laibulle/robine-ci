@@ -1,9 +1,12 @@
 defmodule Robine.Repositories.GitHubDeliveryTest do
   use Robine.DataCase, async: false
 
-  import Ecto.Query
+  alias Robine.Adapters.Persistence.Postgres.Schemas.{
+    GitHubCheck,
+    GitHubDelivery,
+    Pipeline
+  }
 
-  alias Robine.Adapters.Persistence.Postgres.Schemas.{GitHubDelivery, Pipeline}
   alias Robine.Repositories
   alias Robine.Runtime.Dependencies
   alias Robine.Repo
@@ -38,7 +41,13 @@ defmodule Robine.Repositories.GitHubDeliveryTest do
     end
 
     @impl true
-    def upsert_check(_repository, _check), do: :ok
+    def source_files(_repository, _sha), do: {:ok, [{"README.md", "source"}]}
+
+    @impl true
+    def upsert_check(repository, check) do
+      send(self(), {:upsert_check, repository.full_name, check})
+      {:ok, :erlang.phash2(check.external_id)}
+    end
   end
 
   test "processes a matching push from the exact commit only once" do
@@ -95,6 +104,91 @@ defmodule Robine.Repositories.GitHubDeliveryTest do
     refute_received {:workflow_files, _, _}
     assert Repo.aggregate(Pipeline, :count) == 0
     assert Repo.get!(GitHubDelivery, delivery_id).status == :ignored
+  end
+
+  test "ignores draft pull requests until ready for review" do
+    context = context_with_fake_github()
+    provider_id = 72_727_272
+    _repository = register(context, provider_id)
+
+    payload = %{
+      "action" => "opened",
+      "repository" => %{"id" => provider_id},
+      "pull_request" => %{
+        "draft" => true,
+        "head" => %{"sha" => String.duplicate("d", 40), "repo" => %{"full_name" => "acme/widget"}},
+        "base" => %{"ref" => "main", "repo" => %{"full_name" => "acme/widget"}}
+      }
+    }
+
+    accept("draft-delivery", "pull_request", payload, context)
+
+    assert {:ok, %{ignored: :draft_pull_request}} =
+             Repositories.process_github_delivery(%{delivery_id: "draft-delivery"}, context)
+
+    refute_received {:workflow_files, _, _}
+  end
+
+  test "creates and then updates stable pipeline and job checks" do
+    context = context_with_fake_github()
+    provider_id = 62_626_262
+    _repository = register(context, provider_id)
+    sha = String.duplicate("c", 40)
+    delivery_id = "checks-delivery"
+
+    accept(
+      delivery_id,
+      "push",
+      %{
+        "repository" => %{"id" => provider_id},
+        "after" => sha,
+        "ref" => "refs/heads/main"
+      },
+      context
+    )
+
+    assert {:ok, %{pipeline_ids: [pipeline_id]}} =
+             Repositories.process_github_delivery(%{delivery_id: delivery_id}, context)
+
+    assert {:ok, 2} = Repositories.sync_github_checks(%{pipeline_id: pipeline_id}, context)
+
+    assert_receive {:upsert_check, "acme/widget", %{external_id: pipeline_external_id}}
+    assert_receive {:upsert_check, "acme/widget", %{external_id: job_external_id}}
+    assert pipeline_external_id == "pipeline:#{pipeline_id}"
+    assert String.starts_with?(job_external_id, "job:")
+
+    assert {:ok, 2} = Repositories.sync_github_checks(%{pipeline_id: pipeline_id}, context)
+
+    assert_receive {:upsert_check, "acme/widget",
+                    %{external_id: ^pipeline_external_id, provider_check_id: pipeline_check_id}}
+
+    assert_receive {:upsert_check, "acme/widget",
+                    %{external_id: ^job_external_id, provider_check_id: job_check_id}}
+
+    assert is_integer(pipeline_check_id)
+    assert is_integer(job_check_id)
+    assert Repo.aggregate(GitHubCheck, :count) == 2
+  end
+
+  test "fetches validated source for a trusted repository at the exact SHA" do
+    context = context_with_fake_github()
+    repository = register(context, 82_828_282)
+    sha = String.duplicate("8", 40)
+
+    assert {:ok,
+            %{repository_id: repository_id, commit_sha: ^sha, files: [{"README.md", "source"}]}} =
+             Repositories.fetch_source(
+               %{repository_id: repository.id, commit_sha: sha},
+               context
+             )
+
+    assert repository_id == repository.id
+
+    assert {:error, :untrusted_or_invalid_source} =
+             Repositories.fetch_source(
+               %{repository_id: repository.id, commit_sha: "main"},
+               context
+             )
   end
 
   defp context_with_fake_github do

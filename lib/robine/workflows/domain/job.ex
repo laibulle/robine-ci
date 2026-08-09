@@ -4,7 +4,7 @@ defmodule Robine.Workflows.Domain.Job do
   alias Robine.Workflows.Domain.Step
 
   @enforce_keys [:id, :image, :needs, :steps]
-  defstruct [:id, :image, :needs, :steps, :timeout, env: %{}, secrets: []]
+  defstruct [:id, :image, :needs, :steps, :timeout, shell: "/bin/sh", env: %{}, secrets: []]
 
   @type t :: %__MODULE__{
           id: String.t(),
@@ -12,6 +12,7 @@ defmodule Robine.Workflows.Domain.Job do
           needs: [String.t()],
           steps: [Step.t()],
           timeout: String.t() | nil,
+          shell: String.t(),
           env: %{optional(String.t()) => String.t()},
           secrets: [String.t()]
         }

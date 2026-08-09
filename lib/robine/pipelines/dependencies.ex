@@ -8,6 +8,8 @@ defmodule Robine.Pipelines.Dependencies do
     :unit_of_work,
     :pipeline_repository,
     :job_repository,
+    :log_repository,
+    :admission,
     :event_outbox,
     :clock,
     :id_generator
@@ -17,6 +19,8 @@ defmodule Robine.Pipelines.Dependencies do
           unit_of_work: module(),
           pipeline_repository: module(),
           job_repository: module() | nil,
+          log_repository: module() | nil,
+          admission: module() | nil,
           event_outbox: module(),
           clock: module(),
           id_generator: module()
@@ -28,12 +32,16 @@ defmodule Robine.Pipelines.Dependencies do
       {dependencies.unit_of_work, Ports.UnitOfWork},
       {dependencies.pipeline_repository, Ports.PipelineRepository},
       {dependencies.job_repository, Ports.JobRepository},
+      {dependencies.log_repository, Ports.LogRepository},
+      {dependencies.admission, Ports.Admission},
       {dependencies.event_outbox, Ports.EventOutbox},
       {dependencies.clock, Ports.Clock},
       {dependencies.id_generator, Ports.IdGenerator}
     ]
 
-    Enum.each(checks, fn {implementation, behaviour} ->
+    checks
+    |> Enum.reject(&(elem(&1, 0) == nil))
+    |> Enum.each(fn {implementation, behaviour} ->
       Code.ensure_loaded!(implementation)
 
       unless behaviour in (implementation.module_info(:attributes)[:behaviour] || []) do

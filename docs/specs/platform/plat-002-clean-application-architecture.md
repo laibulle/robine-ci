@@ -2,10 +2,10 @@
 
 ## Status
 
-- **State:** Draft
+- **State:** Accepted
 - **Owner:** Platform
 - **Target:** MVP
-- **Last updated:** 2026-08-08
+- **Last updated:** 2026-08-09
 
 ## Summary
 
@@ -296,11 +296,15 @@ Mocks SHOULD verify protocol-relevant interactions only. State-based fakes are p
 
 ## Open questions
 
-- Decide whether the MVP remains one Mix/OTP application with compile-time boundary checks or uses a small umbrella. The default recommendation is one application until deployment or compilation boundaries justify a split.
-- Select the architecture enforcement mechanism and define its allowed dependency graph.
-- Finalize the typed `ExecutionContext` and dependency-override mechanism so facades remain ergonomic while unit tests remain explicit.
-- Decide whether read queries use context-owned query adapters directly or always pass through application query services; arbitrary delivery-layer Ecto access remains forbidden either way.
-- Define which domain events require a durable outbox in the first implementation slice.
+None blocking.
+
+## Decisions
+
+- The MVP remains one Mix/OTP application. A split requires an independently deployable boundary or a demonstrated compilation/runtime isolation need.
+- Dependency directions are enforced by focused ExUnit architecture checks in CI. The allowed graph is the inward dependency rule documented above; no additional boundary library is required for the MVP.
+- `Robine.ExecutionContext` is the typed public call context. Production contexts come from `Robine.Runtime.Dependencies`; unit tests construct explicit dependency structs with deterministic fakes.
+- Read operations use named application query use cases exposed through the same context facade. Delivery adapters never access Ecto directly.
+- `PipelineCreated` is the first durable outbox event. Additional effects that must survive process failure are migrated to the outbox as their projections are implemented.
 
 ## Out of scope / future work
 

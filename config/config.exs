@@ -11,7 +11,28 @@ config :robine,
   ecto_repos: [Robine.Repo],
   generators: [timestamp_type: :utc_datetime],
   storage_root: Path.expand("../var/storage", __DIR__),
-  storage_max_object_bytes: 1_073_741_824
+  storage_max_object_bytes: 1_073_741_824,
+  storage_quotas: [instance_bytes: 53_687_091_200, repository_bytes: 10_737_418_240],
+  workflow_limits: [
+    max_source_bytes: 262_144,
+    max_jobs: 64,
+    max_steps_per_job: 128,
+    max_total_steps: 512,
+    max_graph_depth: 16
+  ],
+  runner_admission: [min_free_bytes: 2_147_483_648, max_used_percent: 95],
+  runner_resources: [cpu_millis: 2_000, memory_bytes: 4_294_967_296, pids_limit: 512],
+  runner_control: [
+    lease_seconds: 60,
+    heartbeat_interval_ms: 20_000,
+    cancellation_poll_interval_ms: 500
+  ],
+  runner_cancellation_grace_ms: 5_000,
+  retention: [log_seconds: 2_592_000, gc_grace_seconds: 3_600, batch_size: 1_000],
+  public_url: "http://localhost:4000",
+  bootstrap_token_hash: :crypto.hash(:sha256, "development-bootstrap-token"),
+  bootstrap_expires_at: ~U[2030-01-01 00:00:00Z],
+  oidc_config: nil
 
 config :robine, Oban,
   repo: Robine.Repo,
@@ -20,7 +41,10 @@ config :robine, Oban,
     Oban.Plugins.Pruner,
     {Oban.Plugins.Cron,
      crontab: [
-       {"* * * * *", Robine.Adapters.Background.ReconcileLeasesWorker}
+       {"* * * * *", Robine.Adapters.Background.ReconcileLeasesWorker},
+       {"*/5 * * * *", Robine.Adapters.Background.ReconcileGitHubChecksWorker},
+       {"*/5 * * * *", Robine.Adapters.Background.ReconcileRunnerResourcesWorker},
+       {"17 * * * *", Robine.Adapters.Background.PruneRetentionWorker}
      ]}
   ]
 

@@ -69,6 +69,14 @@ defmodule Robine.Pipelines.Domain.Pipeline do
   def request_cancellation(%__MODULE__{status: status}),
     do: {:error, {:pipeline_terminal, status}}
 
+  @spec reopen_for_retry(t()) :: {:ok, t()} | {:error, term()}
+  def reopen_for_retry(%__MODULE__{status: status} = pipeline)
+      when status in [:failed, :cancelled],
+      do: {:ok, %{pipeline | status: :running}}
+
+  def reopen_for_retry(%__MODULE__{status: status}),
+    do: {:error, {:pipeline_not_retryable, status}}
+
   @spec complete_from_jobs(t(), [Robine.Pipelines.Domain.Job.t()]) ::
           {:ok, t()} | {:error, term()}
   def complete_from_jobs(%__MODULE__{status: status} = pipeline, jobs)

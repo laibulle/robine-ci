@@ -5,6 +5,7 @@ defmodule Robine.Adapters.Persistence.Postgres.JobRepository do
   import Ecto.Query
 
   alias Robine.Adapters.Persistence.Postgres.Schemas.Attempt, as: AttemptSchema
+  alias Robine.Adapters.Persistence.Postgres.Schemas.Artifact, as: ArtifactSchema
   alias Robine.Adapters.Persistence.Postgres.Schemas.Job, as: JobSchema
   alias Robine.Adapters.Persistence.Postgres.Schemas.Pipeline, as: PipelineSchema
   alias Robine.Repo
@@ -153,6 +154,64 @@ defmodule Robine.Adapters.Persistence.Postgres.JobRepository do
       )
 
     {:ok, Enum.map(attempts, &attempt_to_domain/1)}
+  end
+
+  @impl true
+  def latest_attempt(job_id) do
+    case Repo.one(
+           from attempt in AttemptSchema,
+             where: attempt.job_id == ^job_id,
+             order_by: [desc: attempt.number],
+             limit: 1
+         ) do
+      nil -> {:error, :not_found}
+      attempt -> {:ok, attempt_to_domain(attempt)}
+    end
+  end
+
+  @impl true
+  def missing_artifact_inputs(pipeline_id, requirements, now) do
+    missing =
+      Enum.reject(requirements, fn %{from: from, name: name} ->
+        Repo.exists?(
+          from artifact in ArtifactSchema,
+            join: attempt in AttemptSchema,
+            on: attempt.id == artifact.attempt_id,
+            join: job in JobSchema,
+            on: job.id == attempt.job_id,
+            where:
+              job.pipeline_id == ^pipeline_id and job.job_key == ^from and
+                attempt.status == :succeeded and artifact.name == ^name and
+                artifact.expires_at > ^now
+        )
+      end)
+
+    {:ok, missing}
+  end
+
+  @impl true
+  def list_active_attempt_ids do
+    {:ok,
+     Repo.all(
+       from attempt in AttemptSchema,
+         where: attempt.status in ^@active_attempts,
+         select: attempt.id
+     )}
+  end
+
+  @impl true
+  def cancellation_requested?(idempotency_token) do
+    {:ok,
+     Repo.exists?(
+       from attempt in AttemptSchema,
+         join: job in JobSchema,
+         on: job.id == attempt.job_id,
+         join: pipeline in PipelineSchema,
+         on: pipeline.id == job.pipeline_id,
+         where:
+           attempt.idempotency_token == ^idempotency_token and
+             pipeline.status in [:cancelling, :cancelled]
+     )}
   end
 
   defp persist(schema, schema_module, domain, error_tag) do

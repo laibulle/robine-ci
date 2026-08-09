@@ -29,7 +29,9 @@ defmodule Robine.Architecture.DependencyRulesTest do
 
   test "delivery adapters do not bypass facades for use cases or persistence" do
     delivery_files =
-      Path.wildcard("lib/robine_web/**/*.ex") ++ Path.wildcard("lib/robine_cli/**/*.ex")
+      Path.wildcard("lib/robine_web/**/*.ex") ++
+        Path.wildcard("lib/robine_cli/**/*.ex") ++
+        Path.wildcard("lib/robine/adapters/background/**/*.ex")
 
     assert_clean(delivery_files, [
       ".UseCases.",
@@ -37,6 +39,35 @@ defmodule Robine.Architecture.DependencyRulesTest do
       "Ecto.Query",
       "Adapters.Persistence.Postgres.Schemas"
     ])
+  end
+
+  test "bounded contexts do not reach into another context's internals" do
+    files =
+      Path.wildcard("lib/robine/*/domain/**/*.ex") ++
+        Path.wildcard("lib/robine/*/use_cases/**/*.ex")
+
+    violations = Enum.flat_map(files, &cross_context_violations/1)
+
+    assert violations == [], Enum.join(violations, "\n")
+  end
+
+  test "negative fixtures prove every dependency direction is rejected" do
+    fixture_cases = [
+      {"domain_to_framework.txt", @domain_forbidden},
+      {"use_case_to_adapter.txt", @use_case_forbidden},
+      {"delivery_to_use_case.txt", [".UseCases."]},
+      {"delivery_to_persistence.txt", ["Robine.Repo"]},
+      {"facade_to_infrastructure.txt", ["Oban."]}
+    ]
+
+    for {fixture, forbidden} <- fixture_cases do
+      path = Path.join("test/fixtures/architecture", fixture)
+
+      assert violations([path], forbidden) != [],
+             "#{path} must demonstrate a rejected dependency"
+    end
+
+    assert cross_context_violations("test/fixtures/architecture/cross_context_internal.txt") != []
   end
 
   test "facades use explicit defdelegate and contain no infrastructure dependencies" do
@@ -62,14 +93,35 @@ defmodule Robine.Architecture.DependencyRulesTest do
   end
 
   defp assert_clean(files, forbidden_tokens) do
-    violations =
-      for file <- files,
-          token <- forbidden_tokens,
-          source = File.read!(file),
-          String.contains?(source, token) do
-        "#{file} contains forbidden dependency #{inspect(token)}"
+    found = violations(files, forbidden_tokens)
+
+    assert found == [], Enum.join(found, "\n")
+  end
+
+  defp violations(files, forbidden_tokens) do
+    for file <- files,
+        token <- forbidden_tokens,
+        source = File.read!(file) |> String.replace("Robine.Repositories", "RepositoriesContext"),
+        String.contains?(source, token) do
+      "#{file} contains forbidden dependency #{inspect(token)}"
+    end
+  end
+
+  defp cross_context_violations(file) do
+    source_context =
+      case Regex.run(~r{(?:lib|fixtures)/robine/([^/]+)/(?:domain|use_cases)/}, file) do
+        [_, context] -> Macro.camelize(context)
+        nil -> "Pipelines"
       end
 
-    assert violations == [], Enum.join(violations, "\n")
+    File.read!(file)
+    |> then(&Regex.scan(~r/Robine\.([A-Z][A-Za-z]+)\.(?:Domain|UseCases|Ports|Dependencies)/, &1))
+    |> Enum.flat_map(fn [dependency, target_context] ->
+      if target_context == source_context do
+        []
+      else
+        ["#{file} reaches into another context through #{dependency}"]
+      end
+    end)
   end
 end

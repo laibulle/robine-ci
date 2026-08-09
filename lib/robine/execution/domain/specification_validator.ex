@@ -14,6 +14,7 @@ defmodule Robine.Execution.Domain.SpecificationValidator do
          :ok <- workspace(specification.workspace),
          :ok <- shell(specification.shell),
          :ok <- timeout(specification.timeout_ms),
+         :ok <- source_path(specification.source_path),
          :ok <- string_map(:env, specification.env),
          :ok <- string_map(:secrets, specification.secrets),
          :ok <- steps(specification.steps) do
@@ -45,6 +46,16 @@ defmodule Robine.Execution.Domain.SpecificationValidator do
 
   defp timeout(value) when is_integer(value) and value > 0 and value <= @max_timeout_ms, do: :ok
   defp timeout(_value), do: {:error, {:invalid_specification, :timeout_ms}}
+
+  defp source_path(nil), do: :ok
+
+  defp source_path(value) when is_binary(value) do
+    if Path.type(value) == :absolute,
+      do: :ok,
+      else: {:error, {:invalid_specification, :source_path}}
+  end
+
+  defp source_path(_value), do: {:error, {:invalid_specification, :source_path}}
 
   defp string_map(_field, value) when map_size(value) == 0, do: :ok
 

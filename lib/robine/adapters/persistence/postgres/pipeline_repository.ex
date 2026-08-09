@@ -2,6 +2,8 @@ defmodule Robine.Adapters.Persistence.Postgres.PipelineRepository do
   @moduledoc false
   @behaviour Robine.Pipelines.Ports.PipelineRepository
 
+  import Ecto.Query
+
   alias Robine.Adapters.Persistence.Postgres.Schemas.Pipeline, as: PipelineSchema
   alias Robine.Pipelines.Domain.Pipeline
   alias Robine.Repo
@@ -41,6 +43,16 @@ defmodule Robine.Adapters.Persistence.Postgres.PipelineRepository do
           {:error, changeset} -> {:error, {:persistence, changeset}}
         end
     end
+  end
+
+  @impl true
+  def list_recent(limit) when is_integer(limit) and limit > 0 do
+    pipelines =
+      Repo.all(
+        from pipeline in PipelineSchema, order_by: [desc: pipeline.inserted_at], limit: ^limit
+      )
+
+    {:ok, Enum.map(pipelines, &to_domain/1)}
   end
 
   defp to_domain(schema) do

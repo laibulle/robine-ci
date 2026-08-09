@@ -10,6 +10,7 @@ defmodule Robine.MixProject do
       start_permanent: Mix.env() == :prod,
       aliases: aliases(),
       deps: deps(),
+      escript: [main_module: Robine.Adapters.CLI, app: nil],
       compilers: [:phoenix_live_view] ++ Mix.compilers(),
       listeners: [Phoenix.CodeReloader]
     ]
@@ -46,6 +47,8 @@ defmodule Robine.MixProject do
       {:postgrex, ">= 0.0.0"},
       {:oban, "~> 2.20"},
       {:yaml_elixir, "~> 2.12"},
+      {:argon2_elixir, "~> 4.1"},
+      {:assent, "~> 0.3.1"},
       {:phoenix_html, "~> 4.1"},
       {:phoenix_live_reload, "~> 1.2", only: :dev},
       {:phoenix_live_view, "~> 1.2.0"},

@@ -2,10 +2,10 @@
 
 ## Status
 
-- **State:** Draft
+- **State:** Accepted
 - **Owner:** Execution
 - **Target:** MVP
-- **Last updated:** 2026-08-08
+- **Last updated:** 2026-08-09
 
 ## Summary
 
@@ -74,6 +74,12 @@ A developer running tests for a trusted repository and an operator sharing one D
 
 The runner lifecycle is `accepted → preparing → running → cancelling → cleaning → terminal`. It creates a labeled workspace volume, pulls or locates the image, starts a long-lived container with a minimal command, then executes each step through Docker exec. Built-ins execute through runner-owned implementations against the workspace.
 
+Before claiming a job, the control plane checks the storage filesystem and refuses admission below 2 GiB free or above 95% usage; both thresholds are configurable with `ROBINE_RUNNER_MIN_FREE_BYTES` and `ROBINE_RUNNER_MAX_USED_PERCENT`. Image inspection and any required pull are bounded and persisted as runner phase position `0`. Every container and volume carries the opaque `io.robine.attempt` label. A five-minute durable reconciliation compares those labels with active attempt IDs and removes only stale Robine-owned resources.
+
+Every container defaults to 2 vCPU, 4 GiB of memory with swap disabled beyond that same limit, and 512 processes. Operators configure these ceilings with `ROBINE_RUNNER_CPU_MILLIS`, `ROBINE_RUNNER_MEMORY_BYTES`, and `ROBINE_RUNNER_PIDS_LIMIT`. Robine honors an image's configured `USER`. Images with no non-root user remain supported for trusted repositories, but still run with all capabilities dropped and `no-new-privileges`; the MVP does not claim this makes root images safe for hostile code.
+
+Cancellation is durable at pipeline level. Undispatched jobs become cancelled immediately and active jobs become cancelling. The runner polls the projection at most every 250 ms while a command is active, asks Docker to stop the full container, waits five seconds by default, and relies on Docker's forced kill after the grace period. Configure the grace with `ROBINE_RUNNER_CANCELLATION_GRACE_MS`.
+
 The local CLI calls the same execution library and constructs the same normalized execution specification. Differences, such as CI-provided metadata and secrets, are explicit inputs rather than hidden branches.
 
 ## Failure modes and recovery
@@ -81,6 +87,7 @@ The local CLI calls the same execution library and constructs the same normalize
 | Failure | Expected behavior | Recovery |
 |---|---|---|
 | Image pull fails | Attempt fails as infrastructure/image error | Fix image or registry access and retry |
+| Configured shell is absent | Preparation fails with `shell_unavailable`; no user step starts | Select `/bin/sh`, `/bin/bash`, or an image containing the configured shell |
 | Docker daemon disappears | Attempt is marked runner-lost after reconciliation | Restore Docker and retry |
 | Command exceeds timeout | Process and container are terminated | Increase timeout or optimize command |
 | Cleanup partially fails | Result is retained with cleanup warning | Background reconciler retries cleanup |
@@ -98,18 +105,21 @@ Metrics include active and queued attempts, phase duration, image pull duration,
 
 - [ ] Files created by one step are available to later steps in the same job.
 - [ ] Writable files from one job are unavailable to another job unless explicitly transferred.
-- [ ] Cancellation and timeouts terminate the full container process tree within the configured grace period.
-- [ ] Restart reconciliation removes or adopts every labeled orphan deterministically.
-- [ ] The configured concurrency limit is respected under simultaneous dispatch.
+- [x] Cancellation and timeouts terminate the full container process tree within the configured grace period.
+- [x] Restart reconciliation removes or adopts every labeled orphan deterministically.
+- [x] The configured concurrency limit is respected under simultaneous dispatch.
 - [ ] Job containers cannot access the Docker socket through Robine-provided mounts.
 
 ## Open questions
 
-- Define supported CPU and memory limit configuration for the MVP.
-- Select the default cancellation grace period and disk-pressure thresholds.
-- Decide the supported behavior for images without a usable non-root user or shell.
+None blocking.
+
+## Decisions
+
+- Job defaults are 2 vCPU, 4 GiB RAM with no additional swap, and 512 processes.
+- Cancellation grace is five seconds. Admission requires 2 GiB free and at most 95% disk usage.
+- The runner preserves the image-configured user. Root-only images are allowed for trusted repositories with reduced container privileges and an explicit security limitation.
 
 ## Out of scope / future work
 
 - Remote runners, micro-VM isolation, service containers, GPU/device access, and autoscaling.
-

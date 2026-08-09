@@ -1,0 +1,9 @@
+version: 1
+name: Minimal
+on:
+  push: {}
+jobs:
+  test:
+    image: alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    steps:
+      - run: echo ok

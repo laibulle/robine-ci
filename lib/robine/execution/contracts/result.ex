@@ -16,8 +16,8 @@ defmodule Robine.Execution.Contracts.Result do
 
   @type t :: %__MODULE__{
           attempt_id: String.t(),
-          status: :succeeded | :failed,
-          reason: :command_failed | :timeout | :system_failure | nil,
+          status: :succeeded | :failed | :cancelled,
+          reason: :command_failed | :timeout | :cancelled | :system_failure | nil,
           steps: [StepResult.t()],
           started_at: DateTime.t(),
           finished_at: DateTime.t(),

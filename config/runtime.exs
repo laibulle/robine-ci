@@ -1,5 +1,63 @@
 import Config
 
+positive_integer = fn name, default ->
+  case Integer.parse(System.get_env(name, Integer.to_string(default))) do
+    {value, ""} when value > 0 -> value
+    _ -> raise "#{name} must be a positive integer"
+  end
+end
+
+percentage = fn name, default ->
+  case Integer.parse(System.get_env(name, Integer.to_string(default))) do
+    {value, ""} when value in 1..100 -> value
+    _ -> raise "#{name} must be an integer from 1 through 100"
+  end
+end
+
+config :robine, :retention,
+  log_seconds: positive_integer.("ROBINE_LOG_RETENTION_SECONDS", 2_592_000),
+  gc_grace_seconds: positive_integer.("ROBINE_GC_GRACE_SECONDS", 3_600),
+  batch_size: positive_integer.("ROBINE_RETENTION_BATCH_SIZE", 1_000)
+
+storage_instance_quota = positive_integer.("ROBINE_STORAGE_INSTANCE_QUOTA_BYTES", 53_687_091_200)
+
+storage_repository_quota =
+  positive_integer.("ROBINE_STORAGE_REPOSITORY_QUOTA_BYTES", 10_737_418_240)
+
+if storage_repository_quota > storage_instance_quota do
+  raise "ROBINE_STORAGE_REPOSITORY_QUOTA_BYTES must not exceed the instance quota"
+end
+
+config :robine, :storage_quotas,
+  instance_bytes: storage_instance_quota,
+  repository_bytes: storage_repository_quota
+
+config :robine, :workflow_limits,
+  max_source_bytes: positive_integer.("ROBINE_WORKFLOW_MAX_BYTES", 262_144),
+  max_jobs: positive_integer.("ROBINE_WORKFLOW_MAX_JOBS", 64),
+  max_steps_per_job: positive_integer.("ROBINE_WORKFLOW_MAX_STEPS_PER_JOB", 128),
+  max_total_steps: positive_integer.("ROBINE_WORKFLOW_MAX_TOTAL_STEPS", 512),
+  max_graph_depth: positive_integer.("ROBINE_WORKFLOW_MAX_GRAPH_DEPTH", 16)
+
+config :robine, :runner_admission,
+  min_free_bytes: positive_integer.("ROBINE_RUNNER_MIN_FREE_BYTES", 2_147_483_648),
+  max_used_percent: percentage.("ROBINE_RUNNER_MAX_USED_PERCENT", 95)
+
+config :robine, :runner_resources,
+  cpu_millis: positive_integer.("ROBINE_RUNNER_CPU_MILLIS", 2_000),
+  memory_bytes: positive_integer.("ROBINE_RUNNER_MEMORY_BYTES", 4_294_967_296),
+  pids_limit: positive_integer.("ROBINE_RUNNER_PIDS_LIMIT", 512)
+
+config :robine, :runner_control,
+  lease_seconds: positive_integer.("ROBINE_RUNNER_LEASE_SECONDS", 60),
+  heartbeat_interval_ms: positive_integer.("ROBINE_RUNNER_HEARTBEAT_INTERVAL_MS", 20_000),
+  cancellation_poll_interval_ms:
+    positive_integer.("ROBINE_RUNNER_CANCELLATION_POLL_INTERVAL_MS", 500)
+
+config :robine,
+       :runner_cancellation_grace_ms,
+       positive_integer.("ROBINE_RUNNER_CANCELLATION_GRACE_MS", 5_000)
+
 if encoded_key = System.get_env("ROBINE_SECRET_KEY") do
   case Base.decode64(encoded_key) do
     {:ok, key} when byte_size(key) == 32 ->
@@ -15,8 +73,39 @@ if webhook_secret = System.get_env("GITHUB_WEBHOOK_SECRET") do
   config :robine, :github_webhook_secret, webhook_secret
 end
 
-if github_token = System.get_env("GITHUB_TOKEN") do
-  config :robine, :github_token, github_token
+if github_app_id = System.get_env("GITHUB_APP_ID") do
+  config :robine, :github_app_id, github_app_id
+end
+
+if github_private_key = System.get_env("GITHUB_APP_PRIVATE_KEY") do
+  config :robine, :github_app_private_key, String.replace(github_private_key, "\\n", "\n")
+end
+
+if bootstrap_token = System.get_env("ROBINE_BOOTSTRAP_TOKEN") do
+  config :robine,
+    bootstrap_token_hash: :crypto.hash(:sha256, bootstrap_token),
+    bootstrap_expires_at: DateTime.add(DateTime.utc_now(), 900, :second)
+end
+
+case {System.get_env("OIDC_ISSUER"), System.get_env("OIDC_CLIENT_ID"),
+      System.get_env("OIDC_CLIENT_SECRET")} do
+  {issuer, client_id, client_secret}
+  when is_binary(issuer) and is_binary(client_id) and is_binary(client_secret) ->
+    public_url = System.get_env("ROBINE_PUBLIC_URL", "http://localhost:4000")
+
+    config :robine,
+      public_url: public_url,
+      oidc_config: [
+        base_url: issuer,
+        client_id: client_id,
+        client_secret: client_secret,
+        redirect_uri: public_url <> "/auth/oidc/callback",
+        authorization_params: [scope: "openid email profile"],
+        trusted_audiences: [client_id]
+      ]
+
+  _ ->
+    :ok
 end
 
 # config/runtime.exs is executed for all environments, including
@@ -60,6 +149,14 @@ if config_env() == :dev do
 end
 
 if config_env() == :prod do
+  bootstrap_token =
+    System.get_env("ROBINE_BOOTSTRAP_TOKEN") ||
+      raise "environment variable ROBINE_BOOTSTRAP_TOKEN is missing"
+
+  config :robine,
+    bootstrap_token_hash: :crypto.hash(:sha256, bootstrap_token),
+    bootstrap_expires_at: DateTime.add(DateTime.utc_now(), 900, :second)
+
   database_url =
     System.get_env("DATABASE_URL") ||
       raise """

@@ -12,6 +12,7 @@ defmodule Robine.Execution.Contracts.Specification do
     :shell,
     :steps,
     :timeout_ms,
+    :source_path,
     env: %{},
     secrets: %{},
     metadata: %{}
@@ -25,6 +26,7 @@ defmodule Robine.Execution.Contracts.Specification do
           shell: String.t(),
           steps: [Step.t()],
           timeout_ms: pos_integer(),
+          source_path: String.t() | nil,
           env: %{optional(String.t()) => String.t()},
           secrets: %{optional(String.t()) => String.t()},
           metadata: map()

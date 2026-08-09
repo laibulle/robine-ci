@@ -9,6 +9,13 @@ defmodule Robine.Storage do
   defdelegate upload_artifact(input, context), to: UseCases.UploadArtifact, as: :call
   @spec download_artifact(map(), ExecutionContext.t()) :: {:ok, Download.t()} | {:error, term()}
   defdelegate download_artifact(input, context), to: UseCases.DownloadArtifact, as: :call
+
+  @spec download_dependency_artifact(map(), ExecutionContext.t()) ::
+          {:ok, Download.t()} | {:error, term()}
+  defdelegate download_dependency_artifact(input, context),
+    to: UseCases.DownloadDependencyArtifact,
+    as: :call
+
   @spec save_cache(map(), ExecutionContext.t()) :: {:ok, CacheMetadata.t()} | {:error, term()}
   defdelegate save_cache(input, context), to: UseCases.SaveCache, as: :call
   @spec restore_cache(map(), ExecutionContext.t()) :: {:ok, Download.t()} | {:error, term()}

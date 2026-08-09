@@ -2,10 +2,10 @@
 
 ## Status
 
-- **State:** Draft
+- **State:** Accepted
 - **Owner:** Storage
 - **Target:** MVP
-- **Last updated:** 2026-08-08
+- **Last updated:** 2026-08-09
 
 ## Summary
 
@@ -75,7 +75,15 @@ A developer caching dependencies, transferring build outputs, downloading diagno
 
 The database records logical cache entries and immutable artifacts. Blobs use content-derived paths below a configured storage root, never user-provided path components. Uploads stream to a temporary object while hashing and enforcing limits, then atomically finalize and commit metadata.
 
+The MVP defaults artifact and cache declarations to seven days and log retention to 30 days. An hourly durable worker removes expired metadata in batches of 1,000 and places possible orphan blobs into a persistent garbage-collection queue. It waits one hour, rechecks references across artifacts and caches, deletes the blob, and acknowledges the candidate only after filesystem deletion succeeds. Operators may configure log retention, grace, and batch size through environment variables.
+
+The initial storage ceilings are 50 GiB of logical retained content for the instance and 10 GiB per repository. TAR with gzip compression is the sole MVP archive format. An artifact that completed publication before its job later failed keeps its declared retention; the MVP does not run implicit post-failure artifact collection after command execution stops.
+
 Cache restore extracts into the job workspace before user steps that depend on it. Artifact download follows explicit built-in steps. Cache and artifact archives use one documented format and normalized metadata to avoid owner and timestamp surprises.
+
+Runner-owned built-ins create gzip-compressed TAR archives inside the isolated job container, copy them through Docker's archive API, and validate them before publication. Restore inputs are digest-verified by storage and preflighted again before extraction. A cache miss succeeds visibly. Artifact downloads resolve by pipeline, declared dependency job, successful attempt, and artifact name; callers cannot bypass the dependency graph with an arbitrary artifact identifier.
+
+Source TAR archives are inspected before in-memory extraction. Only directories and regular files below a single archive root are accepted; traversal, links, devices, FIFOs, excessive paths, more than 10,000 files, more than 1 GB expanded content, a compression ratio above 100:1, or parsing beyond ten seconds are rejected. Cache and artifact archive extraction MUST reuse the same policy when their runner built-ins are implemented.
 
 ## Failure modes and recovery
 
@@ -97,20 +105,23 @@ Metrics include logical and physical bytes, cache hit ratio, upload/download lat
 
 ## Acceptance criteria
 
-- [ ] Cache miss does not fail a representative job.
+- [x] Cache miss does not fail a representative job.
 - [ ] Interrupted uploads never become visible as complete objects.
-- [ ] Traversal, symlink escape, archive bomb, and special-file fixtures are rejected.
+- [ ] Traversal, symlink escape, archive bomb, and special-file fixtures are rejected. (The shared TAR preflight and GitHub source path are covered; cache/artifact runner built-ins remain.)
 - [ ] An artifact digest mismatch is detected before extraction.
-- [ ] A failed job can be retried using retained dependency artifacts.
-- [ ] When an input artifact has expired, the UI offers the smallest dependency rerun that can recreate it.
+- [x] A failed job can be retried using retained dependency artifacts.
+- [x] When an input artifact has expired, the UI offers the smallest dependency rerun that can recreate it.
 
 ## Open questions
 
-- Set default cache, artifact, and log retention periods and quotas.
-- Choose the archive format and compression algorithm.
-- Decide whether failed-job artifacts are retained by default.
+None blocking.
+
+## Decisions
+
+- Default logical quotas are 50 GiB per instance and 10 GiB per repository.
+- Cache and artifact archives use TAR with gzip compression.
+- Successfully published artifacts are retained for their declared duration even if a later step makes the job fail. No unrequested post-failure collection occurs.
 
 ## Out of scope / future work
 
 - S3-compatible storage, remote cache services, deduplication garbage collection across repositories, and release assets.
-

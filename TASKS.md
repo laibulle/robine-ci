@@ -17,43 +17,43 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 
 - **Spec:** [PLAT-002](docs/specs/platform/plat-002-clean-application-architecture.md)
 - **Depends on:** None
-- [ ] Decide single Mix application versus umbrella; default to a single application.
-- [ ] Select and document the compile-time architecture enforcement mechanism.
-- [ ] Finalize `Robine.ExecutionContext` and typed dependency construction.
-- [ ] Define the first durable outbox events.
-- [ ] Resolve the read-query boundary convention.
-- [ ] Mark PLAT-002 `Accepted` after blocking questions are closed.
+- [x] Decide single Mix application versus umbrella. (One Mix/OTP application for the MVP.)
+- [x] Select and document the architecture enforcement mechanism. (Focused ExUnit dependency checks run in CI.)
+- [x] Finalize `Robine.ExecutionContext` and typed dependency construction.
+- [x] Define the first durable outbox events. (`PipelineCreated` is the initial event.)
+- [x] Resolve the read-query boundary convention. (Named query use cases exposed by facades.)
+- [x] Mark PLAT-002 `Accepted` after blocking questions are closed.
 
 ### DEC-002 — Freeze workflow schema version 1
 
 - **Spec:** [WF-001](docs/specs/workflows/wf-001-workflow-format.md)
 - **Depends on:** DEC-001
-- [ ] Finalize cache checksum syntax without a general expression language.
-- [ ] Define workflow size, job count, step count, and graph-depth limits.
-- [ ] Decide mutable image tag policy.
-- [ ] Resolve shell behavior for images without `/bin/sh`.
-- [ ] Publish valid and invalid YAML examples.
-- [ ] Mark WF-001 `Accepted`.
+- [x] Finalize cache checksum syntax without a general expression language. (`${{ checksum('relative/path') }}` is the sole interpolation and expands to a lowercase SHA-256 digest.)
+- [x] Define workflow size, job count, step count, and graph-depth limits.
+- [x] Decide mutable image tag policy. (Tags are accepted with a visible reproducibility warning; digests are recommended.)
+- [x] Resolve shell behavior for images without `/bin/sh`. (`/bin/sh` and `/bin/bash` are the only v1 values; absence fails preparation as `shell_unavailable`.)
+- [x] Publish valid and invalid YAML examples.
+- [x] Mark WF-001 `Accepted`.
 
 ### DEC-003 — Freeze MVP operational defaults
 
 - **Specs:** [PROD-001](docs/specs/product/prod-001-mvp-definition.md), [EXEC-001](docs/specs/execution/exec-001-local-docker-runner.md), [DATA-001](docs/specs/storage/data-001-cache-and-artifacts.md)
 - **Depends on:** DEC-001
-- [ ] Select supported Linux and Docker Engine versions.
-- [ ] Define CPU, memory, job timeout, cancellation grace, concurrency, and disk-pressure defaults.
-- [ ] Define log, cache, and artifact retention and quotas.
-- [ ] Choose archive format and compression.
-- [ ] Decide whether failed-job artifacts are retained by default.
+- [x] Select supported Linux and Docker Engine versions. (Ubuntu Server 24.04/26.04 LTS and Docker Engine 29.x.)
+- [x] Define CPU, memory, process, job timeout, cancellation grace, concurrency, and disk-pressure defaults.
+- [x] Define log, cache, and artifact retention and quotas. (30-day logs, seven-day cache/artifact declarations, 50 GiB instance and 10 GiB repository logical quotas.)
+- [x] Choose archive format and compression. (TAR with gzip.)
+- [x] Decide whether failed-job artifacts are retained by default. (Already-published artifacts keep their declared retention.)
 
 ### DEC-004 — Freeze identity and integration policy
 
 - **Specs:** [IAM-001](docs/specs/identity/iam-001-authentication-and-sso.md), [GH-001](docs/specs/github/gh-001-github-integration.md)
 - **Depends on:** DEC-001
-- [ ] Choose invite-only, verified-domain, or open OIDC provisioning.
-- [ ] Define bootstrap token delivery and rotation.
-- [ ] Decide whether repository-specific authorization is required for MVP.
-- [ ] Decide draft pull-request behavior.
-- [ ] Confirm GitHub App permission set and GitHub Enterprise Server target.
+- [x] Choose invite-only, verified-domain, or open OIDC provisioning. (Open provisioning requires a provider-verified email and grants viewer by default; collisions never auto-link.)
+- [x] Define bootstrap token delivery and rotation. (`ROBINE_BOOTSTRAP_TOKEN`, hashed in memory, expires 15 minutes after startup, and becomes unusable after first-user creation.)
+- [x] Decide whether repository-specific authorization is required for MVP. (Instance roles govern trusted repositories for MVP.)
+- [x] Decide draft pull-request behavior. (Draft pull requests are ignored until `ready_for_review`.)
+- [x] Confirm GitHub App permission set and GitHub Enterprise Server target. (GitHub.com only for MVP; repository permissions are Metadata read, Contents read, and Checks read/write; subscribed events are Push and Pull request.)
 
 ## Phase 1 — Repository and architecture foundation
 
@@ -75,8 +75,8 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - [x] Add `Robine.Runtime` composition root with startup validation.
 - [x] Establish module/layout conventions for domain, use cases, ports, contracts, adapters, and delivery.
 - [x] Add automated forbidden-dependency checks.
-- [ ] Add fixtures proving every forbidden direction fails.
-- [ ] Document temporary exception policy.
+- [x] Add fixtures proving every forbidden direction fails.
+- [x] Document temporary exception policy.
 
 ### ARCH-002 — Implement the reference vertical slice
 
@@ -105,20 +105,20 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - **Spec:** [WF-001](docs/specs/workflows/wf-001-workflow-format.md)
 - **Depends on:** DEC-002, ARCH-002
 - [x] Parse workflow YAML without executing code or resolving network resources. (Directory discovery remains.)
-- [ ] Preserve source line and column information.
+- [x] Preserve source line and column information.
 - [x] Reject unknown keys except preserved `x-` extensions.
 - [x] Produce stable diagnostic codes. (Human and JSON renderers remain.)
-- [ ] Add a shared valid/invalid fixture corpus.
+- [x] Add a shared valid/invalid fixture corpus.
 
 ### WF-102 — Implement semantic validation and graph construction
 
 - **Spec:** [WF-001](docs/specs/workflows/wf-001-workflow-format.md)
 - **Depends on:** WF-101
-- [ ] Validate identifiers, steps, built-ins, dependencies, limits, image references, and environment values. (Limits and some built-in inputs remain.)
+- [x] Validate identifiers, steps, built-ins, dependencies, limits, image references, and environment values.
 - [x] Detect cycles and report all relevant nodes.
 - [x] Produce a deterministic normalized execution graph.
-- [ ] Ensure CLI and server use the same parser and validator.
-- [ ] Cover every WF-001 validation acceptance criterion.
+- [x] Ensure CLI and server use the same parser and validator.
+- [x] Cover every WF-001 validation acceptance criterion.
 
 ### PIPE-101 — Implement pipeline lifecycle
 
@@ -158,10 +158,10 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - **Depends on:** EXEC-101, DEC-003
 - [x] Implement fresh job containers and workspaces with sequential shared-state steps.
 - [x] Drop capabilities and exclude privileged mode, host networking, Docker socket, devices, and host-path mounts from the execution contract.
-- [ ] Implement image pull, checkout, commands, timeouts, graceful/forced cancellation, and cleanup phases. (Image pull, commands, timeout, and cleanup exist; checkout and externally requested cancellation remain.)
-- [ ] Stream sequence-numbered stdout/stderr with bounded memory.
-- [ ] Enforce global and repository concurrency and disk-pressure admission.
-- [ ] Reconcile labeled orphan containers and volumes after restart.
+- [x] Implement image pull, checkout, commands, timeouts, graceful/forced cancellation, and cleanup phases.
+- [ ] Stream sequence-numbered stdout/stderr with bounded memory. (Redacted combined output streams during execution with database backpressure and a 10 MB result cap; preserving stdout/stderr as separate channels remains.)
+- [x] Enforce global and repository concurrency and disk-pressure admission.
+- [x] Reconcile labeled orphan containers and volumes after restart.
 
 ### EXEC-103 — Connect scheduler to local runner
 
@@ -169,7 +169,7 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - **Depends on:** PIPE-102, EXEC-102
 - [x] Dispatch claimed attempts through the runner port with unique attempt resources.
 - [x] Persist runner events before any future broadcast.
-- [ ] Implement leases, heartbeats, cancellation, timeout, retry, and runner-loss behavior. (Leases, timeout classification, Oban retry, and runner loss exist; heartbeat and live cancellation remain.)
+- [x] Implement leases, heartbeats, cancellation, timeout, retry, and runner-loss behavior.
 - [ ] Prove duplicate dispatch cannot create two active containers.
 - [ ] Add failure-injection tests for Docker and application restarts.
 
@@ -183,7 +183,7 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - [x] Implement repository and approved instance scopes, write-only API behavior, and audit events.
 - [x] Require an external versioned master key and fail safely when it is unavailable.
 - [ ] Implement resumable key rotation.
-- [ ] Enforce explicit references and no fork delivery. (Explicit workflow references and dispatch-time resolution exist; GitHub fork policy remains.)
+- [x] Enforce explicit references and no fork delivery.
 
 ### SEC-102 — Implement streaming secret redaction
 
@@ -200,18 +200,18 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - **Depends on:** ARCH-002, DEC-003
 - [x] Implement a local storage adapter with opaque object IDs and content digests.
 - [ ] Stream into temporary objects and finalize atomically. (Temporary same-filesystem publication is atomic; streaming input remains.)
-- [ ] Enforce archive path, symlink, special-file, file-count, expanded-size, ratio, and time limits.
-- [ ] Implement quotas, retention, reconciliation, and storage-pressure telemetry.
+- [ ] Enforce archive path, symlink, special-file, file-count, expanded-size, ratio, and time limits. (GitHub source TARs now receive bounded preflight before extraction; cache/artifact runner built-ins must reuse it.)
+- [ ] Implement quotas, retention, reconciliation, and storage-pressure telemetry. (Atomic instance/repository logical quotas and hourly bounded retention with persistent, reference-safe blob GC are implemented; full filesystem reconciliation and pressure telemetry remain.)
 
 ### DATA-102 — Implement caches and artifacts
 
 - **Spec:** [DATA-001](docs/specs/storage/data-001-cache-and-artifacts.md)
 - **Depends on:** DATA-101, EXEC-102
-- [ ] Implement exact-key cache restore and atomic cache save built-ins. (Application operations exist; runner built-in workspace archive integration remains.)
+- [x] Implement exact-key cache restore and atomic cache save built-ins.
 - [x] Implement immutable artifact upload/download with digest verification.
 - [x] Enforce repository scoping and explicit dependency access.
-- [ ] Implement retry against retained dependency artifacts.
-- [ ] Refuse retries with precise rerun scope when required artifacts expired.
+- [x] Implement retry against retained dependency artifacts.
+- [x] Refuse retries with precise rerun scope when required artifacts expired.
 
 ## Phase 5 — GitHub integration
 
@@ -219,30 +219,30 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 
 - **Spec:** [GH-001](docs/specs/github/gh-001-github-integration.md)
 - **Depends on:** DEC-004, SEC-101
-- [ ] Implement manifest-assisted setup or exact manual instructions.
-- [ ] Store private keys and webhook secrets encrypted.
-- [ ] Implement installation token lifecycle and least-privilege permission diagnostics.
-- [ ] Expose integration health without leaking payload or credentials.
+- [x] Implement manifest-assisted setup or exact manual instructions.
+- [ ] Store private keys and webhook secrets encrypted. (MVP credentials are supplied out-of-band through environment variables and never persisted; encrypted UI-managed credentials remain.)
+- [ ] Implement installation token lifecycle and least-privilege permission diagnostics. (JWT exchange, expiration-aware caching, and documented least-privilege permissions exist; live permission diagnostics remain.)
+- [x] Expose integration health without leaking payload or credentials.
 
 ### GH-102 — Implement webhook ingestion
 
 - **Spec:** [GH-001](docs/specs/github/gh-001-github-integration.md)
 - **Depends on:** GH-101, PIPE-101
-- [ ] Verify signatures before processing.
-- [ ] Persist and acknowledge accepted deliveries before expensive work.
-- [ ] Deduplicate by delivery ID and tolerate reordered events.
-- [ ] Normalize supported push and pull-request events and filters.
-- [ ] Fetch workflow and source for the exact event SHA.
-- [ ] Disable fork execution and secret delivery by default.
+- [x] Verify signatures before processing.
+- [x] Persist and acknowledge accepted deliveries before expensive work.
+- [x] Deduplicate by delivery ID and tolerate reordered events.
+- [x] Normalize supported push and pull-request events and filters.
+- [x] Fetch workflow and source for the exact event SHA.
+- [x] Disable fork execution and secret delivery by default.
 
 ### GH-103 — Implement GitHub checks projection
 
 - **Spec:** [GH-001](docs/specs/github/gh-001-github-integration.md)
 - **Depends on:** GH-102, PIPE-102
-- [ ] Create pipeline check suites and job check runs with stable Robine deep links.
-- [ ] Deliver updates idempotently through the outbox.
-- [ ] Retry with bounded exponential backoff and jitter.
-- [ ] Reconcile stale or missing checks after GitHub outages.
+- [x] Create pipeline check suites and job check runs with stable Robine deep links. (GitHub creates the App/SHA check suite automatically when Robine creates its pipeline and job check runs.)
+- [ ] Deliver updates idempotently through the outbox. (Provider IDs and stable external keys make updates idempotent; check updates currently use Oban rather than the domain outbox.)
+- [x] Retry with bounded exponential backoff and jitter.
+- [x] Reconcile stale or missing checks after GitHub outages.
 - [ ] Monitor API errors and rate limits.
 
 ## Phase 6 — CLI developer experience
@@ -251,28 +251,28 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 
 - **Spec:** [CLI-001](docs/specs/cli/cli-001-local-developer-experience.md)
 - **Depends on:** BOOT-001
-- [ ] Choose a cross-platform packaging strategy and supported platforms.
-- [ ] Implement version reporting, checksums, verification instructions, stable exit-code classes, and non-interactive output.
-- [ ] Ensure the CLI does not transmit repository data or telemetry by default.
+- [x] Choose a cross-platform packaging strategy and supported platforms. (Elixir escript for the MVP; requires a compatible Erlang runtime.)
+- [ ] Implement version reporting, checksums, verification instructions, stable exit-code classes, and non-interactive output. (Version, documented exit classes in code, and non-interactive execution exist; release checksums and verification docs remain.)
+- [x] Ensure the CLI does not transmit repository data or telemetry by default.
 
 ### CLI-102 — Implement init and validation
 
 - **Spec:** [CLI-001](docs/specs/cli/cli-001-local-developer-experience.md)
 - **Depends on:** CLI-101, WF-102
-- [ ] Detect Elixir/Mix and Node projects without executing repository code.
-- [ ] Preview generated workflows and protect existing files from overwrite.
-- [ ] Implement human and stable JSON validation output.
-- [ ] Prove the CLI and server produce identical diagnostics from the fixture corpus.
+- [x] Detect Elixir/Mix and Node projects without executing repository code.
+- [x] Preview generated workflows and protect existing files from overwrite.
+- [x] Implement human and stable JSON validation output.
+- [x] Prove the CLI and server produce identical diagnostics from the fixture corpus.
 
 ### CLI-103 — Implement local execution
 
 - **Spec:** [CLI-001](docs/specs/cli/cli-001-local-developer-experience.md)
 - **Depends on:** CLI-101, EXEC-102, DATA-102
-- [ ] Run a workflow, selected job with dependencies, or selected step.
-- [ ] Use the same normalized execution contract and local Docker adapter as CI.
-- [ ] Show image, working directory, revision, and omitted CI-only inputs.
-- [ ] Support explicit ignored local secret files without server-side secret download.
-- [ ] Prove command, environment, workspace, image, and exit equivalence with CI fixtures.
+- [x] Run a workflow, selected job with dependencies, or selected step.
+- [x] Use the same normalized execution contract and local Docker adapter as CI.
+- [x] Show image, working directory, revision, and omitted CI-only inputs.
+- [ ] Support explicit ignored local secret files without server-side secret download. (Local cache and artifact built-ins run without server access; explicit secret files remain.)
+- [ ] Prove command, environment, workspace, image, and exit equivalence with CI fixtures. (A Docker-backed multi-job cache/artifact fixture proves core local data semantics; the full equivalence corpus remains.)
 
 ## Phase 7 — Identity and complete web experience
 
@@ -280,50 +280,50 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 
 - **Spec:** [IAM-001](docs/specs/identity/iam-001-authentication-and-sso.md)
 - **Depends on:** ARCH-002, DEC-004
-- [ ] Implement one-time expiring first-admin bootstrap.
-- [ ] Implement memory-hard local credentials, secure sessions, revocation, and login rate limits.
-- [ ] Implement administrator, maintainer, and viewer policies inside application use cases.
-- [ ] Prevent removal of the last usable administrator.
-- [ ] Provide an explicit break-glass local administrator path.
+- [x] Implement one-time expiring first-admin bootstrap.
+- [x] Implement memory-hard local credentials, secure sessions, revocation, and login rate limits.
+- [x] Implement administrator, maintainer, and viewer policies inside application use cases.
+- [x] Prevent removal of the last usable administrator.
+- [x] Provide an explicit break-glass local administrator path.
 
 ### IAM-102 — Implement OIDC SSO
 
 - **Spec:** [IAM-001](docs/specs/identity/iam-001-authentication-and-sso.md)
 - **Depends on:** IAM-101
-- [ ] Implement authorization code flow with PKCE, state, nonce, issuer, audience, and signature validation.
-- [ ] Implement metadata/JWKS refresh and bounded clock skew.
-- [ ] Link identities by issuer and subject, never silently by email alone.
-- [ ] Add provider preflight test and exact redirect URI guidance.
-- [ ] Test provider outage and break-glass recovery.
+- [x] Implement authorization code flow with PKCE, state, nonce, issuer, audience, and signature validation.
+- [x] Implement metadata/JWKS refresh and bounded clock skew.
+- [x] Link identities by issuer and subject, never silently by email alone.
+- [x] Add provider preflight test and exact redirect URI guidance.
+- [ ] Test provider outage and break-glass recovery. (The paths are independent and errors preserve local sign-in; explicit outage integration coverage remains.)
 
 ### WEB-101 — Implement setup and administration
 
 - **Specs:** [WEB-001](docs/specs/web/web-001-pipeline-experience.md), [IAM-001](docs/specs/identity/iam-001-authentication-and-sso.md)
 - **Depends on:** IAM-102, GH-101, SEC-101
-- [ ] Define Tailwind design tokens and accessible base components.
-- [ ] Build first-run, sign-in, repository selection, secrets, identity, retention, and instance-health pages.
+- [ ] Define Tailwind design tokens and accessible base components. (Responsive navigation, status labels, semantic tables, alerts, and form components exist; the documented token layer remains.)
+- [ ] Build first-run, sign-in, repository selection, secrets, identity, retention, and instance-health pages. (First-run, sign-in, repository browsing, write-only secrets, identity administration, retention controls, and instance health are complete; installation selection remains.)
 - [ ] Design every empty, loading, disconnected, degraded, and error state.
-- [ ] Enforce server-side authorization for routes and LiveView events.
+- [ ] Enforce server-side authorization for routes and LiveView events. (Authenticated pipeline routes use a server-side on-mount hook; future administration routes and events remain.)
 
 ### WEB-102 — Implement repository and pipeline views
 
 - **Spec:** [WEB-001](docs/specs/web/web-001-pipeline-experience.md)
 - **Depends on:** WEB-101, EXEC-103, GH-103
-- [ ] Build repository, workflow, pipeline-history, pipeline-detail, and job-detail pages.
+- [ ] Build repository, workflow, pipeline-history, pipeline-detail, and job-detail pages. (Repository, workflow summaries, pipeline history/detail, and job detail exist; a dedicated workflow revision page remains.)
 - [ ] Display dependency graph/list, status, trigger, actor, commit, phases, duration, and infrastructure failures.
-- [ ] Implement authorized cancellation and job retry with confirmation.
-- [ ] Show copyable local reproduction commands and omitted CI-only inputs.
-- [ ] Preserve stable deep links across state changes.
+- [x] Implement authorized cancellation and job retry with confirmation.
+- [x] Show copyable local reproduction commands and omitted CI-only inputs.
+- [x] Preserve stable deep links across state changes.
 
 ### WEB-103 — Implement scalable live logs
 
 - **Spec:** [WEB-001](docs/specs/web/web-001-pipeline-experience.md)
 - **Depends on:** WEB-102, SEC-102
-- [ ] Persist and request logs by sequence cursor.
-- [ ] Reconnect without duplicate or missing chunks.
-- [ ] Group by phase and step with expand, collapse, search, and deep links.
-- [ ] Sanitize ANSI output before HTML rendering.
-- [ ] Avoid loading complete logs into a LiveView process or browser DOM.
+- [x] Persist and request logs by sequence cursor.
+- [x] Reconnect without duplicate or missing chunks.
+- [ ] Group by phase and step with expand, collapse, search, and deep links. (Step grouping, accessible expand/collapse, bounded search, and stable segment anchors exist; explicit runner-phase grouping remains.)
+- [x] Sanitize ANSI output before HTML rendering.
+- [x] Avoid loading complete logs into a LiveView process or browser DOM.
 - [ ] Pass the 100 MB navigation criterion and accessibility checks.
 
 ## Phase 8 — MVP hardening and release
@@ -332,7 +332,7 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 
 - **Depends on:** EXEC-103, GH-103, WEB-103
 - [ ] Implement structured redaction-safe logs and correlation across webhook, pipeline, job, attempt, runner, and GitHub delivery.
-- [ ] Expose readiness/liveness and dependency health without leaking secrets.
+- [x] Expose readiness/liveness and dependency health without leaking secrets.
 - [ ] Implement the metrics required by every MVP specification.
 - [ ] Document alerts for queue backlog, runner loss, storage pressure, outbox failure, GitHub degradation, and authentication anomalies.
 

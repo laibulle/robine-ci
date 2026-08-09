@@ -13,17 +13,23 @@ The project is under active development. The product contract is documented in [
 - Atomic pipeline and outbox persistence
 - Workflow schema v1 parsing and semantic validation
 - Stable workflow diagnostic codes and dependency-cycle detection
+- Isolated local Docker execution and the `robine` validation/execution CLI
+- Encrypted secrets, immutable artifacts, caches, and cursor-based redacted logs
+- Signed GitHub webhook ingestion, exact-SHA workflows, GitHub App installation tokens, and checks
+- Local Argon2id authentication, revocable sessions, and optional OpenID Connect SSO
+- Authenticated LiveView pipeline, job, log, cancellation, and retry experiences
 
-Runner execution, GitHub integration, authentication, secrets, caches, artifacts, the CLI, and the complete web interface are not implemented yet.
+Remote runners, storage quotas, archive hardening, and release hardening remain in progress; see `TASKS.md` for the authoritative status.
 
 ## Requirements
 
 - Elixir 1.20 and Erlang/OTP 29
-- Docker Engine 29 or compatible
+- Ubuntu Server 24.04 LTS or 26.04 LTS on x86-64 or ARM64
+- Docker Engine 29.x
 - Docker Compose v2
 - Node.js 24 for asset development
 
-These versions describe the current development environment and are not a final support policy.
+These are the initial supported MVP versions.
 
 ## Local setup
 
@@ -37,6 +43,7 @@ Configure the mandatory secret-encryption master key for the server process:
 
 ```bash
 export ROBINE_SECRET_KEY="$(openssl rand -base64 32)"
+export ROBINE_BOOTSTRAP_TOKEN="$(openssl rand -hex 24)"
 ```
 
 Keep this key outside PostgreSQL and back it up securely. Losing it makes stored secrets unrecoverable.
@@ -54,6 +61,51 @@ mix phx.server
 ```
 
 Open [http://localhost:4000](http://localhost:4000).
+
+For development, visit `/setup` and use `development-bootstrap-token` unless `ROBINE_BOOTSTRAP_TOKEN` was provided. Production requires a fresh token at startup; it expires after 15 minutes and cannot be reused after the first account is created.
+
+Retention cleanup runs hourly and can also be triggered by an administrator. Logs default to 30 days; expired artifact and cache metadata follows each object's declared expiry, while unreferenced content-addressed blobs have a one-hour safety grace. Override these bounded cleanup settings with `ROBINE_LOG_RETENTION_SECONDS`, `ROBINE_GC_GRACE_SECONDS`, and `ROBINE_RETENTION_BATCH_SIZE`.
+
+Artifact and cache metadata is admitted atomically against logical quotas of 50 GiB per instance and 10 GiB per repository. Override them with `ROBINE_STORAGE_INSTANCE_QUOTA_BYTES` and `ROBINE_STORAGE_REPOSITORY_QUOTA_BYTES`; the repository value cannot exceed the instance value.
+
+Workflow validation defaults to 256 KiB, 64 jobs, 128 steps per job, 512 total steps, and DAG depth 16. Production deployments can override these with the `ROBINE_WORKFLOW_MAX_*` environment variables documented in [WF-001](docs/specs/workflows/wf-001-workflow-format.md).
+
+Runner admission requires at least 2 GiB free and at most 95% filesystem usage by default. Configure `ROBINE_RUNNER_MIN_FREE_BYTES` and `ROBINE_RUNNER_MAX_USED_PERCENT` for the host. Robine reconciles only Docker resources carrying its `io.robine.attempt` label.
+
+Each job is limited to 2 vCPU, 4 GiB RAM without additional swap, and 512 processes by default. Configure `ROBINE_RUNNER_CPU_MILLIS`, `ROBINE_RUNNER_MEMORY_BYTES`, and `ROBINE_RUNNER_PIDS_LIMIT` to match the host.
+
+Live cancellation polls durable state every 250 ms and gives the container five seconds to stop before Docker forces termination. Override the grace with `ROBINE_RUNNER_CANCELLATION_GRACE_MS`.
+
+## GitHub App
+
+Create a GitHub App for the instance with these repository permissions:
+
+- Metadata: read
+- Contents: read
+- Checks: read and write
+
+Subscribe it to `push` and `pull_request`, set its webhook URL to `<ROBINE_PUBLIC_URL>/api/github/webhooks`, then configure:
+
+```bash
+export ROBINE_PUBLIC_URL="https://ci.example.com"
+export GITHUB_APP_ID="123456"
+export GITHUB_APP_PRIVATE_KEY="$(cat /secure/path/robine-app.pem)"
+export GITHUB_WEBHOOK_SECRET="..."
+```
+
+The private key and webhook secret stay outside PostgreSQL. Installation access tokens are short-lived and cached only until shortly before GitHub expires them.
+
+## OpenID Connect
+
+Register `<ROBINE_PUBLIC_URL>/auth/oidc/callback` as the exact redirect URI and configure one provider:
+
+```bash
+export OIDC_ISSUER="https://identity.example.com"
+export OIDC_CLIENT_ID="robine"
+export OIDC_CLIENT_SECRET="..."
+```
+
+OIDC uses Authorization Code with PKCE, state, nonce, issuer/audience/signature validation, and provider JWKS. New identities require a provider-verified email and start as viewers. Email collisions never auto-link accounts; local administrator sign-in remains available for recovery.
 
 ## Verification
 

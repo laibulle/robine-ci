@@ -1,15 +1,16 @@
 defmodule Robine.Repositories.Dependencies do
   @moduledoc false
   alias Robine.Repositories.Ports
-  @enforce_keys [:repository, :signature_verifier, :github, :clock, :id_generator]
-  defstruct [:repository, :signature_verifier, :github, :clock, :id_generator]
+  @enforce_keys [:repository, :signature_verifier, :github, :clock, :id_generator, :public_url]
+  defstruct [:repository, :signature_verifier, :github, :clock, :id_generator, :public_url]
 
   @type t :: %__MODULE__{
           repository: module(),
           signature_verifier: module(),
           github: module(),
           clock: module(),
-          id_generator: module()
+          id_generator: module(),
+          public_url: String.t()
         }
 
   @spec validate!(t()) :: :ok

@@ -102,10 +102,13 @@ The service exposes structured application logs, health endpoints, webhook proce
 
 ## Open questions
 
-- Define the exact supported Docker Engine and Linux versions before acceptance.
-- Define initial log, artifact, and cache retention defaults.
+None blocking.
+
+## Decisions
+
+- The initial supported server hosts are Ubuntu Server 24.04 LTS and 26.04 LTS on x86-64 or ARM64, with Docker Engine 29.x and Docker Compose v2.
+- Logs default to 30 days. Cache and artifact declarations default to seven days, subject to the quotas and retention rules in DATA-001.
 
 ## Out of scope / future work
 
 - Remote runner fleets, additional forges, managed hosting, organizations, billing, and deployment workflows.
-

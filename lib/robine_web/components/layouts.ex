@@ -31,39 +31,48 @@ defmodule RobineWeb.Layouts do
     default: nil,
     doc: "the current [scope](https://phoenix.hexdocs.pm/scopes.html)"
 
+  attr :current_actor, :map, default: nil
+
   slot :inner_block, required: true
 
   def app(assigns) do
     ~H"""
-    <header class="navbar px-4 sm:px-6 lg:px-8">
-      <div class="flex-1">
-        <a href="/" class="flex-1 flex w-fit items-center gap-2">
-          <img src={~p"/images/logo.svg"} width="36" />
-          <span class="text-sm font-semibold">v{Application.spec(:phoenix, :vsn)}</span>
-        </a>
-      </div>
-      <div class="flex-none">
-        <ul class="flex flex-column px-1 space-x-4 items-center">
-          <li>
-            <a href="https://phoenixframework.org/" class="btn btn-ghost">Website</a>
-          </li>
-          <li>
-            <a href="https://github.com/phoenixframework/phoenix" class="btn btn-ghost">GitHub</a>
-          </li>
-          <li>
-            <.theme_toggle />
-          </li>
-          <li>
-            <a href="https://phoenix.hexdocs.pm/overview.html" class="btn btn-primary">
-              Get Started <span aria-hidden="true">&rarr;</span>
-            </a>
-          </li>
-        </ul>
-      </div>
+    <header class="sticky top-0 z-30 border-b border-base-300 bg-base-100/90 backdrop-blur">
+      <nav class="navbar mx-auto max-w-7xl px-4 sm:px-6" aria-label="Primary navigation">
+        <div class="flex-1 gap-8">
+          <a
+            href={if @current_actor, do: ~p"/pipelines", else: ~p"/"}
+            class="flex items-center gap-3 font-bold tracking-tight"
+          >
+            <span class="grid size-9 place-items-center rounded-xl bg-primary text-lg text-primary-content">R</span>
+            <span>Robine CI</span>
+          </a>
+          <div :if={@current_actor} class="hidden items-center gap-1 md:flex">
+            <.link navigate={~p"/pipelines"} class="btn btn-ghost btn-sm">Pipelines</.link>
+            <.link navigate={~p"/repositories"} class="btn btn-ghost btn-sm">Repositories</.link>
+            <.link
+              :if={@current_actor.role == :administrator}
+              navigate={~p"/admin"}
+              class="btn btn-ghost btn-sm"
+            >Administration</.link>
+          </div>
+        </div>
+        <div class="flex-none gap-2">
+          <span :if={@current_actor} class="hidden text-sm text-base-content/60 sm:block">{@current_actor.email}</span>
+          <.theme_toggle />
+          <.link
+            :if={@current_actor}
+            href={~p"/sign-out"}
+            method="delete"
+            class="btn btn-ghost btn-sm"
+          >Sign out</.link>
+          <.link :if={is_nil(@current_actor)} href={~p"/sign-in"} class="btn btn-primary btn-sm">Sign in</.link>
+        </div>
+      </nav>
     </header>
 
-    <main class="px-4 py-20 sm:px-6 lg:px-8">
-      <div class="mx-auto max-w-2xl space-y-4">
+    <main class="px-4 py-10 sm:px-6 lg:px-8">
+      <div class="mx-auto max-w-7xl space-y-4">
         {render_slot(@inner_block)}
       </div>
     </main>

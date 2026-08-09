@@ -86,6 +86,28 @@ defmodule Robine.Pipelines.Domain.Attempt do
   def lease_expired?(%__MODULE__{lease_expires_at: lease}, now),
     do: DateTime.compare(lease, now) == :lt
 
+  @spec heartbeat(t(), DateTime.t(), pos_integer()) :: {:ok, t()} | {:error, term()}
+  def heartbeat(%__MODULE__{status: status} = attempt, %DateTime{} = now, lease_seconds)
+      when status in [:queued, :preparing, :running, :cancelling] and is_integer(lease_seconds) and
+             lease_seconds > 0 do
+    renewed_lease = DateTime.add(now, lease_seconds, :second)
+
+    lease_expires_at =
+      case DateTime.compare(attempt.lease_expires_at, renewed_lease) do
+        :lt -> renewed_lease
+        _current_or_later -> attempt.lease_expires_at
+      end
+
+    {:ok, %{attempt | lease_expires_at: lease_expires_at}}
+  end
+
+  def heartbeat(%__MODULE__{status: status}, %DateTime{}, lease_seconds)
+      when is_integer(lease_seconds) and lease_seconds > 0,
+      do: {:error, {:attempt_terminal, status}}
+
+  def heartbeat(%__MODULE__{}, _now, _lease_seconds),
+    do: {:error, {:invalid_input, :heartbeat}}
+
   defp valid_reason?(:failed, reason), do: reason in (@reasons -- [:cancelled])
   defp valid_reason?(:cancelled, :cancelled), do: true
   defp valid_reason?(_status, nil), do: true

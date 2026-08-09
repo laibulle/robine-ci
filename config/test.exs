@@ -24,6 +24,10 @@ config :robine, :secret_keyring,
   keys: %{1 => :binary.copy(<<42>>, 32)}
 
 config :robine, :github_webhook_secret, "test-github-webhook-secret"
+config :robine, :bootstrap_token_hash, :crypto.hash(:sha256, "test-bootstrap-token")
+config :robine, :bootstrap_expires_at, ~U[2030-01-01 00:00:00Z]
+
+config :argon2_elixir, t_cost: 1, m_cost: 8
 
 # We don't run a server during test. If one is required,
 # you can enable the server option below.

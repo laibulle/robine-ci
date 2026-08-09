@@ -33,3 +33,4 @@ New specifications MUST start from [TEMPLATE.md](TEMPLATE.md). A feature is not 
 | Identity | [IAM-001 authentication and SSO](identity/iam-001-authentication-and-sso.md) | Local auth, OIDC, and authorization |
 | Security | [SEC-001 secrets and trust model](security/sec-001-secrets-and-trust-model.md) | Encryption, masking, and trusted code policy |
 | Storage | [DATA-001 cache and artifacts](storage/data-001-cache-and-artifacts.md) | Dependency cache and job outputs |
+| Operations | [OPS-001 observability and health](operations/ops-001-observability-and-health.md) | Probes, dependency diagnostics, metrics, and alerts |
