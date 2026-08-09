@@ -4,6 +4,7 @@ defmodule Robine.Repositories.UseCases.SyncGitHubChecks do
   alias Robine.Pipelines
   alias Robine.Repositories.Dependencies
   alias Robine.Repositories.Domain.CoverageReport
+  alias Robine.Storage
 
   @coverage_log_page_limit 50
   @terminal_job_statuses [:succeeded, :failed, :cancelled, :skipped]
@@ -30,12 +31,16 @@ defmodule Robine.Repositories.UseCases.SyncGitHubChecks do
           )
       ]
 
-      Enum.reduce_while(checks, {:ok, 0}, fn check, {:ok, count} ->
-        case sync_one(repository, check, deps) do
-          :ok -> {:cont, {:ok, count + 1}}
-          {:error, reason} -> {:halt, {:error, reason}}
-        end
-      end)
+      with {:ok, count} <-
+             Enum.reduce_while(checks, {:ok, 0}, fn check, {:ok, count} ->
+               case sync_one(repository, check, deps) do
+                 :ok -> {:cont, {:ok, count + 1}}
+                 {:error, reason} -> {:halt, {:error, reason}}
+               end
+             end),
+           :ok <- maybe_publish_release(repository, snapshot, deps, context) do
+        {:ok, count}
+      end
     end
   end
 
@@ -231,4 +236,41 @@ defmodule Robine.Repositories.UseCases.SyncGitHubChecks do
   defp github_state(_status), do: {:queued, nil}
   defp optional_string(nil), do: nil
   defp optional_string(value), do: to_string(value)
+
+  defp maybe_publish_release(
+         repository,
+         %{status: :succeeded, trigger: trigger, inputs: %{"tag" => tag}} = snapshot,
+         deps,
+         context
+       )
+       when trigger in [:tag, "tag"] do
+    with true <- valid_release_tag?(tag),
+         {:ok, artifact} <- release_artifact(snapshot.jobs, context),
+         true <- function_exported?(deps.source_control, :publish_release, 2) do
+      deps.source_control.publish_release(repository, %{
+        tag: tag,
+        sha: snapshot.commit_sha,
+        asset_name: "robine-#{tag}-release-assets.tar.gz",
+        content: artifact.content
+      })
+    else
+      false -> {:error, :github_release_unsupported}
+      {:error, reason} -> {:error, {:github_release, reason}}
+    end
+  end
+
+  defp maybe_publish_release(_repository, _snapshot, _deps, _context), do: :ok
+
+  defp release_artifact(jobs, context) do
+    Enum.reduce_while(jobs, {:error, :not_found}, fn job, _missing ->
+      case Storage.download_job_artifact(%{job_id: job.id, name: "github-release"}, context) do
+        {:ok, artifact} -> {:halt, {:ok, artifact}}
+        {:error, :not_found} -> {:cont, {:error, :not_found}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp valid_release_tag?(tag),
+    do: is_binary(tag) and Regex.match?(~r/\Av\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\z/, tag)
 end

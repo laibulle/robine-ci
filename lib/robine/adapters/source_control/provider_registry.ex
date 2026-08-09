@@ -24,6 +24,10 @@ defmodule Robine.Adapters.SourceControl.ProviderRegistry do
     do: invoke(repository, :installation_permissions, [repository])
 
   @impl true
+  def publish_release(repository, release),
+    do: invoke(repository, :publish_release, [repository, release])
+
+  @impl true
   def available_repositories, do: available_repositories(:github, "default")
 
   @impl true

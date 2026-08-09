@@ -720,7 +720,7 @@ defmodule RobineWeb.AdminLive.Index do
                       <dt>Metadata</dt><dd class="badge badge-ghost">Read-only</dd>
                     </div>
                     <div class="flex items-center justify-between gap-4">
-                      <dt>Contents</dt><dd class="badge badge-ghost">Read-only</dd>
+                      <dt>Contents</dt><dd class="badge badge-primary">Read &amp; write</dd>
                     </div>
                     <div class="flex items-center justify-between gap-4">
                       <dt>Pull requests</dt><dd class="badge badge-ghost">Read-only</dd>

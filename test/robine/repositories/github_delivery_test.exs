@@ -16,7 +16,7 @@ defmodule Robine.Repositories.GitHubDeliveryTest do
     WorkflowRevision
   }
 
-  alias Robine.Repositories
+  alias Robine.{Repositories, Storage}
   alias Robine.Runtime.Dependencies
   alias Robine.Repo
 
@@ -57,6 +57,21 @@ defmodule Robine.Repositories.GitHubDeliveryTest do
                  - name: Test
                    run: "true"
            """
+         },
+         %{
+           path: ".robine-ci/workflows/release.yml",
+           content: """
+           version: 1
+           name: Release
+           on:
+             push:
+               tags: ["v*"]
+           jobs:
+             package:
+               image: postgres:18-alpine
+               steps:
+                 - run: "true"
+           """
          }
        ]}
     end
@@ -90,10 +105,16 @@ defmodule Robine.Repositories.GitHubDeliveryTest do
         {:ok,
          %{
            "metadata" => "read",
-           "contents" => "read",
+           "contents" => "write",
            "pull_requests" => "read",
            "checks" => "write"
          }}
+
+    @impl true
+    def publish_release(repository, release) do
+      send(self(), {:publish_release, repository.full_name, release})
+      :ok
+    end
   end
 
   defmodule ReusableGitHub do
@@ -405,6 +426,83 @@ defmodule Robine.Repositories.GitHubDeliveryTest do
                %{repository_id: repository.id},
                context
              )
+  end
+
+  test "creates and idempotently publishes a retained release payload for a version tag" do
+    context = context_with_fake_github()
+    repository = register(context, 43_434_344)
+    sha = String.duplicate("a", 40)
+
+    accept(
+      "tag-release-delivery",
+      "push",
+      %{
+        "repository" => %{"id" => repository.provider_id},
+        "after" => sha,
+        "ref" => "refs/tags/v0.1.0",
+        "sender" => %{"login" => "octocat"}
+      },
+      context
+    )
+
+    assert {:ok, %{pipeline_ids: [pipeline_id]}} =
+             Repositories.process_github_delivery(
+               %{delivery_id: "tag-release-delivery"},
+               context
+             )
+
+    pipeline = Repo.get!(Pipeline, pipeline_id)
+    assert pipeline.trigger == "tag"
+    assert pipeline.inputs == %{"tag" => "v0.1.0"}
+
+    pipeline
+    |> Pipeline.changeset(%{
+      status: :succeeded,
+      started_at: DateTime.utc_now(),
+      finished_at: DateTime.utc_now()
+    })
+    |> Repo.update!()
+
+    job = Repo.one!(from job in Job, where: job.pipeline_id == ^pipeline_id)
+    job |> Job.changeset(%{status: :succeeded}) |> Repo.update!()
+
+    attempt_id = Ecto.UUID.generate()
+    now = DateTime.utc_now()
+
+    %Attempt{}
+    |> Attempt.changeset(%{
+      id: attempt_id,
+      job_id: job.id,
+      number: 1,
+      idempotency_token: Ecto.UUID.generate(),
+      status: :succeeded,
+      lease_expires_at: DateTime.add(now, 60, :second),
+      last_sequence: 1
+    })
+    |> Repo.insert!()
+
+    assert {:ok, artifact} =
+             Storage.upload_artifact(
+               %{
+                 repository_id: repository.id,
+                 attempt_id: attempt_id,
+                 name: "github-release",
+                 content: "release-payload"
+               },
+               context
+             )
+
+    assert {:ok, 2} = Repositories.sync_github_checks(%{pipeline_id: pipeline_id}, context)
+
+    assert_receive {:publish_release, "acme/widget",
+                    %{
+                      tag: "v0.1.0",
+                      sha: ^sha,
+                      asset_name: "robine-v0.1.0-release-assets.tar.gz",
+                      content: "release-payload"
+                    }}
+
+    assert :ok = Robine.Adapters.Storage.LocalBlobStore.delete(artifact.digest)
   end
 
   test "ignores fork pull requests without fetching or creating a pipeline" do

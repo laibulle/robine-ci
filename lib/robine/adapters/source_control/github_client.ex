@@ -121,7 +121,17 @@ defmodule Robine.Adapters.SourceControl.GitHubClient do
 
   @impl true
   def installation_permissions(repository) do
+    :ok = GitHubAppTokenCache.invalidate(repository.installation_id)
     GitHubAppTokenCache.permissions(repository.installation_id)
+  end
+
+  @impl true
+  def publish_release(repository, release) do
+    with {:ok, token} <- token(repository),
+         {:ok, github_release} <- ensure_release(repository, release, token),
+         :ok <- ensure_release_asset(github_release, release, token) do
+      :ok
+    end
   end
 
   @impl true
@@ -198,6 +208,56 @@ defmodule Robine.Adapters.SourceControl.GitHubClient do
 
   defp token(repository), do: GitHubAppTokenCache.token(repository.installation_id)
 
+  defp ensure_release(repository, release, token) do
+    url = "#{@api}/repos/#{repository.full_name}/releases/tags/#{URI.encode(release.tag)}"
+
+    case request(:get, url, token, []) do
+      {:ok, %{status: 200, body: body}} ->
+        {:ok, body}
+
+      {:ok, %{status: 404}} ->
+        create_url = "#{@api}/repos/#{repository.full_name}/releases"
+
+        case request(:post, create_url, token,
+               json: %{
+                 tag_name: release.tag,
+                 target_commitish: release.sha,
+                 name: release.tag,
+                 generate_release_notes: true
+               }
+             ) do
+          {:ok, %{body: body}} -> {:ok, body}
+          {:error, _reason} = error -> error
+        end
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp ensure_release_asset(%{"upload_url" => upload_url} = github_release, release, token)
+       when is_binary(upload_url) do
+    assets = Map.get(github_release, "assets", [])
+
+    if Enum.any?(assets, &(&1["name"] == release.asset_name)) do
+      :ok
+    else
+      url = String.replace(upload_url, ~r/\{.*\}\z/, "")
+
+      case request(:post, url, token,
+             params: [name: release.asset_name],
+             body: release.content,
+             headers: github_headers(token, "application/octet-stream")
+           ) do
+        {:ok, _response} -> :ok
+        {:error, _reason} = error -> error
+      end
+    end
+  end
+
+  defp ensure_release_asset(_release, _artifact, _token),
+    do: {:error, :github_release_upload_url_missing}
+
   defp valid_branch?(branch) do
     byte_size(branch) in 1..255 and not String.starts_with?(branch, ["/", "."]) and
       not String.ends_with?(branch, ["/", ".", ".lock"]) and
@@ -205,12 +265,7 @@ defmodule Robine.Adapters.SourceControl.GitHubClient do
   end
 
   defp request(method, url, token, options) do
-    headers = [
-      {"authorization", "Bearer #{token}"},
-      {"accept", "application/vnd.github+json"},
-      {"x-github-api-version", "2022-11-28"},
-      {"user-agent", "Robine-CI"}
-    ]
+    headers = github_headers(token, "application/vnd.github+json")
 
     options = Keyword.merge([method: method, url: url, headers: headers, retry: false], options)
 
@@ -224,5 +279,14 @@ defmodule Robine.Adapters.SourceControl.GitHubClient do
       {:ok, response} -> {:error, {:github_http, response.status}}
       {:error, reason} -> {:error, {:github_transport, reason}}
     end
+  end
+
+  defp github_headers(token, accept) do
+    [
+      {"authorization", "Bearer #{token}"},
+      {"accept", accept},
+      {"x-github-api-version", "2022-11-28"},
+      {"user-agent", "Robine-CI"}
+    ]
   end
 end

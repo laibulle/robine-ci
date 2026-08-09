@@ -106,7 +106,7 @@ defmodule RobineWeb.RepositoryLiveTest do
     assert {:ok, show, html} = live(conn, ~p"/repositories/#{repository.id}")
     assert html =~ "No valid workflow has run yet"
     assert html =~ "Manage secrets"
-    assert html =~ "Metadata read, Contents read, Checks write"
+    assert html =~ "Metadata read, Contents write, Checks write"
     assert has_element?(show, "#check-github-installation", "Check permissions")
 
     assert {:ok, secrets, html} = live(conn, ~p"/repositories/#{repository.id}/secrets")

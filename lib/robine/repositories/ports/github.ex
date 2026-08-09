@@ -10,6 +10,8 @@ defmodule Robine.Repositories.Ports.GitHub do
               {:ok, integer()} | {:error, term()}
   @callback installation_permissions(Robine.Repositories.Domain.Repository.t()) ::
               {:ok, map()} | {:error, term()}
+  @callback publish_release(Robine.Repositories.Domain.Repository.t(), map()) ::
+              :ok | {:error, term()}
   @callback available_repositories() ::
               {:ok,
                [
@@ -22,5 +24,5 @@ defmodule Robine.Repositories.Ports.GitHub do
                ]}
               | {:error, term()}
 
-  @optional_callbacks available_repositories: 0, default_branch_head: 1
+  @optional_callbacks available_repositories: 0, default_branch_head: 1, publish_release: 2
 end

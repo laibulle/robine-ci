@@ -11,6 +11,9 @@ defmodule Robine.Adapters.SourceControl.GitHubAppTokenCache do
   def permissions(installation_id),
     do: GenServer.call(__MODULE__, {:permissions, installation_id}, 30_000)
 
+  def invalidate(installation_id),
+    do: GenServer.call(__MODULE__, {:invalidate, installation_id}, 30_000)
+
   def app_token, do: app_jwt(DateTime.utc_now())
 
   @impl true
@@ -23,6 +26,10 @@ defmodule Robine.Adapters.SourceControl.GitHubAppTokenCache do
 
   def handle_call({:permissions, installation_id}, _from, state) do
     credential(installation_id, :permissions, state)
+  end
+
+  def handle_call({:invalidate, installation_id}, _from, state) do
+    {:reply, :ok, Map.delete(state, installation_id)}
   end
 
   defp credential(installation_id, field, state) do

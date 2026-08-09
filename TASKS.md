@@ -53,7 +53,7 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - [x] Define bootstrap token delivery and rotation. (`ROBINE_BOOTSTRAP_TOKEN`, hashed in memory, expires 15 minutes after startup, and becomes unusable after first-user creation.)
 - [x] Decide whether repository-specific authorization is required for MVP. (Instance roles govern trusted repositories for MVP.)
 - [x] Decide draft pull-request behavior. (Draft pull requests are ignored until `ready_for_review`.)
-- [x] Confirm GitHub App permission set and GitHub Enterprise Server target. (GitHub.com only for MVP; repository permissions are Metadata read, Contents read, and Checks read/write; subscribed events are Push and Pull request.)
+- [x] Confirm the GitHub App permission set and GitHub Enterprise Server target. (GitHub.com only; repository permissions are Metadata read, Contents write for tag releases, Pull requests read, and Checks write; subscribed events are Push and Pull request.)
 
 ## Phase 1 — Repository and architecture foundation
 
@@ -373,6 +373,15 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - [x] Produce and verify checksummed server, CLI, and runner 0.1.0 artifacts, including exact license material and disabled Erlang Distribution in the server archive; all three real packaging smokes run in `mix qa`.
 - [x] Publish a forward-migration and backup-restore rollback procedure.
 - [ ] Tag the release only after all MVP acceptance criteria are verified.
+
+### REL-102 — Publish GitHub tag releases
+
+- **Spec:** [REL-002](docs/specs/releases/rel-002-github-tag-releases.md)
+- **Depends on:** REL-101, DATA-102, GH-103
+- [x] Normalize exact tag pushes and support distinct `push.tags` glob filters.
+- [x] Add a tag-only workflow that retains CLI and runner release outputs as `github-release`.
+- [x] Publish the retained payload idempotently with the control-plane installation token.
+- [ ] Approve `Contents: write` on the live GitHub App and verify a real tagged release.
 
 ## Phase 9 — Remote runners
 

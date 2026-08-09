@@ -30,6 +30,17 @@ defmodule Robine.Repositories.Domain.SourceControlEvent do
        when is_integer(repository_id) and is_binary(sha),
        do: event(:push, repository_id, sha, branch, actor(:github, payload))
 
+  defp github(
+         "push",
+         %{
+           "repository" => %{"id" => repository_id},
+           "after" => sha,
+           "ref" => "refs/tags/" <> tag
+         } = payload
+       )
+       when is_integer(repository_id) and is_binary(sha),
+       do: event(:tag, repository_id, sha, tag, actor(:github, payload))
+
   defp github("pull_request", %{"action" => action}) when action not in @github_pull_actions,
     do: {:ignore, :pull_request_action}
 

@@ -3,7 +3,7 @@ defmodule Robine.Repositories.Domain.GitHubPermissionPolicy do
 
   @required %{
     "metadata" => "read",
-    "contents" => "read",
+    "contents" => "write",
     "pull_requests" => "read",
     "checks" => "write"
   }

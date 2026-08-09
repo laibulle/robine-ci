@@ -213,7 +213,7 @@ defmodule RobineWeb.RepositoryLive.Show do
               </h2>
               <p class="mt-1 text-sm text-base-content/60">
                 {if @repository.provider == :github,
-                  do: "Required repository permissions: Metadata read, Contents read, Checks write.",
+                  do: "Required repository permissions: Metadata read, Contents write, Checks write.",
                   else:
                     "Verify repository read access and commit-status write access at the configured provider origin."}
               </p>

@@ -13,6 +13,8 @@ defmodule Robine.Repositories.Ports.SourceControl do
               {:ok, integer()} | {:error, term()}
   @callback installation_permissions(Robine.Repositories.Domain.Repository.t()) ::
               {:ok, map()} | {:error, term()}
+  @callback publish_release(Robine.Repositories.Domain.Repository.t(), map()) ::
+              :ok | {:error, term()}
   @callback available_repositories() ::
               {:ok,
                [
@@ -31,5 +33,6 @@ defmodule Robine.Repositories.Ports.SourceControl do
   @optional_callbacks available_repositories: 0,
                       available_repositories: 2,
                       default_branch_head: 1,
-                      branch_head: 2
+                      branch_head: 2,
+                      publish_release: 2
 end

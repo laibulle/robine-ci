@@ -96,6 +96,21 @@ Retention cleanup runs hourly and can also be triggered by an administrator. Log
 
 The event outbox is reconciled every minute. Delivery retries use bounded exponential backoff, and authenticated instance health reports pending, stale, and dead-letter events.
 
+## Publishing a GitHub release
+
+Push a semantic version tag matching the version in `mix.exs`:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The tag-only `Robine Release` workflow builds the CLI and standalone runner, retains `dist/` as the
+`github-release` artifact, then creates the matching GitHub Release with generated notes and attaches
+the digest-verified payload. The GitHub App requires `Contents: read and write`; approve that updated
+permission on the installation before pushing the tag. Release publication is idempotent and provider
+credentials remain in the control plane.
+
 Set `ROBINE_METRICS_TOKEN` to enable the token-protected Prometheus endpoint at `/metrics`; leave it unset to return 404. Initial alerts and diagnosis procedures are in [the monitoring runbook](docs/operations/monitoring-and-troubleshooting.md).
 
 Artifact and cache metadata is admitted atomically against logical quotas of 50 GiB per instance and 10 GiB per repository. Override them with `ROBINE_STORAGE_INSTANCE_QUOTA_BYTES` and `ROBINE_STORAGE_REPOSITORY_QUOTA_BYTES`; the repository value cannot exceed the instance value.
@@ -209,7 +224,7 @@ The included file declares `on.workflow_call.inputs`; its jobs are namespaced as
 Create a GitHub App for the instance with these repository permissions:
 
 - Metadata: read
-- Contents: read
+- Contents: read and write (required to publish tag releases and assets)
 - Checks: read and write
 
 Subscribe it to `push` and `pull_request`, set its webhook URL to `<ROBINE_PUBLIC_URL>/api/github/webhooks`, then configure:

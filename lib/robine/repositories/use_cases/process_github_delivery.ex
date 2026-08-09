@@ -60,6 +60,7 @@ defmodule Robine.Repositories.UseCases.ProcessGitHubDelivery do
               commit_sha: event.sha,
               trigger: event.type,
               actor: event.actor,
+              inputs: event_inputs(event),
               idempotency_key: "#{repository.provider}:#{delivery_id}:#{file.path}",
               jobs: validated.workflow.jobs,
               workflow_revision: revision(file, validated)
@@ -81,6 +82,9 @@ defmodule Robine.Repositories.UseCases.ProcessGitHubDelivery do
 
   defp source_map(files), do: Map.new(files, &{&1.path, &1.content})
 
+  defp event_inputs(%{type: :tag, branch: tag}), do: %{"tag" => tag}
+  defp event_inputs(_event), do: %{}
+
   defp revision(file, validated) do
     %{
       path: file.path,
@@ -90,13 +94,24 @@ defmodule Robine.Repositories.UseCases.ProcessGitHubDelivery do
   end
 
   defp trigger_matches?(triggers, %{type: type, branch: branch}) do
-    key = if type == :push, do: "push", else: "pull_request"
+    key = if type in [:push, :tag], do: "push", else: "pull_request"
 
     case Map.get(triggers, key) do
       nil -> false
       config when config == %{} -> true
-      %{"branches" => branches} when is_list(branches) -> branch in branches
+      %{"tags" => tags} when type == :tag and is_list(tags) -> matches_any?(branch, tags)
+      %{"tags" => _tags} when type != :tag -> false
+      %{"branches" => _branches} when type == :tag -> false
+      %{"branches" => branches} when is_list(branches) -> matches_any?(branch, branches)
       _configuration -> true
     end
+  end
+
+  defp matches_any?(value, patterns) do
+    Enum.any?(patterns, fn pattern ->
+      pattern = to_string(pattern)
+      expression = pattern |> Regex.escape() |> String.replace("\\*", ".*")
+      Regex.match?(Regex.compile!("\\A#{expression}\\z"), value)
+    end)
   end
 end

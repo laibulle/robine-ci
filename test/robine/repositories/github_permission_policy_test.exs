@@ -7,7 +7,7 @@ defmodule Robine.Repositories.GitHubPermissionPolicyTest do
     assert %{status: :ok, missing: []} =
              GitHubPermissionPolicy.evaluate(%{
                "metadata" => "read",
-               "contents" => "read",
+               "contents" => "write",
                "pull_requests" => "read",
                "checks" => "write"
              })
