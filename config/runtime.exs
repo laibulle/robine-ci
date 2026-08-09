@@ -65,40 +65,40 @@ decode_secret_key = fn encoded, label ->
   end
 end
 
-if encoded_keys = System.get_env("ROBINE_SECRET_KEYS") do
-  current_version = positive_integer.("ROBINE_SECRET_KEY_VERSION", 1)
+if encoded_keys = System.get_env("ROBINE_CI_SECRET_KEYS") do
+  current_version = positive_integer.("ROBINE_CI_SECRET_KEY_VERSION", 1)
 
   keys =
     encoded_keys
     |> then(fn value ->
       case Jason.decode(value) do
         {:ok, decoded} when is_map(decoded) -> decoded
-        _ -> raise "ROBINE_SECRET_KEYS must be a JSON object of version-to-key entries"
+        _ -> raise "ROBINE_CI_SECRET_KEYS must be a JSON object of version-to-key entries"
       end
     end)
     |> Enum.map(fn {version, encoded} ->
       case Integer.parse(version) do
         {number, ""} when number > 0 and is_binary(encoded) ->
-          {number, decode_secret_key.(encoded, "ROBINE_SECRET_KEYS[#{version}]")}
+          {number, decode_secret_key.(encoded, "ROBINE_CI_SECRET_KEYS[#{version}]")}
 
         _ ->
-          raise "ROBINE_SECRET_KEYS versions must be positive integer strings"
+          raise "ROBINE_CI_SECRET_KEYS versions must be positive integer strings"
       end
     end)
     |> Map.new()
 
   unless Map.has_key?(keys, current_version) do
-    raise "ROBINE_SECRET_KEYS must contain ROBINE_SECRET_KEY_VERSION"
+    raise "ROBINE_CI_SECRET_KEYS must contain ROBINE_CI_SECRET_KEY_VERSION"
   end
 
   config :robine, :secret_keyring, current_version: current_version, keys: keys
 else
-  if encoded_key = System.get_env("ROBINE_SECRET_KEY") do
-    version = positive_integer.("ROBINE_SECRET_KEY_VERSION", 1)
+  if encoded_key = System.get_env("ROBINE_CI_SECRET_KEY") do
+    version = positive_integer.("ROBINE_CI_SECRET_KEY_VERSION", 1)
 
     config :robine, :secret_keyring,
       current_version: version,
-      keys: %{version => decode_secret_key.(encoded_key, "ROBINE_SECRET_KEY")}
+      keys: %{version => decode_secret_key.(encoded_key, "ROBINE_CI_SECRET_KEY")}
   end
 end
 
@@ -166,7 +166,7 @@ if System.get_env("PHX_SERVER") do
 end
 
 config :robine, RobineWeb.Endpoint,
-  http: [port: String.to_integer(System.get_env("PORT", "4000"))]
+  http: [port: String.to_integer(System.get_env("PORT", "4004"))]
 
 if config_env() == :dev do
   # Reload browser tabs when matching files change.

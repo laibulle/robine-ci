@@ -43,7 +43,7 @@ defmodule Robine.Adapters.Security.AesGcmCipher do
         :ok
 
       {:error, :key_unavailable} ->
-        raise "Robine secret encryption key is unavailable; set ROBINE_SECRET_KEY to a base64-encoded 32-byte key"
+        raise "Robine secret encryption key is unavailable; set ROBINE_CI_SECRET_KEY to a base64-encoded 32-byte key"
     end
   end
 

@@ -1,5 +1,10 @@
 import Config
 
+# Fixed development-only key. Runtime environment keys still override this value.
+config :robine, :secret_keyring,
+  current_version: 1,
+  keys: %{1 => :binary.copy(<<42>>, 32)}
+
 # Configure your database
 config :robine, Robine.Repo,
   username: "postgres",

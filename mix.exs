@@ -33,6 +33,7 @@ defmodule Robine.MixProject do
         qa: :test,
         verify: :test,
         "robine.release": :cli,
+        "robine.server_release": :prod,
         "robine.verify_checksums": :cli
       ]
     ]

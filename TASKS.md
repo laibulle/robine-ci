@@ -358,11 +358,11 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 ### REL-101 — Prepare the first open-source release
 
 - **Depends on:** DX-101
-- [ ] Confirm AGPL licensing and third-party notices.
-- [ ] Publish installation, upgrade, backup, recovery, security-model, and troubleshooting documentation.
-- [ ] Document supported versions, retention defaults, limitations, and trusted-repository assumptions.
-- [ ] Produce signed or checksummed server and CLI artifacts.
-- [ ] Publish a migration and rollback procedure.
+- [x] Confirm the complete AGPL-3.0-or-later text and a test-enforced locked third-party notice inventory.
+- [x] Publish installation, upgrade, backup, recovery, security-model, and troubleshooting documentation.
+- [x] Document supported versions, retention defaults, limitations, and trusted-repository assumptions.
+- [x] Produce and verify checksummed server and CLI 0.1.0 artifacts, including license material in the server archive.
+- [x] Publish a forward-migration and backup-restore rollback procedure.
 - [ ] Tag the release only after all MVP acceptance criteria are verified.
 
 ## Post-MVP backlog

@@ -19,7 +19,7 @@ The project is under active development. The product contract is documented in [
 - Local Argon2id authentication, revocable sessions, and optional OpenID Connect SSO
 - Authenticated LiveView pipeline, job, log, cancellation, and retry experiences
 
-Remote runners, storage quotas, archive hardening, and release hardening remain in progress; see `TASKS.md` for the authoritative status.
+Remote runners and untrusted-workload isolation are post-MVP. Release validation that requires a real GitHub installation or external first-use participants remains tracked in `TASKS.md`.
 
 ## Requirements
 
@@ -42,7 +42,7 @@ docker compose up -d --wait postgres
 Configure the mandatory secret-encryption master key for the server process:
 
 ```bash
-export ROBINE_SECRET_KEY="$(openssl rand -base64 32)"
+export ROBINE_CI_SECRET_KEY="$(openssl rand -base64 32)"
 export ROBINE_BOOTSTRAP_TOKEN="$(openssl rand -hex 24)"
 ```
 
@@ -51,8 +51,8 @@ Keep this key outside PostgreSQL and back it up securely. Losing it makes stored
 For key rotation, configure all retained versions as a JSON object and select the new current version:
 
 ```bash
-export ROBINE_SECRET_KEYS='{"1":"<old-base64-key>","2":"<new-base64-key>"}'
-export ROBINE_SECRET_KEY_VERSION="2"
+export ROBINE_CI_SECRET_KEYS='{"1":"<old-base64-key>","2":"<new-base64-key>"}'
+export ROBINE_CI_SECRET_KEY_VERSION="2"
 ```
 
 Restart Robine, then run bounded rotation batches from Instance Administration. Keep old keys configured until the UI reports completion and a backup has been verified.
@@ -69,13 +69,15 @@ Start Phoenix:
 mix phx.server
 ```
 
-Open [http://localhost:4000](http://localhost:4000).
+Open [http://localhost:4000](http://localhost:4004).
 
 For development, visit `/setup` and use `development-bootstrap-token` unless `ROBINE_BOOTSTRAP_TOKEN` was provided. Production requires a fresh token at startup; it expires after 15 minutes and cannot be reused after the first account is created.
 
 Retention cleanup runs hourly and can also be triggered by an administrator. Logs default to 30 days; expired artifact and cache metadata follows each object's declared expiry, while unreferenced content-addressed blobs have a one-hour safety grace. Override these bounded cleanup settings with `ROBINE_LOG_RETENTION_SECONDS`, `ROBINE_GC_GRACE_SECONDS`, and `ROBINE_RETENTION_BATCH_SIZE`.
 
 The event outbox is reconciled every minute. Delivery retries use bounded exponential backoff, and authenticated instance health reports pending, stale, and dead-letter events.
+
+Set `ROBINE_METRICS_TOKEN` to enable the token-protected Prometheus endpoint at `/metrics`; leave it unset to return 404. Initial alerts and diagnosis procedures are in [the monitoring runbook](docs/operations/monitoring-and-troubleshooting.md).
 
 Artifact and cache metadata is admitted atomically against logical quotas of 50 GiB per instance and 10 GiB per repository. Override them with `ROBINE_STORAGE_INSTANCE_QUOTA_BYTES` and `ROBINE_STORAGE_REPOSITORY_QUOTA_BYTES`; the repository value cannot exceed the instance value.
 
@@ -140,6 +142,8 @@ See [PLAT-002](docs/specs/platform/plat-002-clean-application-architecture.md) f
 
 The MVP is for trusted repository code. Docker containers are not treated as a security boundary against hostile workloads. Do not connect untrusted public repositories or enable fork execution.
 
+Server installation, operational recovery, and limitations are documented in [installation](docs/operations/installation.md), [upgrade/backup/recovery](docs/operations/upgrade-backup-and-recovery.md), the [security model](docs/security-model.md), and [supported platforms](docs/operations/supported-platforms-and-limitations.md).
+
 ## License
 
-Robine CI is distributed under AGPL-3.0-or-later. See [LICENSE](LICENSE).
+Robine CI is distributed under AGPL-3.0-or-later. See [LICENSE](LICENSE) and [third-party notices](THIRD_PARTY_NOTICES.md).
