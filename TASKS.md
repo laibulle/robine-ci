@@ -349,11 +349,11 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 
 - **Spec:** [PROD-001](docs/specs/product/prod-001-mvp-definition.md)
 - **Depends on:** QA-101, CLI-103, WEB-103
-- [ ] Test documented installation from a clean supported Linux host.
+- [x] Test documented installation from a clean supported Linux host.
 - [ ] Reach a green GitHub check in under ten minutes, excluding approvals and image downloads.
-- [ ] Reproduce a representative failed CI job locally from the command shown in the UI.
+- [x] Reproduce a representative failed CI job locally from the command shown in the UI.
 - [ ] Conduct accessibility and first-use tests with developers unfamiliar with the implementation.
-- [ ] Fix or explicitly re-specify every material failure discovered.
+- [x] Fix or explicitly re-specify every material failure discovered.
 
 ### REL-101 — Prepare the first open-source release
 

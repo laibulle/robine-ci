@@ -1,6 +1,6 @@
 # Install and verify the Robine CLI
 
-The MVP CLI is a versioned Elixir escript. It is platform-neutral but requires a compatible Erlang/OTP runtime on Linux, macOS, or Windows. It does not contact a Robine server or send telemetry by default.
+The MVP CLI is a versioned Elixir escript plus an Exile native runtime. A release bundle is specific to the operating system and CPU architecture on which it was built; never mix files from different targets. The verified MVP binary target is GNU/Linux x86-64 with Erlang/OTP 29. Other Unix targets may build from source but are not release-supported until their native bundle passes the same smoke test. The CLI does not contact a Robine server or send telemetry by default.
 
 ## Build a release bundle
 
@@ -11,7 +11,7 @@ mix deps.get
 mix robine.release --output dist
 ```
 
-The release task automatically selects the isolated `MIX_ENV=cli`; this prevents the local escript from loading server-only database, endpoint, or bootstrap-secret requirements. The command creates `robine-<version>.escript`, three `robine-exile*` native runtime files, and `SHA256SUMS`. All five files are one inseparable bundle and must remain in the same directory. The manifest is sorted and written atomically; release automation must publish every listed file from the same build.
+The release task automatically selects the isolated `MIX_ENV=cli`; this prevents the local escript from loading server-only database, endpoint, or bootstrap-secret requirements. The command creates `robine-<version>.escript`, three `robine-exile*` native runtime files, and `SHA256SUMS`. All five files are one inseparable, target-specific bundle and must remain in the same directory. The manifest is sorted and written atomically; release automation must publish every listed file from the same build and label the enclosing archive or download with its OS and architecture.
 
 ## Verify a downloaded release
 
@@ -21,20 +21,10 @@ Place every bundle file and `SHA256SUMS` in the same directory. On Linux:
 sha256sum --check SHA256SUMS
 ```
 
-On macOS:
+On macOS, for a locally built and explicitly unsupported bundle:
 
 ```sh
 shasum --algorithm 256 --check SHA256SUMS
-```
-
-On PowerShell:
-
-```powershell
-Get-Content SHA256SUMS | ForEach-Object {
-  $expected, $name = $_ -split '\s+', 2
-  $actual = (Get-FileHash $name -Algorithm SHA256).Hash.ToLowerInvariant()
-  if ($actual -ne $expected) { throw "Checksum mismatch: $name" }
-}
 ```
 
 Contributors with the source tree can also run:
@@ -61,7 +51,7 @@ ln -sfn "$HOME/.local/lib/robine/robine-exile-spawner" "$HOME/.local/bin/robine-
 robine version
 ```
 
-On Windows, invoke the escript through the installed Erlang runtime or place an equivalent launcher named `robine` on `PATH`. `robine version` must print the expected release version before use.
+Windows is not a supported binary target because the bundled Exile spawner relies on Unix process primitives. `robine version` must print the expected release version before any supported installation is used.
 
 ## Stable exit-code classes
 

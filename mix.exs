@@ -32,6 +32,7 @@ defmodule Robine.MixProject do
         precommit: :test,
         qa: :test,
         verify: :test,
+        "robine.cli_release_smoke": :test,
         "robine.release": :cli,
         "robine.server_release": :prod,
         "robine.verify_checksums": :cli
@@ -119,7 +120,8 @@ defmodule Robine.MixProject do
         "deps.audit",
         "cmd env MIX_ENV=dev mix hex.audit",
         "deps.unlock --check-unused",
-        "test"
+        "test",
+        "robine.cli_release_smoke"
       ],
       precommit: ["verify"]
     ]

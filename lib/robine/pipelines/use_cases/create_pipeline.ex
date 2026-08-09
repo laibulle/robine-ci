@@ -68,6 +68,7 @@ defmodule Robine.Pipelines.UseCases.CreatePipeline do
   defp pipeline_id(%{idempotency_key: key}, _deps)
        when is_binary(key) and byte_size(key) in 1..512 do
     <<bytes::binary-size(16), _rest::binary>> = :crypto.hash(:sha256, key)
+
     <<a::binary-size(8), b::binary-size(4), c::binary-size(4), d::binary-size(4),
       e::binary-size(12)>> = Base.encode16(bytes, case: :lower)
 

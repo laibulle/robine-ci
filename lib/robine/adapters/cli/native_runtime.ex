@@ -38,6 +38,7 @@ defmodule Robine.Adapters.CLI.NativeRuntime do
     ebin = Path.join(runtime_directory, "ebin")
 
     with :ok <- copy_bundle(bundle_directory, runtime_directory),
+         :ok <- register_cleanup(runtime_root),
          :ok <- unload_embedded_application(),
          true <- :code.add_patha(String.to_charlist(ebin)),
          :ok <- load_external_application(),
@@ -72,6 +73,11 @@ defmodule Robine.Adapters.CLI.NativeRuntime do
       {:ok, _applications} -> :ok
       {:error, reason} -> {:error, {:native_application_start, reason}}
     end
+  end
+
+  defp register_cleanup(runtime_root) do
+    System.at_exit(fn _status -> File.rm_rf(runtime_root) end)
+    :ok
   end
 
   defp copy_bundle(bundle_directory, runtime_directory) do
