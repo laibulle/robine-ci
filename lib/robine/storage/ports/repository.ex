@@ -6,6 +6,8 @@ defmodule Robine.Storage.Ports.Repository do
               {:ok, Artifact.t()} | {:error, :not_found | term()}
   @callback get_job_artifact(String.t(), String.t()) ::
               {:ok, Artifact.t()} | {:error, :not_found | term()}
+  @callback get_job_artifact_by_prefix(String.t(), String.t()) ::
+              {:ok, Artifact.t()} | {:error, :not_found | term()}
   @callback get_dependency_artifact(String.t(), String.t(), String.t()) ::
               {:ok, Artifact.t()} | {:error, :not_found | term()}
   @callback upsert_cache(CacheEntry.t(), map()) :: :ok | {:error, term()}

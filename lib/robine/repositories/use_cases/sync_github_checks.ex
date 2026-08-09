@@ -250,7 +250,7 @@ defmodule Robine.Repositories.UseCases.SyncGitHubChecks do
       deps.source_control.publish_release(repository, %{
         tag: tag,
         sha: snapshot.commit_sha,
-        asset_name: "robine-#{tag}-release-assets.tar.gz",
+        asset_name: "robine-#{tag}-#{release_platform(artifact.name)}.tar.gz",
         content: artifact.content
       })
     else
@@ -263,13 +263,18 @@ defmodule Robine.Repositories.UseCases.SyncGitHubChecks do
 
   defp release_artifact(jobs, context) do
     Enum.reduce_while(jobs, {:error, :not_found}, fn job, _missing ->
-      case Storage.download_job_artifact(%{job_id: job.id, name: "github-release"}, context) do
+      case Storage.download_job_artifact_by_prefix(
+             %{job_id: job.id, prefix: "github-release-"},
+             context
+           ) do
         {:ok, artifact} -> {:halt, {:ok, artifact}}
         {:error, :not_found} -> {:cont, {:error, :not_found}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
   end
+
+  defp release_platform("github-release-" <> platform), do: platform
 
   defp valid_release_tag?(tag),
     do: is_binary(tag) and Regex.match?(~r/\Av\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\z/, tag)

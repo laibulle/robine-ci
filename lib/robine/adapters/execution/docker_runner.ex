@@ -1033,7 +1033,8 @@ defmodule Robine.Adapters.Execution.DockerRunner do
     paths = step.with["paths"]
 
     try do
-      with {:ok, _} <-
+      with {:ok, options} <- resolve_publish_options(step.with, kind),
+           {:ok, _} <-
              docker([
                "exec",
                resource,
@@ -1053,17 +1054,27 @@ defmodule Robine.Adapters.Execution.DockerRunner do
                type: :builtin,
                phase: :publish,
                builtin: step.value,
-               options: step.with,
+               options: options,
                content: content
              }),
            {:ok, _} <- docker(["exec", resource, "rm", "-f", container_path]) do
-        label = if kind == :cache, do: step.with["key"], else: step.with["name"]
+        label = if kind == :cache, do: options["key"], else: options["name"]
         {:ok, "Published #{kind} #{label}"}
       end
     after
       File.rm(temporary)
     end
   end
+
+  defp resolve_publish_options(options, :artifact) do
+    with {:ok, name} <- Robine.Execution.Domain.RunnerTemplate.resolve(options["name"]) do
+      if Regex.match?(~r/\A[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}\z/, name),
+        do: {:ok, Map.put(options, "name", name)},
+        else: {:error, :invalid_resolved_artifact_name}
+    end
+  end
+
+  defp resolve_publish_options(options, :cache), do: {:ok, options}
 
   defp emit_output(on_output, step, position, started, chunk, chunk_index, stream) do
     on_output.(%{

@@ -205,6 +205,27 @@ defmodule Robine.Workflows.UseCases.ValidateWorkflowTest do
     assert [%{code: "step.artifact_dependency"}] = diagnostics
   end
 
+  test "accepts allowlisted runner platform variables only in artifact names" do
+    valid = """
+    version: 1
+    name: Release
+    on: {push: {}}
+    jobs:
+      package:
+        image: alpine:3.20
+        steps:
+          - uses: artifacts/upload
+            with:
+              name: release-${{ runner.os }}-${{ runner.arch }}
+              paths: [dist]
+    """
+
+    assert {:ok, _workflow, _warnings} = validate(valid)
+
+    invalid = String.replace(valid, "${{ runner.os }}", "${{ env.HOME }}")
+    assert {:error, [%{code: "step.artifact_upload_inputs"}]} = validate(invalid)
+  end
+
   test "rejects workflow source above the configured byte limit before YAML decoding" do
     source = String.duplicate("# padding\n", 30_000)
 

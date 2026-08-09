@@ -382,6 +382,7 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - [x] Add a tag-only workflow that retains CLI and runner release outputs as `github-release`.
 - [x] Publish the retained payload idempotently with the control-plane installation token.
 - [x] Approve `Contents: write` on the live GitHub App and verify an annotated tag release with its retained 13.1 MB payload.
+- [x] Resolve allowlisted runner OS and architecture variables in retained and GitHub release asset names.
 
 ## Phase 9 — Remote runners
 

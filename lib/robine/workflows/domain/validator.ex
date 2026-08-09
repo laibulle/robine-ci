@@ -1237,8 +1237,17 @@ defmodule Robine.Workflows.Domain.Validator do
 
   defp safe_path?(_path), do: false
 
-  defp valid_artifact_name?(name),
-    do: is_binary(name) and Regex.match?(~r/\A[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}\z/, name)
+  defp valid_artifact_name?(name) when is_binary(name) and byte_size(name) <= 192 do
+    resolved =
+      name
+      |> String.replace("${{ runner.os }}", "linux")
+      |> String.replace("${{ runner.arch }}", "amd64")
+
+    not String.contains?(resolved, "${{") and
+      Regex.match?(~r/\A[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}\z/, resolved)
+  end
+
+  defp valid_artifact_name?(_name), do: false
 
   defp valid_retention_days?(days), do: is_integer(days) and days in 1..90
 

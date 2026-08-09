@@ -46,6 +46,7 @@ A Robine maintainer publishing a versioned GitHub release.
 - **FR-3:** Only a successful tag pipeline carrying a retained `github-release` artifact MAY publish a release.
 - **FR-4:** The GitHub release tag and target SHA MUST equal the authenticated webhook event.
 - **FR-5:** Reconciliation MUST reuse an existing release and asset rather than create duplicates.
+- **FR-6:** Artifact names MAY use the allowlisted `${{ runner.os }}` and `${{ runner.arch }}` variables, resolved by the executing runner before publication.
 
 ### UX requirements
 
@@ -60,7 +61,7 @@ A Robine maintainer publishing a versioned GitHub release.
 
 ## Proposed design
 
-The authenticated push normalizer distinguishes `refs/tags/*` from branches, resolves annotated tags to `head_commit.id`, and stores the tag in immutable pipeline inputs. A dedicated workflow packages the CLI and runner into `dist/`, then uploads that directory as the `github-release` artifact. Terminal projection publishes the release before checks so an already-retained payload remains recoverable even when a legacy tag pipeline used an object SHA. It downloads the digest-verified retained artifact through the Storage facade and calls a provider capability using the GitHub App installation token. GitHub release creation requests generated notes; asset publication attaches the immutable Robine artifact archive. Existing matching releases and assets are treated as success.
+The authenticated push normalizer distinguishes `refs/tags/*` from branches, resolves annotated tags to `head_commit.id`, and stores the tag in immutable pipeline inputs. A dedicated workflow packages the CLI and runner into `dist/`, then uploads that directory as `github-release-${{ runner.os }}-${{ runner.arch }}`. The executing runner resolves these two allowlisted variables to normalized values such as `linux` and `amd64`; unresolved or arbitrary expressions are rejected. Terminal projection publishes the release before checks so an already-retained payload remains recoverable even when a legacy tag pipeline used an object SHA. It downloads the digest-verified retained artifact through the Storage facade and calls a provider capability using the GitHub App installation token. GitHub release creation requests generated notes; asset publication attaches the immutable Robine artifact archive with the version, OS, and architecture in its name. Existing matching releases and assets are treated as success.
 
 ## Failure modes and recovery
 
@@ -85,6 +86,7 @@ Pipeline logs retain package generation and upload output. GitHub API telemetry 
 - [x] A successful tag workflow retains a `github-release` payload.
 - [x] Publication is strict, credential-isolated, and idempotent in tests.
 - [x] A real annotated tag creates a GitHub Release and attached payload after Contents write is approved.
+- [x] Release artifact templates resolve OS and architecture while rejecting arbitrary variables.
 
 ## Open questions
 

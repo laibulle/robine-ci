@@ -489,7 +489,7 @@ defmodule Robine.Repositories.GitHubDeliveryTest do
                %{
                  repository_id: repository.id,
                  attempt_id: attempt_id,
-                 name: "github-release",
+                 name: "github-release-linux-amd64",
                  content: "release-payload"
                },
                context
@@ -501,7 +501,7 @@ defmodule Robine.Repositories.GitHubDeliveryTest do
                     %{
                       tag: "v0.1.0",
                       sha: ^sha,
-                      asset_name: "robine-v0.1.0-release-assets.tar.gz",
+                      asset_name: "robine-v0.1.0-linux-amd64.tar.gz",
                       content: "release-payload"
                     }}
 
