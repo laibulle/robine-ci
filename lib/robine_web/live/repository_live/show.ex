@@ -294,44 +294,44 @@ defmodule RobineWeb.RepositoryLive.Show do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_actor={@current_actor}>
+    <Layouts.app flash={@flash} current_actor={@current_actor} nav_section={:repositories}>
       <section class="space-y-8">
-        <header class="border-b border-base-300/70 pb-7">
-          <.link
-            navigate={~p"/repositories"}
-            class="text-sm font-semibold text-base-content/55 hover:text-primary"
-          >
-            <.icon name="hero-arrow-left" class="mr-1 inline size-4" /> Repositories
-          </.link>
-          <div class="mt-4 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
-            <div class="min-w-0">
-              <div class="flex flex-wrap items-center gap-2">
-                <span class="badge badge-outline badge-sm">{provider_label(@repository.provider)}</span>
-                <span class="badge badge-success badge-sm">Trusted</span>
-                <span class="badge badge-ghost badge-sm">{health_label(@github_preflight)}</span>
-              </div>
-              <h1 class="mt-3 break-words text-4xl font-bold">{@repository.full_name}</h1>
-              <p class="mt-2 text-sm text-base-content/50">
-                Instance {@repository.provider_instance}
-              </p>
+        <.page_header
+          title={@repository.full_name}
+          eyebrow="Close to the source"
+          description={"#{provider_label(@repository.provider)} · #{@repository.provider_instance}"}
+          breadcrumbs={[
+            %{label: "Repositories", navigate: ~p"/repositories"},
+            %{label: @repository.full_name}
+          ]}
+        >
+          <:meta>
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="badge badge-outline badge-sm">{provider_label(@repository.provider)}</span>
+              <span class="badge badge-success badge-sm">Trusted</span>
+              <span class="badge badge-ghost badge-sm">{health_label(@github_preflight)}</span>
             </div>
-            <div class="flex flex-wrap gap-2">
-              <a href="#run-workflow" class="btn btn-primary btn-sm">Run workflow</a>
-              <.link
-                :if={@current_actor.role in [:administrator, :maintainer]}
-                navigate={~p"/repositories/#{@repository.id}/secrets"}
-                class="btn btn-outline btn-sm"
-              >Manage secrets</.link>
-            </div>
-          </div>
-          <nav class="mt-6 flex gap-1 overflow-x-auto pb-1" aria-label="Repository sections">
-            <a href="#overview" class="btn btn-ghost btn-sm">Overview</a>
-            <a href="#recent-pipelines" class="btn btn-ghost btn-sm">Pipelines</a>
-            <a href="#run-workflow" class="btn btn-ghost btn-sm">Manual run</a>
-            <a href="#scheduled-workflows" class="btn btn-ghost btn-sm">Schedules</a>
-            <a href="#previous-workflows" class="btn btn-ghost btn-sm">Workflows</a>
-          </nav>
-        </header>
+          </:meta>
+          <:actions>
+            <a href="#run-workflow" class="btn btn-primary btn-sm">Run workflow</a>
+            <.link
+              :if={@current_actor.role in [:administrator, :maintainer]}
+              navigate={~p"/repositories/#{@repository.id}/secrets"}
+              class="btn btn-outline btn-sm"
+            >Manage secrets</.link>
+          </:actions>
+        </.page_header>
+        <nav
+          id="repository-section-navigation"
+          class="sticky top-16 z-20 -mx-2 flex gap-1 overflow-x-auto rounded-xl border border-base-300/70 bg-base-100/90 p-1.5 shadow-sm backdrop-blur-xl lg:top-3"
+          aria-label="Repository sections"
+        >
+          <a href="#overview" class="btn btn-ghost btn-sm">Overview</a>
+          <a href="#recent-pipelines" class="btn btn-ghost btn-sm">Pipelines</a>
+          <a href="#run-workflow" class="btn btn-ghost btn-sm">Manual run</a>
+          <a href="#scheduled-workflows" class="btn btn-ghost btn-sm">Schedules</a>
+          <a href="#previous-workflows" class="btn btn-ghost btn-sm">Workflows</a>
+        </nav>
 
         <section id="overview" class="scroll-mt-8" aria-labelledby="overview-title">
           <h2 id="overview-title" class="sr-only">Repository overview</h2>

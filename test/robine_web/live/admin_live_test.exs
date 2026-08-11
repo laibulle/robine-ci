@@ -14,22 +14,18 @@ defmodule RobineWeb.AdminLiveTest do
 
     assert {:ok, view, html} = live(conn, ~p"/admin")
     assert html =~ "Administration"
-    assert html =~ "Optional SSO is disabled"
     assert html =~ "Instance health"
     assert html =~ "PostgreSQL"
     assert html =~ "Durable queue"
     assert html =~ "Blob storage"
-    assert html =~ "GitLab"
-    assert html =~ "Forgejo"
     assert html =~ "Retention policy"
-    assert html =~ "Connect GitHub"
-    assert html =~ "GitLab and Forgejo credentials"
-    assert html =~ "Remote runner enrollment"
-    assert has_element?(view, "#rotate-secret-keys", "Rotate keys")
     assert html =~ "30 days"
-    assert html =~ "admin@example.com"
     refute html =~ "test-bootstrap-token"
+    assert has_element?(view, "#admin-section-overview[aria-current='page']")
+    refute has_element?(view, "#github-setup-assistant")
 
+    view |> element("#admin-section-source-control") |> render_click()
+    assert_patch(view, "/admin?section=source-control")
     assert has_element?(view, "#github-setup-assistant")
     assert has_element?(view, "#github-setup-create")
 
@@ -44,6 +40,8 @@ defmodule RobineWeb.AdminLiveTest do
     assert has_element?(view, "#github-private-key-form")
     assert has_element?(view, "#github-webhook-secret-form")
 
+    view |> element("#admin-section-users") |> render_click()
+
     html =
       view
       |> form("#role-#{admin.id}", %{"user_id" => admin.id, "role" => "viewer"})
@@ -52,7 +50,12 @@ defmodule RobineWeb.AdminLiveTest do
     assert html =~ "Create another usable administrator"
     assert Repo.get!(User, admin.id).role == :administrator
 
+    view |> element("#admin-section-security") |> render_click()
+    assert has_element?(view, "#rotate-secret-keys", "Rotate keys")
+    assert render(view) =~ "Optional SSO is disabled"
     assert view |> element("#rotate-secret-keys") |> render_click() =~ "rotation complete"
+
+    view |> element("#admin-section-source-control") |> render_click()
 
     credential = "encrypted-webhook-fixture"
 
@@ -81,6 +84,8 @@ defmodule RobineWeb.AdminLiveTest do
     refute rendered =~ gitlab_token
     stored_gitlab = Repo.get_by!(Secret, name: "GITLAB_TOKEN", scope: :instance)
     refute stored_gitlab.ciphertext =~ gitlab_token
+
+    view |> element("#admin-section-runners") |> render_click()
 
     enrollment_html =
       view
@@ -126,7 +131,9 @@ defmodule RobineWeb.AdminLiveTest do
           )
     end)
 
-    assert {:ok, view, _html} = conn |> signed_in_conn() |> live(~p"/admin")
+    assert {:ok, view, _html} =
+             conn |> signed_in_conn() |> live(~p"/admin?section=source-control")
+
     view |> element("#github-setup-step-3") |> render_click()
 
     document = view |> render() |> LazyHTML.from_fragment()
@@ -167,7 +174,7 @@ defmodule RobineWeb.AdminLiveTest do
                runner_context
              )
 
-    assert {:ok, view, _html} = live(conn, ~p"/admin")
+    assert {:ok, view, _html} = live(conn, ~p"/admin?section=runners")
     assert has_element?(view, "#runner-form-#{identity.runner_id}")
     assert has_element?(view, "#runner-state-#{identity.runner_id}", "Drain")
 

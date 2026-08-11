@@ -63,14 +63,24 @@ defmodule RobineWeb.PipelineLive.Show do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_actor={@current_actor}>
+    <Layouts.app flash={@flash} current_actor={@current_actor} nav_section={:pipelines}>
       <section :if={@pipeline} class="space-y-8">
-        <header>
-          <.link navigate={~p"/pipelines"} class="link text-sm">← All pipelines</.link><div class="mt-4 flex flex-wrap items-center gap-3">
-            <h1 class="text-4xl font-bold">{@pipeline.workflow_name}</h1><.status_badge
-              status={@pipeline.status}
-              size="lg"
-            />
+        <.page_header
+          title={@pipeline.workflow_name}
+          eyebrow="From commit to signal"
+          description={@pipeline.commit_sha}
+          breadcrumbs={[
+            %{label: "Pipelines", navigate: ~p"/pipelines"},
+            %{label: @pipeline.workflow_name}
+          ]}
+        >
+          <:meta><.status_badge status={@pipeline.status} size="lg" /></:meta>
+          <:actions>
+            <.link
+              id="workflow-revision-link"
+              navigate={~p"/pipelines/#{@pipeline.id}/workflow"}
+              class="link mt-3 inline-block text-sm"
+            >View immutable workflow revision</.link>
             <button
               :if={
                 @current_actor.role in [:administrator, :maintainer] and
@@ -78,25 +88,20 @@ defmodule RobineWeb.PipelineLive.Show do
               }
               phx-click="cancel"
               data-confirm="Cancel this pipeline? Running work will stop at the next cancellation boundary."
-              class="btn btn-error btn-sm"
+              class="btn btn-error btn-outline btn-sm border-l-error"
             >Cancel pipeline</button>
-          </div><p class="mt-3 font-mono text-sm text-base-content/65">{@pipeline.commit_sha}</p>
-          <.link
-            id="workflow-revision-link"
-            navigate={~p"/pipelines/#{@pipeline.id}/workflow"}
-            class="link mt-3 inline-block text-sm"
-          >View immutable workflow revision</.link>
-          <p
-            :if={@pipeline.scheduled_for}
-            id="scheduled-for"
-            class="mt-3 text-sm text-base-content/65"
-          >
-            Intended schedule:
-            <time datetime={DateTime.to_iso8601(@pipeline.scheduled_for)}>{DateTime.to_iso8601(
-              @pipeline.scheduled_for
-            )}</time>
-          </p>
-        </header>
+          </:actions>
+        </.page_header>
+        <p
+          :if={@pipeline.scheduled_for}
+          id="scheduled-for"
+          class="mt-3 text-sm text-base-content/65"
+        >
+          Intended schedule:
+          <time datetime={DateTime.to_iso8601(@pipeline.scheduled_for)}>{DateTime.to_iso8601(
+            @pipeline.scheduled_for
+          )}</time>
+        </p>
         <div
           :if={map_size(@pipeline.inputs) > 0}
           id="manual-inputs"

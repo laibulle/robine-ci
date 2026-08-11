@@ -13,13 +13,11 @@ defmodule RobineWeb.BuildInfoLive.Show do
     ~H"""
     <Layouts.app flash={@flash} current_actor={@current_actor}>
       <section class="mx-auto max-w-4xl space-y-7">
-        <header class="border-b border-base-300/70 pb-7">
-          <div class="page-eyebrow mb-3">Support & provenance</div>
-          <h1 class="text-4xl font-bold sm:text-5xl">Build information</h1>
-          <p class="mt-3 max-w-2xl text-base-content/60">
-            Immutable provenance embedded when this Robine release was compiled. Include it when reporting a problem or verifying a deployment.
-          </p>
-        </header>
+        <.page_header
+          eyebrow="Made traceable"
+          title="Build information"
+          description="Immutable provenance embedded when this Robine release was compiled. Include it when reporting a problem or verifying a deployment."
+        />
 
         <.ui_state
           :if={!@build_info.release?}

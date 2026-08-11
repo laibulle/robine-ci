@@ -213,37 +213,39 @@ defmodule RobineWeb.PipelineLive.Index do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_actor={@current_actor}>
+    <Layouts.app flash={@flash} current_actor={@current_actor} nav_section={:pipelines}>
       <section class="space-y-7">
-        <header class="flex flex-col justify-between gap-5 border-b border-base-300/70 pb-7 sm:flex-row sm:items-end">
-          <div>
-            <div class="page-eyebrow mb-3">Live execution</div>
-            <h1 class="text-4xl font-bold sm:text-5xl">Pipelines</h1>
-            <p class="mt-2 max-w-xl text-sm text-base-content/55 sm:text-base">
-              Find failures, follow active runs, and inspect recent delivery history.
-            </p>
-          </div>
-          <div
-            id="pipeline-refresh-status"
-            class={[
-              "flex items-center gap-2 self-start rounded-xl border px-3 py-2 text-xs sm:self-auto",
-              @load_error && "border-error/25 bg-error/5 text-error",
-              !@load_error && "border-base-300/70 bg-base-100/60 text-base-content/55"
-            ]}
-            role="status"
-          >
-            <span class={[
-              "size-2 rounded-full",
-              @load_error && "bg-error",
-              !@load_error && "bg-success"
-            ]}></span>
-            <%= if @load_error do %>
-              Reconnecting…
-            <% else %>
-              Up to date · {if(@last_updated_at, do: relative_time(@last_updated_at), else: "loading")}
-            <% end %>
-          </div>
-        </header>
+        <.page_header
+          eyebrow="The workshop"
+          title="Pipelines"
+          description="Every commit leaves a clear trail. Follow what is moving, find what needs care, and keep shipping."
+        >
+          <:actions>
+            <div
+              id="pipeline-refresh-status"
+              class={[
+                "flex items-center gap-2 self-start rounded-xl border px-3 py-2 text-xs sm:self-auto",
+                @load_error && "border-error/25 bg-error/5 text-error",
+                !@load_error && "border-base-300/70 bg-base-100/60 text-base-content/55"
+              ]}
+              role="status"
+            >
+              <span class={[
+                "size-2 rounded-full",
+                @load_error && "bg-error",
+                !@load_error && "bg-success"
+              ]}></span>
+              <%= if @load_error do %>
+                Reconnecting…
+              <% else %>
+                Up to date · {if(@last_updated_at,
+                  do: relative_time(@last_updated_at),
+                  else: "loading"
+                )}
+              <% end %>
+            </div>
+          </:actions>
+        </.page_header>
 
         <.ui_state :if={@load_error} kind={:error} title="Pipelines are temporarily unavailable">
           Last known results remain visible. Retrying automatically while CI work continues.
@@ -307,7 +309,7 @@ defmodule RobineWeb.PipelineLive.Index do
           :if={@total_count == 0 and is_nil(@load_error)}
           kind={:empty}
           title="No pipelines yet"
-          class="rounded-3xl p-12"
+          class="rounded-2xl p-12"
         >
           Connect a trusted repository and push a workflow.
         </.ui_state>
@@ -316,7 +318,7 @@ defmodule RobineWeb.PipelineLive.Index do
           :if={@total_count > 0 and @result_count == 0}
           kind={:empty}
           title="No matching pipelines"
-          class="rounded-3xl p-10"
+          class="rounded-2xl p-10"
         >
           Adjust your search or clear the filters to see recent runs.
           <:actions>

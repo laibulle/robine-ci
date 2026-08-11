@@ -23,31 +23,30 @@ defmodule RobineWeb.WorkflowRevisionLive.Show do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_actor={@current_actor}>
+    <Layouts.app flash={@flash} current_actor={@current_actor} nav_section={:pipelines}>
       <section class="space-y-8">
-        <header>
-          <.link navigate={~p"/pipelines/#{@pipeline_id}"} class="link text-sm">
-            ← Pipeline
-          </.link>
-          <p class="mt-5 text-sm font-semibold uppercase tracking-[0.2em] text-primary">
-            Immutable workflow revision
-          </p>
-          <h1 id="workflow-revision-title" class="mt-2 text-3xl font-bold break-all">
-            {@revision.path}
-          </h1>
-          <dl class="mt-5 grid gap-4 sm:grid-cols-2">
-            <div>
-              <dt class="text-xs uppercase tracking-wide text-base-content/50">SHA-256</dt>
-              <dd id="workflow-revision-digest" class="mt-1 break-all font-mono text-sm">
-                {@revision.digest}
-              </dd>
-            </div>
-            <div>
-              <dt class="text-xs uppercase tracking-wide text-base-content/50">Captured</dt>
-              <dd class="mt-1 text-sm">{DateTime.to_iso8601(@revision.created_at)}</dd>
-            </div>
-          </dl>
-        </header>
+        <.page_header
+          eyebrow="Captured exactly"
+          title={@revision.path}
+          title_id="workflow-revision-title"
+          breadcrumbs={[
+            %{label: "Pipelines", navigate: ~p"/pipelines"},
+            %{label: "Pipeline", navigate: ~p"/pipelines/#{@pipeline_id}"},
+            %{label: "Workflow revision"}
+          ]}
+        />
+        <dl class="grid gap-4 rounded-xl border border-base-300/70 bg-base-100/60 p-4 sm:grid-cols-2">
+          <div>
+            <dt class="text-xs uppercase tracking-wide text-base-content/50">SHA-256</dt>
+            <dd id="workflow-revision-digest" class="mt-1 break-all font-mono text-sm">
+              {@revision.digest}
+            </dd>
+          </div>
+          <div>
+            <dt class="text-xs uppercase tracking-wide text-base-content/50">Captured</dt>
+            <dd class="mt-1 text-sm">{DateTime.to_iso8601(@revision.created_at)}</dd>
+          </div>
+        </dl>
 
         <section>
           <h2 class="text-xl font-semibold">Exact YAML</h2>

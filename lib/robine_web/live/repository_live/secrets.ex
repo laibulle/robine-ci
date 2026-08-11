@@ -59,17 +59,20 @@ defmodule RobineWeb.RepositoryLive.Secrets do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_actor={@current_actor}>
+    <Layouts.app flash={@flash} current_actor={@current_actor} nav_section={:repositories}>
       <section class="space-y-8">
-        <header>
-          <.link navigate={~p"/repositories/#{@repository.id}"} class="link text-sm">← {@repository.full_name}</.link><h1 class="mt-4 text-4xl font-bold">
-            Secrets
-          </h1><p class="mt-2 text-base-content/60">
-            Values are encrypted, write-only, and exposed only to explicitly referencing jobs.
-          </p>
-        </header>
+        <.page_header
+          eyebrow="Held close"
+          title="Secrets"
+          description="Values are encrypted, write-only, and exposed only to explicitly referencing jobs."
+          breadcrumbs={[
+            %{label: "Repositories", navigate: ~p"/repositories"},
+            %{label: @repository.full_name, navigate: ~p"/repositories/#{@repository.id}"},
+            %{label: "Secrets"}
+          ]}
+        />
         <div class="grid gap-8 lg:grid-cols-2">
-          <section class="rounded-3xl border border-base-300 bg-base-100 p-6">
+          <section class="surface-panel rounded-2xl p-6">
             <h2 class="text-xl font-semibold">Store repository secret</h2><.form
               for={@form}
               id="secret-form"

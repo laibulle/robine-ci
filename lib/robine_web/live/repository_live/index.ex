@@ -335,24 +335,23 @@ defmodule RobineWeb.RepositoryLive.Index do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_actor={@current_actor}>
+    <Layouts.app flash={@flash} current_actor={@current_actor} nav_section={:repositories}>
       <section class="space-y-7">
-        <header class="flex flex-col justify-between gap-5 border-b border-base-300/70 pb-7 sm:flex-row sm:items-end">
-          <div>
-            <div class="page-eyebrow mb-3">Source control</div>
-            <h1 class="text-4xl font-bold sm:text-5xl">Repositories</h1>
-            <p class="mt-2 max-w-2xl text-base-content/60">
-              Monitor project activity and manage the repositories trusted to execute CI.
-            </p>
-          </div>
-          <a
-            :if={@current_actor.role == :administrator}
-            href="#connect-repositories"
-            class="btn btn-primary"
-          >
-            <.icon name="hero-plus" class="size-4" /> Connect repository
-          </a>
-        </header>
+        <.page_header
+          eyebrow="Your source, close by"
+          title="Repositories"
+          description="The projects you care about, their latest signals, and exactly what Robine is trusted to run."
+        >
+          <:actions>
+            <a
+              :if={@current_actor.role == :administrator}
+              href="#connect-repositories"
+              class="btn btn-primary"
+            >
+              <.icon name="hero-plus" class="size-4" /> Connect repository
+            </a>
+          </:actions>
+        </.page_header>
 
         <.form
           for={@filter_form}
@@ -434,7 +433,7 @@ defmodule RobineWeb.RepositoryLive.Index do
           :if={@repository_load_error}
           kind={:error}
           title="Trusted repositories are temporarily unavailable"
-          class="rounded-3xl p-10"
+          class="rounded-2xl p-10"
         >
           Reload after checking database health. Existing CI work continues in the background.
         </.ui_state>
@@ -443,7 +442,7 @@ defmodule RobineWeb.RepositoryLive.Index do
           :if={@repository_count == 0 and not @repository_load_error}
           kind={:empty}
           title="No trusted repository"
-          class="rounded-3xl p-10"
+          class="rounded-2xl p-10"
         >
           Connect a source-control provider, discover its repositories, then explicitly trust one.
         </.ui_state>
@@ -452,7 +451,7 @@ defmodule RobineWeb.RepositoryLive.Index do
           :if={@repository_count > 0 and @result_count == 0}
           kind={:empty}
           title="No matching repository"
-          class="rounded-3xl p-10"
+          class="rounded-2xl p-10"
         >
           Adjust the search or clear filters.
           <:actions>

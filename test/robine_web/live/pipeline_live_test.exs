@@ -39,6 +39,9 @@ defmodule RobineWeb.PipelineLiveTest do
     assert {:ok, index, html} = live(conn, ~p"/pipelines")
     assert html =~ "Pipelines"
     assert has_element?(index, ".app-shell.h-dvh.overflow-hidden")
+    assert has_element?(index, ".sidebar-brand", "Your code stays yours.")
+    assert has_element?(index, ".app-nav-link-active", "Runs, failures & history")
+    assert has_element?(index, ".sidebar-account", "admin@example.com")
     assert has_element?(index, ".app-content.h-dvh.overflow-y-auto.overscroll-y-none")
     assert has_element?(index, "img[src='/images/brand/robine-mark.png']")
     assert has_element?(index, "img[src='/images/brand/robine-mark-dark.png']")
@@ -50,7 +53,8 @@ defmodule RobineWeb.PipelineLiveTest do
     assert has_element?(index, "#pipeline-repository-filter")
     assert has_element?(index, "#pipeline-refresh-status", "Up to date")
     assert has_element?(index, "#application-build-footer a[href='/build-information']")
-    assert has_element?(index, "#mobile-build-information[href='/build-information']")
+    assert has_element?(index, "a[aria-label='About this Robine build']")
+    assert has_element?(index, "a[href='/pipelines'][aria-current='page']")
 
     assert has_element?(
              index,

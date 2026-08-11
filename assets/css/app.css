@@ -26,16 +26,16 @@
   default: false;
   prefersdark: true;
   color-scheme: "dark";
-  --color-base-100: oklch(20% 0.018 260);
-  --color-base-200: oklch(16.5% 0.017 260);
-  --color-base-300: oklch(27% 0.018 260);
-  --color-base-content: oklch(95% 0.012 250);
+  --color-base-100: oklch(20% 0.022 238);
+  --color-base-200: oklch(16.5% 0.02 238);
+  --color-base-300: oklch(27% 0.025 238);
+  --color-base-content: oklch(95% 0.014 85);
   --color-primary: oklch(76% 0.145 162);
   --color-primary-content: oklch(18% 0.035 163);
   --color-secondary: oklch(58% 0.233 277.117);
   --color-secondary-content: oklch(96% 0.018 272.314);
-  --color-accent: oklch(60% 0.25 292.717);
-  --color-accent-content: oklch(96% 0.016 293.756);
+  --color-accent: oklch(73% 0.14 62);
+  --color-accent-content: oklch(22% 0.04 52);
   --color-neutral: oklch(37% 0.044 257.287);
   --color-neutral-content: oklch(98% 0.003 247.858);
   --color-info: oklch(58% 0.158 241.966);
@@ -61,16 +61,16 @@
   default: true;
   prefersdark: false;
   color-scheme: "light";
-  --color-base-100: oklch(99% 0.003 100);
-  --color-base-200: oklch(96.8% 0.006 100);
-  --color-base-300: oklch(91.8% 0.008 100);
+  --color-base-100: oklch(99% 0.008 88);
+  --color-base-200: oklch(96.8% 0.014 82);
+  --color-base-300: oklch(91.8% 0.016 78);
   --color-base-content: oklch(22% 0.025 255);
   --color-primary: oklch(58% 0.145 162);
   --color-primary-content: oklch(99% 0.006 160);
   --color-secondary: oklch(55% 0.027 264.364);
   --color-secondary-content: oklch(98% 0.002 247.839);
-  --color-accent: oklch(0% 0 0);
-  --color-accent-content: oklch(100% 0 0);
+  --color-accent: oklch(68% 0.15 58);
+  --color-accent-content: oklch(99% 0.008 85);
   --color-neutral: oklch(44% 0.017 285.786);
   --color-neutral-content: oklch(98% 0 0);
   --color-info: oklch(62% 0.214 259.815);
@@ -165,7 +165,8 @@
   .app-shell {
     min-height: 100dvh;
     background:
-      radial-gradient(circle at 72% -15%, color-mix(in oklab, var(--color-primary) 8%, transparent), transparent 30rem),
+      radial-gradient(circle at 72% -15%, color-mix(in oklab, var(--color-primary) 11%, transparent), transparent 30rem),
+      radial-gradient(circle at 12% 115%, color-mix(in oklab, var(--color-accent) 8%, transparent), transparent 26rem),
       var(--color-base-200);
   }
 
@@ -174,17 +175,38 @@
   }
 
   .app-sidebar {
-    background: color-mix(in oklab, var(--color-base-100) 88%, transparent);
+    position: relative;
+    background:
+      linear-gradient(160deg, color-mix(in oklab, var(--color-primary) 6%, transparent), transparent 36%),
+      color-mix(in oklab, var(--color-base-100) 90%, transparent);
     border-right: 1px solid color-mix(in oklab, var(--color-base-300) 75%, transparent);
     backdrop-filter: blur(24px);
+  }
+
+  .app-sidebar::after {
+    content: "";
+    position: absolute;
+    inset: auto 1rem 8.5rem;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, color-mix(in oklab, var(--color-accent) 28%, transparent), transparent);
+    pointer-events: none;
+  }
+
+  .sidebar-brand {
+    background:
+      linear-gradient(135deg, color-mix(in oklab, var(--color-primary) 8%, transparent), transparent 52%),
+      color-mix(in oklab, var(--color-base-100) 52%, transparent);
+    border: 1px solid color-mix(in oklab, var(--color-base-300) 62%, transparent);
+    box-shadow: inset 0 1px 0 color-mix(in oklab, white 35%, transparent);
   }
 
   .app-nav-link {
     display: flex;
     align-items: center;
     gap: 0.75rem;
-    border-radius: 0.75rem;
-    padding: 0.68rem 0.8rem;
+    border: 1px solid transparent;
+    border-radius: 0.9rem;
+    padding: 0.65rem 0.7rem;
     color: color-mix(in oklab, var(--color-base-content) 65%, transparent);
     font-size: 0.875rem;
     font-weight: 620;
@@ -194,12 +216,104 @@
   .app-nav-link:hover {
     background: color-mix(in oklab, var(--color-primary) 9%, var(--color-base-100));
     color: var(--color-base-content);
-    transform: translateX(3px);
+    border-color: color-mix(in oklab, var(--color-primary) 12%, transparent);
+    transform: translateX(2px);
+  }
+
+  .app-nav-link-active {
+    border-color: color-mix(in oklab, var(--color-primary) 22%, transparent);
+    background:
+      linear-gradient(105deg, color-mix(in oklab, var(--color-primary) 16%, var(--color-base-100)), color-mix(in oklab, var(--color-accent) 5%, var(--color-base-100)));
+    color: var(--color-base-content);
+    box-shadow: 0 8px 24px color-mix(in oklab, var(--color-primary) 9%, transparent);
+  }
+
+  .app-nav-icon {
+    display: grid;
+    width: 2rem;
+    height: 2rem;
+    flex: none;
+    place-items: center;
+    border-radius: 0.65rem;
+    background: color-mix(in oklab, var(--color-base-200) 76%, transparent);
+    color: color-mix(in oklab, var(--color-base-content) 58%, transparent);
+    transition: background-color 160ms ease, color 160ms ease, transform 160ms ease;
+  }
+
+  .app-nav-link:hover .app-nav-icon,
+  .app-nav-link-active .app-nav-icon {
+    background: var(--color-primary);
+    color: var(--color-primary-content);
+    transform: rotate(-3deg);
+  }
+
+  .app-nav-description {
+    display: block;
+    margin-top: 0.22rem;
+    overflow: hidden;
+    color: color-mix(in oklab, var(--color-base-content) 38%, transparent);
+    font-size: 0.58rem;
+    font-weight: 560;
+    line-height: 1.2;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .app-nav-signal {
+    width: 0.42rem;
+    height: 0.42rem;
+    flex: none;
+    border-radius: 999px;
+    background: var(--color-primary);
+    box-shadow: 0 0 0 3px color-mix(in oklab, var(--color-primary) 12%, transparent);
+  }
+
+  .sidebar-meta-link {
+    border: 1px solid transparent;
+  }
+
+  .sidebar-meta-link:hover {
+    border-color: color-mix(in oklab, var(--color-base-300) 72%, transparent);
+    background: color-mix(in oklab, var(--color-base-100) 66%, transparent);
+  }
+
+  .sidebar-account {
+    border: 1px solid color-mix(in oklab, var(--color-base-300) 72%, transparent);
+    background:
+      radial-gradient(circle at 100% 0%, color-mix(in oklab, var(--color-accent) 8%, transparent), transparent 7rem),
+      color-mix(in oklab, var(--color-base-200) 58%, transparent);
+    box-shadow: inset 0 1px 0 color-mix(in oklab, white 32%, transparent);
+  }
+
+  .sidebar-avatar {
+    background: linear-gradient(145deg, color-mix(in oklab, var(--color-primary) 22%, transparent), color-mix(in oklab, var(--color-accent) 14%, transparent));
+    color: var(--color-primary);
+  }
+
+  .mobile-nav-link {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.25rem;
+    border-radius: 0.75rem;
+    padding: 0.5rem 0.75rem;
+    color: color-mix(in oklab, var(--color-base-content) 60%, transparent);
+    font-size: 0.65rem;
+    font-weight: 700;
+    transition: background-color 160ms ease, color 160ms ease;
+  }
+
+  .mobile-nav-link:hover,
+  .mobile-nav-link-active {
+    background: color-mix(in oklab, var(--color-primary) 11%, var(--color-base-100));
+    color: var(--color-base-content);
   }
 
   .surface-panel {
     border: 1px solid color-mix(in oklab, var(--color-base-300) 82%, transparent);
-    background: color-mix(in oklab, var(--color-base-100) 94%, transparent);
+    background:
+      radial-gradient(circle at 100% 0%, color-mix(in oklab, var(--color-accent) 4%, transparent), transparent 11rem),
+      color-mix(in oklab, var(--color-base-100) 94%, transparent);
     box-shadow: 0 1px 2px color-mix(in oklab, var(--color-base-content) 4%, transparent),
       0 18px 48px color-mix(in oklab, var(--color-base-content) 5%, transparent);
   }
@@ -217,9 +331,41 @@
 
   .page-eyebrow::before {
     content: "";
-    width: 1.25rem;
-    height: 1px;
-    background: currentColor;
+    width: 1.15rem;
+    height: 2px;
+    border-radius: 999px;
+    background: var(--color-primary);
+  }
+
+  .product-page-header {
+    position: relative;
+    overflow: hidden;
+    border-radius: 1.25rem;
+    border: 1px solid color-mix(in oklab, var(--color-base-300) 75%, transparent);
+    background:
+      linear-gradient(112deg, color-mix(in oklab, var(--color-primary) 9%, transparent), transparent 38%),
+      radial-gradient(circle at 92% 10%, color-mix(in oklab, var(--color-accent) 10%, transparent), transparent 12rem),
+      color-mix(in oklab, var(--color-base-100) 72%, transparent);
+    box-shadow: inset 0 1px 0 color-mix(in oklab, white 45%, transparent);
+  }
+
+  .product-page-header::after {
+    content: "";
+    position: absolute;
+    right: -1.5rem;
+    bottom: -2.75rem;
+    width: 8rem;
+    height: 5rem;
+    border: 1px solid color-mix(in oklab, var(--color-primary) 16%, transparent);
+    transform: rotate(-42deg);
+    pointer-events: none;
+  }
+
+  .brand-whisper {
+    color: color-mix(in oklab, var(--color-base-content) 38%, transparent);
+    font-size: 0.58rem;
+    font-weight: 650;
+    letter-spacing: 0.03em;
   }
 
   .code-surface {
