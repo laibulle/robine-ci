@@ -21,7 +21,7 @@ jobs:
           mkdir -p /tmp/robine-apt/cache/archives/partial /tmp/robine-apt/state/lists/partial /tmp/robine-apt/log
           APT_OPTIONS="-o APT::Sandbox::User=root -o Dir::Cache=/tmp/robine-apt/cache -o Dir::State=/tmp/robine-apt/state -o Dir::State::status=/var/lib/dpkg/status -o Dir::Log=/tmp/robine-apt/log"
           apt-get $APT_OPTIONS update
-          apt-get $APT_OPTIONS install --yes --no-install-recommends build-essential git
+          apt-get $APT_OPTIONS install --yes --no-install-recommends build-essential ca-certificates git
           mix local.hex --force
           mix local.rebar --force
           mix deps.get
