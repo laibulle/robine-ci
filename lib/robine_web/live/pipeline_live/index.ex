@@ -216,9 +216,9 @@ defmodule RobineWeb.PipelineLive.Index do
     <Layouts.app flash={@flash} current_actor={@current_actor} nav_section={:pipelines}>
       <section class="space-y-7">
         <.page_header
-          eyebrow="Live execution"
+          eyebrow="The workshop"
           title="Pipelines"
-          description="Find failures, follow active runs, and inspect recent delivery history."
+          description="Every commit leaves a clear trail. Follow what is moving, find what needs care, and keep shipping."
         >
           <:actions>
             <div

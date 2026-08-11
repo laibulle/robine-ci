@@ -67,7 +67,7 @@ defmodule RobineWeb.PipelineLive.Show do
       <section :if={@pipeline} class="space-y-8">
         <.page_header
           title={@pipeline.workflow_name}
-          eyebrow="Pipeline execution"
+          eyebrow="From commit to signal"
           description={@pipeline.commit_sha}
           breadcrumbs={[
             %{label: "Pipelines", navigate: ~p"/pipelines"},

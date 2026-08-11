@@ -338,9 +338,9 @@ defmodule RobineWeb.RepositoryLive.Index do
     <Layouts.app flash={@flash} current_actor={@current_actor} nav_section={:repositories}>
       <section class="space-y-7">
         <.page_header
-          eyebrow="Source control"
+          eyebrow="Your source, close by"
           title="Repositories"
-          description="Monitor project activity and manage the repositories trusted to execute CI."
+          description="The projects you care about, their latest signals, and exactly what Robine is trusted to run."
         >
           <:actions>
             <a

@@ -14,7 +14,7 @@ defmodule RobineWeb.BuildInfoLive.Show do
     <Layouts.app flash={@flash} current_actor={@current_actor}>
       <section class="mx-auto max-w-4xl space-y-7">
         <.page_header
-          eyebrow="Support & provenance"
+          eyebrow="Made traceable"
           title="Build information"
           description="Immutable provenance embedded when this Robine release was compiled. Include it when reporting a problem or verifying a deployment."
         />

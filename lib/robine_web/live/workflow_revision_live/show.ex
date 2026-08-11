@@ -26,7 +26,7 @@ defmodule RobineWeb.WorkflowRevisionLive.Show do
     <Layouts.app flash={@flash} current_actor={@current_actor} nav_section={:pipelines}>
       <section class="space-y-8">
         <.page_header
-          eyebrow="Immutable workflow revision"
+          eyebrow="Captured exactly"
           title={@revision.path}
           title_id="workflow-revision-title"
           breadcrumbs={[

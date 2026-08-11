@@ -298,7 +298,7 @@ defmodule RobineWeb.RepositoryLive.Show do
       <section class="space-y-8">
         <.page_header
           title={@repository.full_name}
-          eyebrow="Trusted repository"
+          eyebrow="Close to the source"
           description={"#{provider_label(@repository.provider)} · #{@repository.provider_instance}"}
           breadcrumbs={[
             %{label: "Repositories", navigate: ~p"/repositories"},

@@ -347,9 +347,9 @@ defmodule RobineWeb.AdminLive.Index do
     <Layouts.app flash={@flash} current_actor={@current_actor} nav_section={:admin}>
       <section class="space-y-8">
         <.page_header
-          eyebrow="Instance control"
+          eyebrow="The engine room"
           title="Administration"
-          description="Operate capacity, integrations, security, and access from focused work areas."
+          description="Keep the machinery healthy, the boundaries explicit, and your instance unmistakably yours."
         />
         <nav
           id="admin-section-navigation"

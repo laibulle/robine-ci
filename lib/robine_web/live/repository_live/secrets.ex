@@ -62,7 +62,7 @@ defmodule RobineWeb.RepositoryLive.Secrets do
     <Layouts.app flash={@flash} current_actor={@current_actor} nav_section={:repositories}>
       <section class="space-y-8">
         <.page_header
-          eyebrow="Repository security"
+          eyebrow="Held close"
           title="Secrets"
           description="Values are encrypted, write-only, and exposed only to explicitly referencing jobs."
           breadcrumbs={[

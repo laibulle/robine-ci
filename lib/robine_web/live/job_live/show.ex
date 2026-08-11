@@ -347,7 +347,7 @@ defmodule RobineWeb.JobLive.Show do
       <section class="space-y-8">
         <.page_header
           title={@job.job_key}
-          eyebrow="Job execution"
+          eyebrow="Inside the run"
           breadcrumbs={[
             %{label: "Pipelines", navigate: ~p"/pipelines"},
             %{label: @pipeline.workflow_name, navigate: ~p"/pipelines/#{@pipeline.id}"},

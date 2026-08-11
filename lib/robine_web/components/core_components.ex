@@ -187,7 +187,7 @@ defmodule RobineWeb.CoreComponents do
     ~H"""
     <section
       class={[
-        "rounded-2xl border p-8 text-center",
+        "surface-panel rounded-2xl border p-8 text-center",
         @kind in [:empty, :loading] && "border-dashed border-base-300 text-base-content/65",
         @kind == :degraded && "border-warning/40 bg-warning/10 text-warning-content",
         @kind == :error && "border-error/40 bg-error/10 text-error-content",
@@ -552,7 +552,7 @@ defmodule RobineWeb.CoreComponents do
 
   def page_header(assigns) do
     ~H"""
-    <header class={[@class, "border-b border-base-300/70 pb-7"]}>
+    <header class={[@class, "product-page-header px-5 py-6 sm:px-7 sm:py-7"]}>
       <nav :if={@breadcrumbs != []} aria-label="Breadcrumb" class="mb-4 overflow-x-auto">
         <ol class="flex min-w-max items-center gap-2 text-xs font-semibold text-base-content/45">
           <li :for={{crumb, index} <- Enum.with_index(@breadcrumbs)} class="flex items-center gap-2">

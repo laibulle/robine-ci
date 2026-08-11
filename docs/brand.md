@@ -20,3 +20,18 @@ uses an off-white primary shape and a brighter teal accent; it must switch with 
 theme rather than relying only on the operating-system preference.
 
 Keep clear space around the mark and do not place it inside an additional colored or rounded container.
+
+## Product character
+
+Robine should feel calm and cared for, not clinical. Warm paper neutrals, deep petroleum surfaces, restrained
+teal, and one mineral amber accent create recognition without weakening the operational signal hierarchy.
+The diagonal cut from the `R` may appear as a small eyebrow glyph or faint corner line, never as a repeated
+decorative pattern.
+
+Product language is precise but human. Prefer short phrases such as “The workshop”, “Inside the run”, and
+“The engine room” when they add orientation. Avoid mascot language, jokes during failures, or copy that makes
+serious infrastructure states feel frivolous.
+
+The desktop sidebar is Robine's control column. It combines the brand lockup, contextual destinations,
+provenance, and account controls in that order. Navigation labels may include one short operational description;
+the active destination uses the teal/amber diagonal signal instead of a generic solid selection bar.
