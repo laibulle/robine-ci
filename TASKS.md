@@ -149,6 +149,7 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - **Specs:** [EXEC-001](docs/specs/execution/exec-001-local-docker-runner.md), [PLAT-002](docs/specs/platform/plat-002-clean-application-architecture.md)
 - **Depends on:** WF-102, ARCH-002
 - [x] Define a versioned, framework-free execution contract shared by server, runner, and CLI.
+- [x] Provide authoritative, runner-neutral `ROBINE_BUILD_*` provenance for applications to embed and document reusable Elixir, JavaScript, and Go consumption patterns.
 - [x] Represent image, workspace, shell, environment, steps, timeout, built-ins, and secret references explicitly.
 - [x] Validate execution contracts at adapter boundaries.
 - [x] Ensure no Ecto, Phoenix, Docker-client, or secret plaintext types leak into persisted public metadata.
@@ -323,6 +324,7 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - [x] Preserve stable deep links across state changes.
 - [x] Upgrade pipeline history to the WEB-001 operational cockpit with URL-persisted filters, attention prioritization, compact responsive rows, source context, durations, and explicit refresh health.
 - [x] Upgrade repository catalogue and detail to the WEB-001 operational experience with scoped activity, health/trust distinction, progressive connection, safe manual launch, and schedule context.
+- [x] Embed Robine's own CI provenance and expose it through a discreet application footer and authenticated Build information page.
 
 ### WEB-103 — Implement scalable live logs
 

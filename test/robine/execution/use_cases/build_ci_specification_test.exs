@@ -74,4 +74,48 @@ defmodule Robine.Execution.UseCases.BuildCiSpecificationTest do
     assert {:error, {:service_secret_missing, "MISSING"}} =
              Execution.build_ci_specification(%{persisted: persisted, source_path: nil}, context)
   end
+
+  test "injects authoritative build provenance over workflow environment" do
+    sha = String.duplicate("d", 40)
+
+    persisted = %{
+      "attempt_id" => "attempt-build-info",
+      "idempotency_token" => "token-build-info",
+      "image" => "alpine:3.22",
+      "env" => %{"ROBINE_BUILD_COMMIT_SHA" => "forged", "APP_ENV" => "release"},
+      "build_env" => %{
+        "ROBINE_BUILD_COMMIT_SHA" => sha,
+        "ROBINE_BUILD_REF_NAME" => "v1.2.3",
+        "ROBINE_BUILD_REF_TYPE" => "tag",
+        "ROBINE_BUILD_TIMESTAMP" => "2026-08-11T20:01:02Z",
+        "ROBINE_BUILD_PIPELINE_ID" => "pipeline-build-info",
+        "ROBINE_BUILD_TRIGGER" => "tag"
+      },
+      "steps" => [%{"name" => "Build", "kind" => "run", "value" => "true"}]
+    }
+
+    context = ExecutionContext.new(%{id: "admin", role: :administrator}, "build-info", %{})
+
+    assert {:ok, specification} =
+             Execution.build_ci_specification(%{persisted: persisted, source_path: nil}, context)
+
+    assert specification.env["APP_ENV"] == "release"
+    assert specification.env["ROBINE_BUILD_COMMIT_SHA"] == sha
+    assert specification.env["ROBINE_BUILD_REF_NAME"] == "v1.2.3"
+  end
+
+  test "rejects malformed build provenance at the execution boundary" do
+    persisted = %{
+      "attempt_id" => "attempt-build-info",
+      "idempotency_token" => "token-build-info",
+      "image" => "alpine:3.22",
+      "build_env" => "not-a-map",
+      "steps" => [%{"name" => "Build", "kind" => "run", "value" => "true"}]
+    }
+
+    context = ExecutionContext.new(%{id: "admin", role: :administrator}, "build-info", %{})
+
+    assert {:error, :invalid_build_environment} =
+             Execution.build_ci_specification(%{persisted: persisted, source_path: nil}, context)
+  end
 end

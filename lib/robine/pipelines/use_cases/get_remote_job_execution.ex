@@ -3,6 +3,7 @@ defmodule Robine.Pipelines.UseCases.GetRemoteJobExecution do
 
   alias Robine.ExecutionContext
   alias Robine.Pipelines.Dependencies
+  alias Robine.Pipelines.Domain.BuildProvenance
 
   def call(%{attempt_id: attempt_id}, %ExecutionContext{
         actor: %{id: runner_id, role: :runner},
@@ -16,6 +17,7 @@ defmodule Robine.Pipelines.UseCases.GetRemoteJobExecution do
          true <- map_size(job.execution) > 0 do
       {:ok,
        job.execution
+       |> Map.put("build_env", BuildProvenance.environment(pipeline))
        |> Map.put("attempt_id", attempt.id)
        |> Map.put("job_id", job.id)
        |> Map.put("job_key", job.job_key)

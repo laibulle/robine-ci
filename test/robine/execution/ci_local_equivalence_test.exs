@@ -6,6 +6,14 @@ defmodule Robine.Execution.CiLocalEquivalenceTest do
 
   @fixture Path.expand("../../fixtures/equivalence/contract.yml", __DIR__)
   @success_fixture Path.expand("../../fixtures/equivalence/success.yml", __DIR__)
+  @ci_provenance_env ~w(
+    ROBINE_BUILD_COMMIT_SHA
+    ROBINE_BUILD_REF_NAME
+    ROBINE_BUILD_REF_TYPE
+    ROBINE_BUILD_TIMESTAMP
+    ROBINE_BUILD_PIPELINE_ID
+    ROBINE_BUILD_TRIGGER
+  )
 
   @tag :docker
   test "CI and local paths preserve command, environment, workspace, image, timeout, and exit" do
@@ -214,7 +222,7 @@ defmodule Robine.Execution.CiLocalEquivalenceTest do
       workspace: specification.workspace,
       shell: specification.shell,
       timeout_ms: specification.timeout_ms,
-      env: specification.env,
+      env: Map.drop(specification.env, @ci_provenance_env),
       steps:
         Enum.map(
           specification.steps,

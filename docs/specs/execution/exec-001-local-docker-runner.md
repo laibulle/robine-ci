@@ -57,6 +57,8 @@ A developer running tests for a trusted repository and an operator sharing one D
 - **FR-9:** The runner MUST reconcile and clean orphaned resources bearing its instance-scoped labels after restart, without touching resources owned by another Robine instance sharing the Docker Engine.
 - **FR-10:** Container execution MUST use a non-root user when the image supports it and MUST default to dropped Linux capabilities, no privileged mode, and no host network.
 - **FR-11:** Secret environment values MUST be injected only for the duration of the attempt and MUST not be written into the execution specification stored with public job metadata.
+- **FR-12:** Every CI job MUST receive authoritative `ROBINE_BUILD_*` environment containing exact commit SHA, retained source reference and type, normalized trigger, stable pipeline ID, and ISO 8601 UTC pipeline start or creation time.
+- **FR-13:** Workflow validation MUST reject explicit environment values colliding with build-provenance names, and the local and remote execution boundaries MUST apply the same authoritative values.
 
 ### UX requirements
 
@@ -86,6 +88,8 @@ Cancellation is durable at pipeline level. Undispatched jobs become cancelled im
 
 The local CLI calls the same execution library and constructs the same normalized execution specification. The background worker no longer owns a private contract mapper: it calls the public `Execution.build_ci_specification/2` use case, while the CLI calls `build_local_plan/2`. Docker-backed success and failure fixtures compare every execution-semantic field and terminal result. Differences, such as attempt identity, CI-provided metadata, materialized source path, and secrets, are explicit inputs rather than hidden branches.
 
+CI build provenance is a reserved, non-secret environment contract documented in `docs/build-provenance.md`. The Pipelines context derives it only from the persisted pipeline, both local and remote job-execution queries carry it explicitly, and the Execution context validates and overlays it after workflow environment. Applications may embed the values at compile time and remain responsible for their own presentation.
+
 ## Failure modes and recovery
 
 | Failure | Expected behavior | Recovery |
@@ -114,6 +118,7 @@ Metrics include active and queued attempts, phase duration, image pull duration,
 - [x] Restart reconciliation removes or adopts every labeled orphan deterministically without crossing instance namespaces.
 - [x] The configured concurrency limit is respected under simultaneous dispatch.
 - [x] Job containers cannot access the Docker socket through Robine-provided mounts.
+- [x] Local and remote CI jobs receive identical authoritative build provenance, and workflows cannot forge reserved values.
 
 ## Open questions
 

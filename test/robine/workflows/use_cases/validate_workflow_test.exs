@@ -66,6 +66,24 @@ defmodule Robine.Workflows.UseCases.ValidateWorkflowTest do
     assert {diagnostic.line, diagnostic.column} == {4, 1}
   end
 
+  test "rejects workflow attempts to forge authoritative build provenance" do
+    source = """
+    version: 1
+    name: Forged provenance
+    on: {push: {}}
+    jobs:
+      build:
+        image: alpine:3.22
+        env:
+          ROBINE_BUILD_COMMIT_SHA: forged
+        steps:
+          - run: "true"
+    """
+
+    assert {:error, [%{code: "build_provenance.env_collision"}]} =
+             Workflows.validate(%{source: source, path: "ci.yml"}, context())
+  end
+
   test "reports every member of a dependency cycle" do
     source = """
     version: 1

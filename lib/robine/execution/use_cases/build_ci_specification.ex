@@ -21,6 +21,7 @@ defmodule Robine.Execution.UseCases.BuildCiSpecification do
          {:ok, secret_values} <- resolve_secrets(raw, context),
          {:ok, services} <- resolve_services(raw["services"] || %{}, secret_values),
          {:ok, normalized_steps} <- resolve_steps(steps, source_path),
+         {:ok, environment} <- build_environment(raw),
          specification = %Specification{
            version: 1,
            attempt_id: raw["attempt_id"],
@@ -29,7 +30,7 @@ defmodule Robine.Execution.UseCases.BuildCiSpecification do
            shell: raw["shell"] || "/bin/sh",
            timeout_ms: raw["timeout_ms"] || 1_200_000,
            source_path: source_path,
-           env: raw["env"] || %{},
+           env: environment,
            secrets: secret_values,
            services: services,
            metadata: %{
@@ -48,6 +49,20 @@ defmodule Robine.Execution.UseCases.BuildCiSpecification do
   end
 
   def call(_input, %ExecutionContext{}), do: {:error, :forbidden}
+
+  defp build_environment(raw) do
+    environment = raw["env"] || %{}
+    build_environment = raw["build_env"] || %{}
+
+    if is_map(environment) and is_map(build_environment) and
+         Enum.all?(build_environment, fn {name, value} ->
+           is_binary(name) and is_binary(value)
+         end) do
+      {:ok, Map.merge(environment, build_environment)}
+    else
+      {:error, :invalid_build_environment}
+    end
+  end
 
   defp resolve_secrets(%{"secret_names" => []}, _context), do: {:ok, %{}}
 

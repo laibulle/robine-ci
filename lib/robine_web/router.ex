@@ -48,6 +48,7 @@ defmodule RobineWeb.Router do
       live "/pipelines/:id/jobs/:job_id", JobLive.Show, :show
       live "/repositories", RepositoryLive.Index, :index
       live "/repositories/:id", RepositoryLive.Show, :show
+      live "/build-information", BuildInfoLive.Show, :show
     end
 
     live_session :maintainer,

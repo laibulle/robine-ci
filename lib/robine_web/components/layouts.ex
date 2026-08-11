@@ -37,6 +37,8 @@ defmodule RobineWeb.Layouts do
   slot :inner_block, required: true
 
   def app(assigns) do
+    assigns = assign(assigns, :build_info, Robine.BuildInfo.current(%{}))
+
     ~H"""
     <div
       :if={@shell}
@@ -48,7 +50,7 @@ defmodule RobineWeb.Layouts do
             href={if @current_actor, do: ~p"/pipelines", else: ~p"/"}
             class="flex items-center gap-3 px-2 py-2 font-bold tracking-tight"
           >
-            <span class="brand-mark size-9 rounded-xl"><span class="relative z-10 text-sm font-black">R</span></span>
+            <.brand_mark class="size-9 shrink-0" />
             <span class="leading-none">Robine <span class="font-medium text-base-content/35">CI</span></span>
           </a>
           <div :if={@current_actor} class="mt-9 space-y-1">
@@ -71,6 +73,22 @@ defmodule RobineWeb.Layouts do
           </div>
           <div class="mt-auto space-y-3 pb-1">
             <.link :if={is_nil(@current_actor)} href={~p"/sign-in"} class="btn btn-primary w-full">Sign in</.link>
+            <footer :if={@current_actor} id="application-build-footer" class="px-1">
+              <.link
+                navigate={~p"/build-information"}
+                class="group flex items-center gap-2 rounded-lg px-2 py-1.5 text-[0.65rem] text-base-content/35 transition hover:bg-base-200/70 hover:text-base-content focus-visible:text-base-content"
+                aria-label="Open build information"
+              >
+                <.icon name="hero-code-bracket" class="size-3.5 shrink-0" />
+                <span class="min-w-0 truncate">
+                  Robine {@build_info.version} · {@build_info.display_ref}@{@build_info.short_commit}
+                </span>
+                <.icon
+                  name="hero-chevron-right"
+                  class="ml-auto size-3 shrink-0 opacity-0 transition group-hover:opacity-100"
+                />
+              </.link>
+            </footer>
             <div :if={@current_actor} class="rounded-xl border border-base-300/70 bg-base-200/45 p-3">
               <div class="flex items-center gap-2.5">
                 <span class="grid size-7 shrink-0 place-items-center rounded-full bg-primary/15 text-[0.65rem] font-black uppercase text-primary">{String.first(
@@ -102,8 +120,7 @@ defmodule RobineWeb.Layouts do
             <a
               href={if @current_actor, do: ~p"/pipelines", else: ~p"/"}
               class="flex items-center gap-2 font-bold"
-            ><span class="brand-mark size-8 rounded-lg"><span class="relative z-10 text-xs font-black">R</span></span>
-            Robine CI</a>
+            ><.brand_mark class="size-8 shrink-0" /> Robine CI</a>
             <div class="flex items-center gap-1">
               <.theme_toggle />
               <.link :if={is_nil(@current_actor)} href={~p"/sign-in"} class="btn btn-primary btn-sm">Sign in</.link>
@@ -124,6 +141,15 @@ defmodule RobineWeb.Layouts do
         class="app-mobile-nav fixed inset-x-3 bottom-3 z-40 grid grid-cols-3 rounded-2xl border border-base-300/80 bg-base-100/95 p-1.5 backdrop-blur-xl lg:hidden"
         aria-label="Mobile navigation"
       >
+        <.link
+          id="mobile-build-information"
+          navigate={~p"/build-information"}
+          class="col-span-3 flex items-center justify-center gap-1.5 border-b border-base-300/60 px-2 pb-1.5 text-[0.58rem] text-base-content/35 transition hover:text-base-content"
+          aria-label="Open build information"
+        >
+          <.icon name="hero-code-bracket" class="size-3" />
+          Robine {@build_info.version} · {@build_info.display_ref}@{@build_info.short_commit}
+        </.link>
         <.link
           navigate={~p"/pipelines"}
           class="flex flex-col items-center gap-1 rounded-xl px-3 py-2 text-[0.65rem] font-bold text-base-content/60 transition hover:bg-base-200 hover:text-base-content"
@@ -200,6 +226,26 @@ defmodule RobineWeb.Layouts do
         <.icon name="hero-arrow-path" class="ml-1 size-3 motion-safe:animate-spin" />
       </.flash>
     </div>
+    """
+  end
+
+  @doc "Renders the Robine monogram with the variant matching the active product theme."
+  attr :class, :string, default: nil
+
+  def brand_mark(assigns) do
+    ~H"""
+    <span class={[@class, "inline-block"]} aria-hidden="true">
+      <img
+        src={~p"/images/brand/robine-mark.png"}
+        alt=""
+        class="size-full object-contain dark:hidden"
+      />
+      <img
+        src={~p"/images/brand/robine-mark-dark.png"}
+        alt=""
+        class="hidden size-full object-contain dark:block"
+      />
+    </span>
     """
   end
 

@@ -20,6 +20,7 @@ defmodule Robine.Architecture.DependencyRulesTest do
   ]
 
   @pure_call_one_exceptions [
+    "Robine.BuildInfo.UseCases.Get",
     "Robine.Execution.UseCases.EvaluateJobCondition",
     "Robine.Workflows.UseCases.EvaluateSchedule",
     "Robine.Workflows.UseCases.PrepareManualRun",

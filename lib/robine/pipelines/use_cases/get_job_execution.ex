@@ -3,6 +3,7 @@ defmodule Robine.Pipelines.UseCases.GetJobExecution do
 
   alias Robine.ExecutionContext
   alias Robine.Pipelines.Dependencies
+  alias Robine.Pipelines.Domain.BuildProvenance
 
   @spec call(map(), ExecutionContext.t()) :: {:ok, map()} | {:error, term()}
   def call(%{idempotency_token: token}, %ExecutionContext{
@@ -18,6 +19,7 @@ defmodule Robine.Pipelines.UseCases.GetJobExecution do
          true <- map_size(job.execution) > 0 do
       {:ok,
        job.execution
+       |> Map.put("build_env", BuildProvenance.environment(pipeline))
        |> Map.put("attempt_id", attempt.id)
        |> Map.put("job_id", job.id)
        |> Map.put("job_key", job.job_key)

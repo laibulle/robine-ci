@@ -78,7 +78,7 @@
   --color-success: oklch(70% 0.14 182.503);
   --color-success-content: oklch(98% 0.014 180.72);
   --color-warning: oklch(66% 0.179 58.318);
-  --color-warning-content: oklch(98% 0.022 95.277);
+  --color-warning-content: oklch(24% 0.055 45);
   --color-error: oklch(58% 0.253 17.585);
   --color-error-content: oklch(96% 0.015 12.422);
   --radius-selector: 0.25rem;
@@ -195,27 +195,6 @@
     background: color-mix(in oklab, var(--color-primary) 9%, var(--color-base-100));
     color: var(--color-base-content);
     transform: translateX(3px);
-  }
-
-  .brand-mark {
-    position: relative;
-    display: grid;
-    place-items: center;
-    overflow: hidden;
-    background: var(--color-base-content);
-    color: var(--color-base-100);
-  }
-
-  .brand-mark::after {
-    content: "";
-    position: absolute;
-    width: 55%;
-    height: 140%;
-    right: -20%;
-    top: -20%;
-    border-radius: 999px;
-    background: var(--color-primary);
-    transform: rotate(24deg);
   }
 
   .surface-panel {

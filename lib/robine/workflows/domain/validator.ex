@@ -26,6 +26,14 @@ defmodule Robine.Workflows.Domain.Validator do
   @runner_label ~r/\A[a-z0-9][a-z0-9._-]{0,62}\z/
   @env_name ~r/\A[A-Z_][A-Z0-9_]*\z/
   @container_user ~r/\A[a-zA-Z0-9_.-]+(?::[a-zA-Z0-9_.-]+)?\z/
+  @build_environment_names ~w(
+    ROBINE_BUILD_COMMIT_SHA
+    ROBINE_BUILD_REF_NAME
+    ROBINE_BUILD_REF_TYPE
+    ROBINE_BUILD_TIMESTAMP
+    ROBINE_BUILD_PIPELINE_ID
+    ROBINE_BUILD_TRIGGER
+  )
 
   @default_limits [
     max_jobs: 64,
@@ -46,6 +54,7 @@ defmodule Robine.Workflows.Domain.Validator do
          {:ok, name} <- nonempty_string(document, "name", ["name"]),
          {:ok, triggers} <- triggers(document),
          {:ok, base_jobs, warnings} <- jobs(document, limits),
+         :ok <- build_environment(base_jobs),
          :ok <- trigger_input_environment(triggers, base_jobs),
          {:ok, jobs} <- expand_matrices(base_jobs, limits),
          {:ok, order} <- topological_order(jobs),
@@ -420,6 +429,29 @@ defmodule Robine.Workflows.Domain.Validator do
              "workflow call input"
            ) do
       :ok
+    end
+  end
+
+  defp build_environment(jobs) do
+    collision =
+      Enum.find_value(jobs, fn {job_id, job} ->
+        case Enum.find(@build_environment_names, &Map.has_key?(job.env, &1)) do
+          nil -> nil
+          name -> {job_id, name}
+        end
+      end)
+
+    case collision do
+      nil ->
+        :ok
+
+      {job_id, name} ->
+        {:error,
+         Diagnostic.error(
+           "build_provenance.env_collision",
+           "environment #{name} is reserved for authoritative CI build provenance",
+           ["jobs", job_id, "env", name]
+         )}
     end
   end
 

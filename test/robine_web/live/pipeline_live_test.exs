@@ -40,6 +40,8 @@ defmodule RobineWeb.PipelineLiveTest do
     assert html =~ "Pipelines"
     assert has_element?(index, ".app-shell.h-dvh.overflow-hidden")
     assert has_element?(index, ".app-content.h-dvh.overflow-y-auto.overscroll-y-none")
+    assert has_element?(index, "img[src='/images/brand/robine-mark.png']")
+    assert has_element?(index, "img[src='/images/brand/robine-mark-dark.png']")
     assert has_element?(index, "#pipeline-#{pipeline.id}", "CI")
     assert has_element?(index, "#pipeline-watchlist #pipeline-#{pipeline.id}", "main")
     assert has_element?(index, "#pipeline-filters")
@@ -47,6 +49,8 @@ defmodule RobineWeb.PipelineLiveTest do
     assert has_element?(index, "#pipeline-status-filter")
     assert has_element?(index, "#pipeline-repository-filter")
     assert has_element?(index, "#pipeline-refresh-status", "Up to date")
+    assert has_element?(index, "#application-build-footer a[href='/build-information']")
+    assert has_element?(index, "#mobile-build-information[href='/build-information']")
 
     assert has_element?(
              index,
@@ -69,6 +73,11 @@ defmodule RobineWeb.PipelineLiveTest do
     index |> element("#clear-pipeline-filters") |> render_click()
     assert_patch(index, "/pipelines")
     assert has_element?(index, "#pipeline-#{pipeline.id}", "CI")
+
+    assert {:ok, build_info, _html} = live(conn, ~p"/build-information")
+    assert has_element?(build_info, "#build-provenance", "Commit SHA")
+    assert has_element?(build_info, "#build-provenance", "Source reference")
+    assert has_element?(build_info, "#build-provenance", "Built at")
 
     assert {:ok, show, html} = live(conn, ~p"/pipelines/#{pipeline.id}")
     assert html =~ "Dependency order"
