@@ -54,10 +54,71 @@ matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => {
 })
 
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
+
+const LogViewport = {
+  mounted() {
+    if (this.el.dataset.live === "true") this.el.scrollTop = this.el.scrollHeight
+  },
+  beforeUpdate() {
+    this.scrollTop = this.el.scrollTop
+    this.followTail = this.el.scrollHeight - this.el.scrollTop - this.el.clientHeight < 32
+  },
+  updated() {
+    if (this.el.dataset.live === "true" && this.followTail) {
+      this.el.scrollTop = this.el.scrollHeight
+    } else {
+      this.el.scrollTop = this.scrollTop
+    }
+  },
+}
+
+const RetainedLogViewer = {
+  mounted() {
+    this.abortController = new AbortController()
+    this.load()
+  },
+  destroyed() {
+    this.abortController.abort()
+  },
+  async load() {
+    const status = this.el.querySelector("[data-log-status]")
+    const output = this.el.querySelector("[data-log-output]")
+    const text = document.createTextNode("")
+    output.replaceChildren(text)
+
+    try {
+      const response = await fetch(this.el.dataset.url, {
+        signal: this.abortController.signal,
+      })
+
+      if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`)
+
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let bytes = 0
+
+      while (true) {
+        const {done, value} = await reader.read()
+        if (done) break
+        bytes += value.byteLength
+        text.appendData(decoder.decode(value, {stream: true}))
+      }
+
+      text.appendData(decoder.decode())
+      status.textContent = bytes === 0 ? "Empty" : "Complete"
+    } catch (error) {
+      if (error.name !== "AbortError") {
+        status.textContent = "Unavailable"
+        text.appendData(`Unable to load retained logs: ${error.message}`)
+      }
+    }
+  },
+}
+
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
   params: {_csrf_token: csrfToken},
-  hooks: {...colocatedHooks},
+  hooks: {...colocatedHooks, LogViewport, RetainedLogViewer},
 })
 
 // Show progress bar on live navigation and form submits

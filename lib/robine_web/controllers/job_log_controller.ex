@@ -9,12 +9,13 @@ defmodule RobineWeb.JobLogController do
 
   def download(conn, %{"id" => pipeline_id, "job_id" => job_id} = params) do
     stream = requested_stream(params)
+    disposition = requested_disposition(params)
 
     with %{id: _id} = actor <- conn.assigns[:current_actor],
          context <- Dependencies.context(actor, conn.assigns[:request_id] || "log-download"),
          {:ok, %{pipeline: %{id: ^pipeline_id}, job: job}} <-
            Pipelines.job_detail(%{job_id: job_id}, context),
-         {:ok, conn} <- start_download(conn, job, stream) do
+         {:ok, conn} <- start_download(conn, job, stream, disposition) do
       stream_pages(conn, job_id, context, stream, 0)
     else
       nil -> redirect(conn, to: ~p"/sign-in")
@@ -24,14 +25,14 @@ defmodule RobineWeb.JobLogController do
     end
   end
 
-  defp start_download(conn, job, stream) do
+  defp start_download(conn, job, stream, disposition) do
     suffix = if stream == "all", do: "combined", else: stream
     filename = "#{job.job_key}-attempt-logs-#{suffix}.log"
 
     conn =
       conn
       |> put_resp_content_type("text/plain", "utf-8")
-      |> put_resp_header("content-disposition", ~s(attachment; filename="#{filename}"))
+      |> put_resp_header("content-disposition", ~s(#{disposition}; filename="#{filename}"))
       |> put_resp_header("cache-control", "private, no-store")
       |> send_chunked(:ok)
 
@@ -65,4 +66,7 @@ defmodule RobineWeb.JobLogController do
 
   defp requested_stream(%{"stream" => stream}) when stream in @streams, do: stream
   defp requested_stream(_params), do: "all"
+
+  defp requested_disposition(%{"view" => "inline"}), do: "inline"
+  defp requested_disposition(_params), do: "attachment"
 end

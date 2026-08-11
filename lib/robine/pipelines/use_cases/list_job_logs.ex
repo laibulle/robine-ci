@@ -1,5 +1,5 @@
 defmodule Robine.Pipelines.UseCases.ListJobLogs do
-  @moduledoc "Reads one bounded page of logs after an exclusive sequence cursor."
+  @moduledoc "Reads a bounded cursor page or latest retained window of job logs."
   alias Robine.ExecutionContext
   alias Robine.Pipelines.Dependencies
 
@@ -13,7 +13,7 @@ defmodule Robine.Pipelines.UseCases.ListJobLogs do
 
     case deps.job_repository.latest_attempt(job_id) do
       {:ok, attempt} ->
-        with {:ok, chunks} <- deps.log_repository.list(attempt.id, cursor, limit) do
+        with {:ok, chunks} <- list_chunks(deps.log_repository, attempt.id, cursor, limit, input) do
           next_cursor =
             case List.last(chunks) do
               nil -> cursor
@@ -38,4 +38,10 @@ defmodule Robine.Pipelines.UseCases.ListJobLogs do
   end
 
   def call(_input, %ExecutionContext{}), do: {:error, :forbidden}
+
+  defp list_chunks(repository, attempt_id, _cursor, limit, %{latest: true}),
+    do: repository.latest(attempt_id, limit)
+
+  defp list_chunks(repository, attempt_id, cursor, limit, _input),
+    do: repository.list(attempt_id, cursor, limit)
 end

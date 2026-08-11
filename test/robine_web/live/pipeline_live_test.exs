@@ -37,6 +37,8 @@ defmodule RobineWeb.PipelineLiveTest do
 
     assert {:ok, index, html} = live(conn, ~p"/pipelines")
     assert html =~ "Pipelines"
+    assert has_element?(index, ".app-shell.h-dvh.overflow-hidden")
+    assert has_element?(index, ".app-content.h-dvh.overflow-y-auto.overscroll-y-none")
     assert has_element?(index, "#pipeline-#{pipeline.id}", "CI")
 
     assert {:ok, show, html} = live(conn, ~p"/pipelines/#{pipeline.id}")
@@ -125,7 +127,7 @@ defmodule RobineWeb.PipelineLiveTest do
     assert html =~ "schedule"
   end
 
-  test "shows trigger, actor, duration, runner phase, and infrastructure failure", %{conn: conn} do
+  test "shows trigger, actor, duration, complete logs, and infrastructure failure", %{conn: conn} do
     conn = signed_in_conn(conn)
     context = Dependencies.context(%{id: "admin", role: :administrator}, "pipeline-metadata")
 
@@ -210,10 +212,21 @@ defmodule RobineWeb.PipelineLiveTest do
 
     snapshot = Pipelines.pipeline_snapshot(%{pipeline_id: pipeline.id}, context) |> elem(1)
     job = hd(snapshot.jobs)
-    assert {:ok, _job_view, job_html} = live(conn, ~p"/pipelines/#{pipeline.id}/jobs/#{job.id}")
-    assert job_html =~ ~s(id="phase-image_acquisition")
-    assert job_html =~ ~s(id="phase-execution")
-    assert job_html =~ ~s(id="step-1")
+    assert {:ok, job_view, _job_html} = live(conn, ~p"/pipelines/#{pipeline.id}/jobs/#{job.id}")
+
+    assert has_element?(
+             job_view,
+             "#complete-log-viewer[phx-hook='RetainedLogViewer'][phx-update='ignore'][data-url*='view=inline']"
+           )
+
+    assert has_element?(job_view, "#complete-log-viewer [data-log-viewport][tabindex='0']")
+
+    inline_conn =
+      get(conn, ~p"/pipelines/#{pipeline.id}/jobs/#{job.id}/logs?view=inline")
+
+    inline_log = response(inline_conn, 200)
+    assert inline_log =~ "Image available locally"
+    assert inline_log =~ "runner unavailable"
   end
 
   test "explains a skipped job's fixed condition", %{conn: conn} do
@@ -371,6 +384,114 @@ defmodule RobineWeb.PipelineLiveTest do
 
     assert get_resp_header(download_conn, "content-disposition") ==
              [~s(attachment; filename="test-attempt-logs-stderr.log")]
+  end
+
+  test "renders terminal logs as stable retained history and ignores later stream notices", %{
+    conn: conn
+  } do
+    conn = signed_in_conn(conn)
+    context = Dependencies.context(%{id: "admin", role: :administrator}, "terminal-job-logs")
+
+    assert {:ok, pipeline} =
+             Pipelines.create_pipeline(
+               %{
+                 repository_id: Ecto.UUID.generate(),
+                 workflow_name: "Terminal logs",
+                 commit_sha: String.duplicate("b", 40),
+                 jobs: %{"test" => %{needs: []}}
+               },
+               context
+             )
+
+    assert {:ok, _queued} = Pipelines.queue_pipeline(%{pipeline_id: pipeline.id}, context)
+    assert {:ok, attempt} = Pipelines.claim_next_job(%{}, context)
+
+    assert {:ok, _attempt} =
+             Pipelines.record_runner_event(
+               %{idempotency_token: attempt.idempotency_token, sequence: 1, status: :preparing},
+               context
+             )
+
+    assert {:ok, _attempt} =
+             Pipelines.record_runner_event(
+               %{idempotency_token: attempt.idempotency_token, sequence: 2, status: :running},
+               context
+             )
+
+    assert :ok =
+             Pipelines.append_log_event(
+               %{
+                 attempt_id: attempt.id,
+                 sequence: 1,
+                 phase: :execution,
+                 step_position: 1,
+                 step_name: "Test",
+                 status: :failed,
+                 exit_code: 1,
+                 duration_ms: 1_234,
+                 stream: :system,
+                 content: "terminal diagnostic"
+               },
+               context
+             )
+
+    assert {:ok, _attempt} =
+             Pipelines.record_runner_event(
+               %{
+                 idempotency_token: attempt.idempotency_token,
+                 sequence: 3,
+                 status: :failed,
+                 reason: :system_failure
+               },
+               context
+             )
+
+    snapshot = Pipelines.pipeline_snapshot(%{pipeline_id: pipeline.id}, context) |> elem(1)
+    job = hd(snapshot.jobs)
+    assert {:ok, view, _html} = live(conn, ~p"/pipelines/#{pipeline.id}/jobs/#{job.id}")
+
+    assert has_element?(view, "#log-mode-description[data-log-mode='retained']")
+    refute has_element?(view, "#live-log-status")
+    refute has_element?(view, "#log-filter-form")
+    refute has_element?(view, "#log-segments")
+
+    assert has_element?(
+             view,
+             "#complete-log-viewer[phx-hook='RetainedLogViewer'][phx-update='ignore'][data-url*='view=inline']"
+           )
+
+    assert has_element?(view, "#log-downloads a[target='_blank']", "Open full log")
+
+    assert :ok =
+             Pipelines.append_log_event(
+               %{
+                 attempt_id: attempt.id,
+                 sequence: 2,
+                 phase: :execution,
+                 step_position: 1,
+                 step_name: "Test",
+                 status: :running,
+                 duration_ms: 9_999,
+                 stream: :stdout,
+                 content: "must not be streamed after terminal"
+               },
+               context
+             )
+
+    send(view.pid, {:log_appended, attempt.id})
+    _ = :sys.get_state(view.pid)
+
+    refute render(view) =~ "must not be streamed after terminal"
+
+    inline_conn =
+      get(conn, ~p"/pipelines/#{pipeline.id}/jobs/#{job.id}/logs?view=inline")
+
+    inline_log = response(inline_conn, 200)
+    assert inline_log =~ "terminal diagnostic"
+    assert inline_log =~ "must not be streamed after terminal"
+
+    assert get_resp_header(inline_conn, "content-disposition") ==
+             [~s(inline; filename="test-attempt-logs-combined.log")]
   end
 
   defp signed_in_conn(conn) do

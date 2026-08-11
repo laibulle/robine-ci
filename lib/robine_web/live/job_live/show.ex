@@ -1,35 +1,42 @@
 defmodule RobineWeb.JobLive.Show do
   use RobineWeb, :live_view
   alias Robine.{Pipelines, Runners}
-  @log_window 50
+  @live_log_window 50
+  @terminal_probe_window 1
 
   @impl true
   def mount(%{"id" => pipeline_id, "job_id" => job_id}, _session, socket) do
-    if connected?(socket), do: Process.send_after(self(), :refresh_logs, 1_000)
+    socket =
+      socket
+      |> assign(
+        pipeline_id: pipeline_id,
+        job_id: job_id,
+        log_chunks: [],
+        log_cursor: 0,
+        attempt_id: nil,
+        subscribed_attempt_id: nil,
+        status_refresh_scheduled?: false,
+        live_log_refresh_scheduled?: false,
+        query: ""
+      )
+      |> load()
+      |> schedule_status_refresh()
 
-    {:ok,
-     socket
-     |> assign(
-       pipeline_id: pipeline_id,
-       job_id: job_id,
-       log_chunks: [],
-       log_cursor: 0,
-       attempt_id: nil,
-       live_log_refresh_scheduled?: false,
-       query: ""
-     )
-     |> load()}
+    {:ok, socket}
   end
 
   @impl true
   def handle_info(:refresh_logs, socket) do
-    Process.send_after(self(), :refresh_logs, 1_000)
-    {:noreply, load(socket)}
+    {:noreply,
+     socket
+     |> assign(status_refresh_scheduled?: false)
+     |> load()
+     |> schedule_status_refresh()}
   end
 
   def handle_info({:log_appended, attempt_id}, socket)
       when attempt_id == socket.assigns.attempt_id do
-    if socket.assigns.live_log_refresh_scheduled? do
+    if terminal_job?(socket.assigns.job) or socket.assigns.live_log_refresh_scheduled? do
       {:noreply, socket}
     else
       Process.send_after(self(), :refresh_live_logs, 25)
@@ -53,7 +60,11 @@ defmodule RobineWeb.JobLive.Show do
   def handle_event("retry", _params, socket) do
     case Pipelines.retry_job(%{job_id: socket.assigns.job_id}, socket.assigns.execution_context) do
       {:ok, _result} ->
-        {:noreply, socket |> put_flash(:info, "Job queued for retry.") |> load()}
+        {:noreply,
+         socket
+         |> put_flash(:info, "Job queued for retry.")
+         |> load()
+         |> schedule_status_refresh()}
 
       {:error, {:retry_dependencies_unavailable, dependencies}} ->
         {:noreply,
@@ -93,7 +104,8 @@ defmodule RobineWeb.JobLive.Show do
            :info,
            "Queued #{Enum.join(result.rerun_jobs, ", ")} before retrying this job."
          )
-         |> load()}
+         |> load()
+         |> schedule_status_refresh()}
 
       {:error, :forbidden} ->
         {:noreply, put_flash(socket, :error, "You do not have permission to retry jobs.")}
@@ -160,11 +172,23 @@ defmodule RobineWeb.JobLive.Show do
   defp load_new_logs(socket) do
     started = System.monotonic_time()
     current_attempt_id = socket.assigns.attempt && socket.assigns.attempt.id
+    terminal? = terminal_job?(socket.assigns.job)
 
     socket = subscribe_to_attempt(socket, current_attempt_id)
 
+    input =
+      if terminal? do
+        %{job_id: socket.assigns.job_id, latest: true, limit: @terminal_probe_window}
+      else
+        %{
+          job_id: socket.assigns.job_id,
+          after: socket.assigns.log_cursor,
+          limit: @live_log_window
+        }
+      end
+
     case Pipelines.list_job_logs(
-           %{job_id: socket.assigns.job_id, after: socket.assigns.log_cursor, limit: @log_window},
+           input,
            socket.assigns.execution_context
          ) do
       {:ok, page} ->
@@ -180,10 +204,12 @@ defmodule RobineWeb.JobLive.Show do
           %{page: :job_logs}
         )
 
-        assign(socket,
-          log_chunks: Enum.take(socket.assigns.log_chunks ++ page.chunks, -@log_window),
-          log_cursor: page.next_cursor
-        )
+        chunks =
+          if terminal?,
+            do: page.chunks,
+            else: Enum.take(socket.assigns.log_chunks ++ page.chunks, -@live_log_window)
+
+        assign(socket, log_chunks: chunks, log_cursor: page.next_cursor)
 
       {:error, _reason} ->
         :telemetry.execute(
@@ -196,20 +222,47 @@ defmodule RobineWeb.JobLive.Show do
     end
   end
 
+  defp schedule_status_refresh(socket) do
+    if connected?(socket) and not terminal_job?(socket.assigns.job) and
+         not socket.assigns.status_refresh_scheduled? do
+      Process.send_after(self(), :refresh_logs, 1_000)
+      assign(socket, status_refresh_scheduled?: true)
+    else
+      socket
+    end
+  end
+
+  defp terminal_job?(job), do: job.status in [:succeeded, :failed, :cancelled, :skipped]
+
   defp subscribe_to_attempt(socket, current_attempt_id) do
-    if current_attempt_id != socket.assigns.attempt_id do
-      if connected?(socket) and socket.assigns.attempt_id,
-        do: Phoenix.PubSub.unsubscribe(Robine.PubSub, "attempt-logs:#{socket.assigns.attempt_id}")
+    socket =
+      if current_attempt_id != socket.assigns.attempt_id do
+        assign(socket,
+          attempt_id: current_attempt_id,
+          log_chunks: [],
+          log_cursor: 0,
+          live_log_refresh_scheduled?: false
+        )
+      else
+        socket
+      end
 
-      if connected?(socket) and current_attempt_id,
-        do: Phoenix.PubSub.subscribe(Robine.PubSub, "attempt-logs:#{current_attempt_id}")
+    desired_subscription =
+      if terminal_job?(socket.assigns.job), do: nil, else: current_attempt_id
 
-      assign(socket,
-        attempt_id: current_attempt_id,
-        log_chunks: [],
-        log_cursor: 0,
-        live_log_refresh_scheduled?: false
-      )
+    if desired_subscription != socket.assigns.subscribed_attempt_id do
+      if connected?(socket) and socket.assigns.subscribed_attempt_id do
+        Phoenix.PubSub.unsubscribe(
+          Robine.PubSub,
+          "attempt-logs:#{socket.assigns.subscribed_attempt_id}"
+        )
+      end
+
+      if connected?(socket) and desired_subscription do
+        Phoenix.PubSub.subscribe(Robine.PubSub, "attempt-logs:#{desired_subscription}")
+      end
+
+      assign(socket, subscribed_attempt_id: desired_subscription)
     else
       socket
     end
@@ -395,7 +448,11 @@ defmodule RobineWeb.JobLive.Show do
             <span class="size-1.5 animate-pulse rounded-full bg-success"></span>Live
           </span>
           <h2 class="text-xl font-semibold">No retained log segments yet</h2><p class="mt-2 text-base-content/60">
-            Waiting for stdout and stderr from the runner.
+            <%= if terminal_job?(@job) do %>
+              This attempt finished without retaining stdout or stderr.
+            <% else %>
+              Waiting for stdout and stderr from the runner.
+            <% end %>
           </p>
         </div>
         <section :if={@log_chunks != []} class="space-y-4" aria-label="Job logs">
@@ -412,11 +469,19 @@ defmodule RobineWeb.JobLive.Show do
                   <span class="size-1.5 animate-pulse rounded-full bg-success"></span>Live
                 </span>
               </div>
-              <p class="text-sm text-base-content/60">
-                Streaming stdout and stderr. Showing at most 50 recent 64 KB segments.
+              <p
+                id="log-mode-description"
+                data-log-mode={if(terminal_job?(@job), do: "retained", else: "live")}
+                class="text-sm text-base-content/60"
+              >
+                <%= if terminal_job?(@job) do %>
+                  Complete retained stdout and stderr. This reader is streamed independently from the page.
+                <% else %>
+                  Streaming stdout and stderr. Showing at most 50 recent 64 KB segments.
+                <% end %>
               </p>
             </div>
-            <form id="log-filter-form" phx-change="filter">
+            <form :if={not terminal_job?(@job)} id="log-filter-form" phx-change="filter">
               <label class="input input-bordered flex items-center gap-2"><span class="sr-only">Search visible logs</span><.icon
                 name="hero-magnifying-glass"
                 class="size-4"
@@ -440,6 +505,15 @@ defmodule RobineWeb.JobLive.Show do
               <.icon name="hero-arrow-down-tray" class="size-4" /> Combined
             </.link>
             <.link
+              :if={terminal_job?(@job)}
+              href={~p"/pipelines/#{@pipeline_id}/jobs/#{@job_id}/logs?view=inline"}
+              target="_blank"
+              rel="noopener"
+              class="btn btn-sm btn-ghost border border-base-300"
+            >
+              <.icon name="hero-arrow-top-right-on-square" class="size-4" /> Open full log
+            </.link>
+            <.link
               href={~p"/pipelines/#{@pipeline_id}/jobs/#{@job_id}/logs?stream=stdout"}
               class="btn btn-sm btn-ghost border border-base-300"
             >
@@ -452,7 +526,25 @@ defmodule RobineWeb.JobLive.Show do
               stderr
             </.link>
           </div>
-          <div id="log-segments" class="space-y-6">
+          <div
+            :if={terminal_job?(@job)}
+            id="complete-log-viewer"
+            phx-hook="RetainedLogViewer"
+            phx-update="ignore"
+            data-url={~p"/pipelines/#{@pipeline_id}/jobs/#{@job_id}/logs?view=inline"}
+            class="overflow-hidden rounded-2xl border border-base-300 bg-neutral text-neutral-content"
+          >
+            <div class="flex items-center justify-between border-b border-neutral-content/15 px-4 py-3">
+              <span class="text-sm font-semibold">Complete retained log</span>
+              <span data-log-status role="status" class="text-xs opacity-60">Loading…</span>
+            </div>
+            <pre
+              data-log-viewport
+              class="h-[70dvh] min-h-96 overflow-auto whitespace-pre-wrap break-words p-4 text-sm"
+              tabindex="0"
+            ><code data-log-output></code></pre>
+          </div>
+          <div :if={not terminal_job?(@job)} id="log-segments" class="space-y-6">
             <section
               :for={phase <- visible_phases(@log_chunks, @query)}
               id={"phase-#{phase.key}"}
@@ -475,6 +567,9 @@ defmodule RobineWeb.JobLive.Show do
                   <a href={"##{group.id}"} class="font-semibold hover:underline">{group.name}</a><span class="text-xs opacity-70">{group.status} · {group.duration_ms} ms</span>
                 </summary>
                 <pre
+                  id={"log-output-#{group.id}"}
+                  phx-hook="LogViewport"
+                  data-live={to_string(not terminal_job?(@job))}
                   class="max-h-96 overflow-auto whitespace-pre-wrap break-words p-4 text-sm"
                   tabindex="0"
                 ><code><span
@@ -493,7 +588,10 @@ defmodule RobineWeb.JobLive.Show do
             </section>
           </div>
           <p
-            :if={@query != "" and visible_phases(@log_chunks, @query) == []}
+            :if={
+              not terminal_job?(@job) and @query != "" and
+                visible_phases(@log_chunks, @query) == []
+            }
             class="rounded-2xl border border-dashed border-base-300 p-8 text-center"
           >
             No visible log segment matches “{@query}”.

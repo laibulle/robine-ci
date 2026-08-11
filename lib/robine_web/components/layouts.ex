@@ -38,8 +38,11 @@ defmodule RobineWeb.Layouts do
 
   def app(assigns) do
     ~H"""
-    <div :if={@shell} class="app-shell lg:grid lg:grid-cols-[15rem_minmax(0,1fr)]">
-      <aside class="app-sidebar sticky top-0 z-30 hidden h-screen flex-col px-3 py-4 lg:flex">
+    <div
+      :if={@shell}
+      class="app-shell h-dvh overflow-hidden lg:grid lg:grid-cols-[15rem_minmax(0,1fr)]"
+    >
+      <aside class="app-sidebar sticky top-0 z-30 hidden h-dvh flex-col px-3 py-4 lg:flex">
         <nav class="flex h-full flex-col" aria-label="Primary navigation">
           <a
             href={if @current_actor, do: ~p"/pipelines", else: ~p"/"}
@@ -93,7 +96,7 @@ defmodule RobineWeb.Layouts do
         </nav>
       </aside>
 
-      <div class="min-w-0">
+      <div class="app-content h-dvh min-w-0 overflow-y-auto overscroll-y-none">
         <header class="sticky top-0 z-30 border-b border-base-300/70 bg-base-100/85 backdrop-blur-xl lg:hidden">
           <div class="flex h-16 items-center justify-between px-4">
             <a

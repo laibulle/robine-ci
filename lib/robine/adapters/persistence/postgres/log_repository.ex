@@ -44,4 +44,29 @@ defmodule Robine.Adapters.Persistence.Postgres.LogRepository do
 
     {:ok, chunks}
   end
+
+  @impl true
+  def latest(attempt_id, limit) do
+    chunks =
+      Repo.all(
+        from chunk in LogChunk,
+          where: chunk.attempt_id == ^attempt_id,
+          order_by: [desc: chunk.sequence],
+          limit: ^limit,
+          select: %{
+            sequence: chunk.sequence,
+            phase: chunk.phase,
+            stream: chunk.stream,
+            step_position: chunk.step_position,
+            step_name: chunk.step_name,
+            step_status: chunk.step_status,
+            exit_code: chunk.exit_code,
+            duration_ms: chunk.duration_ms,
+            content: chunk.content
+          }
+      )
+      |> Enum.reverse()
+
+    {:ok, chunks}
+  end
 end
