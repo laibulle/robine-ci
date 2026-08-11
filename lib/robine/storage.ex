@@ -22,6 +22,12 @@ defmodule Robine.Storage do
     to: UseCases.DownloadJobArtifactByPrefix,
     as: :call
 
+  @spec download_job_artifacts_by_prefix(map(), ExecutionContext.t()) ::
+          {:ok, [Download.t()]} | {:error, term()}
+  defdelegate download_job_artifacts_by_prefix(input, context),
+    to: UseCases.DownloadJobArtifactsByPrefix,
+    as: :call
+
   @spec download_dependency_artifact(map(), ExecutionContext.t()) ::
           {:ok, Download.t()} | {:error, term()}
   defdelegate download_dependency_artifact(input, context),

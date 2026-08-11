@@ -108,6 +108,15 @@ config :robine, :runner_resources,
   memory_bytes: positive_integer.("ROBINE_RUNNER_MEMORY_BYTES", runner_memory_default),
   pids_limit: positive_integer.("ROBINE_RUNNER_PIDS_LIMIT", 512)
 
+runner_resource_namespace =
+  System.get_env("ROBINE_RUNNER_RESOURCE_NAMESPACE", Atom.to_string(config_env()))
+
+unless Regex.match?(~r/\A[a-zA-Z0-9_.-]+\z/, runner_resource_namespace) do
+  raise "ROBINE_RUNNER_RESOURCE_NAMESPACE must contain only letters, digits, dots, underscores, or hyphens"
+end
+
+config :robine, :runner_resource_namespace, runner_resource_namespace
+
 config :robine, :runner_control,
   lease_seconds: positive_integer.("ROBINE_RUNNER_LEASE_SECONDS", 60),
   heartbeat_interval_ms: positive_integer.("ROBINE_RUNNER_HEARTBEAT_INTERVAL_MS", 20_000),

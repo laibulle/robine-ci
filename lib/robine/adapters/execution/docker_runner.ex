@@ -10,6 +10,7 @@ defmodule Robine.Adapters.Execution.DockerRunner do
   @service_diagnostic_limit 64_000
   @readiness_image "alpine@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce"
   @attempt_label "io.robine.attempt"
+  @instance_label "io.robine.instance"
   @service_label "io.robine.service"
 
   def run(%Specification{} = specification) do
@@ -129,7 +130,7 @@ defmodule Robine.Adapters.Execution.DockerRunner do
   defp provision(specification, resource, volume, network, on_output, cancel_requested) do
     with :ok <- create_network(specification, network),
          {:ok, _output} <-
-           docker(["volume", "create", "--label", label(specification), volume]),
+           docker(["volume", "create"] ++ label_args(specification) ++ [volume]),
          :ok <-
            create_services(specification, resource, network, on_output, cancel_requested),
          {:ok, _output} <- create_container(specification, resource, volume, network) do
@@ -162,6 +163,8 @@ defmodule Robine.Adapters.Execution.DockerRunner do
            "--all",
            "--filter",
            "label=#{@attempt_label}",
+           "--filter",
+           "label=#{instance_label()}",
            "--format",
            "{{.ID}} {{.Label \"#{@attempt_label}\"}}"
          ]) do
@@ -176,6 +179,8 @@ defmodule Robine.Adapters.Execution.DockerRunner do
            "ls",
            "--filter",
            "label=#{@attempt_label}",
+           "--filter",
+           "label=#{instance_label()}",
            "--format",
            "{{.Name}} {{.Label \"#{@attempt_label}\"}}"
          ]) do
@@ -190,6 +195,8 @@ defmodule Robine.Adapters.Execution.DockerRunner do
            "ls",
            "--filter",
            "label=#{@attempt_label}",
+           "--filter",
+           "label=#{instance_label()}",
            "--format",
            "{{.ID}} {{.Label \"#{@attempt_label}\"}}"
          ]) do
@@ -343,7 +350,7 @@ defmodule Robine.Adapters.Execution.DockerRunner do
   defp create_network(_specification, nil), do: :ok
 
   defp create_network(specification, network) do
-    case docker(["network", "create", "--label", label(specification), network]) do
+    case docker(["network", "create"] ++ label_args(specification) ++ [network]) do
       {:ok, _output} ->
         :ok
 
@@ -444,8 +451,7 @@ defmodule Robine.Adapters.Execution.DockerRunner do
         "create",
         "--name",
         name,
-        "--label",
-        label(specification),
+        label_args(specification),
         "--label",
         "#{@service_label}=#{service.id}",
         security_args,
@@ -625,8 +631,7 @@ defmodule Robine.Adapters.Execution.DockerRunner do
         "create",
         "--name",
         resource,
-        "--label",
-        label(specification),
+        label_args(specification),
         "--cap-drop",
         "ALL",
         "--security-opt",
@@ -1570,7 +1575,13 @@ defmodule Robine.Adapters.Execution.DockerRunner do
       Enum.flat_map(specification.services, &Map.values(&1.secret_env))
   end
 
-  defp label(specification), do: "#{@attempt_label}=#{specification.attempt_id}"
+  defp label_args(specification) do
+    ["--label", "#{@attempt_label}=#{specification.attempt_id}", "--label", instance_label()]
+  end
+
+  defp instance_label do
+    "#{@instance_label}=#{Application.fetch_env!(:robine, :runner_resource_namespace)}"
+  end
 
   defp truncate_output(output) when byte_size(output) <= @output_limit, do: output
 

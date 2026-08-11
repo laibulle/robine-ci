@@ -105,11 +105,14 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-The tag-only `Robine Release` workflow builds the CLI and standalone runner, retains `dist/` as the
-`github-release` artifact, then creates the matching GitHub Release with generated notes and attaches
-the digest-verified payload. The GitHub App requires `Contents: read and write`; approve that updated
-permission on the installation before pushing the tag. Release publication is idempotent and provider
-credentials remain in the control plane.
+The tag-only `Robine Release` workflow builds the production OTP server, CLI, and standalone runner,
+retains them as three independent `github-release` artifacts, then creates the matching GitHub Release
+with generated notes and attaches stable `robine-server-<os>-<architecture>.tar.gz`,
+`robine-cli-<os>-<architecture>.tar.gz`, and `robine-runner-<os>-<architecture>.tar.gz` assets. The
+release tag already carries the version, so the filenames deliberately do not repeat it. The GitHub App
+requires `Contents: read and write`; approve that updated permission on the installation before
+pushing the tag. Release publication is idempotent and provider credentials remain in the control
+plane.
 
 Set `ROBINE_METRICS_TOKEN` to enable the token-protected Prometheus endpoint at `/metrics`; leave it unset to return 404. Initial alerts and diagnosis procedures are in [the monitoring runbook](docs/operations/monitoring-and-troubleshooting.md).
 

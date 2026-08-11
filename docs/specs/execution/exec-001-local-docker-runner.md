@@ -5,7 +5,7 @@
 - **State:** Shipped
 - **Owner:** Execution
 - **Target:** MVP
-- **Last updated:** 2026-08-10
+- **Last updated:** 2026-08-11
 
 ## Summary
 
@@ -54,7 +54,7 @@ A developer running tests for a trusted repository and an operator sharing one D
 - **FR-6:** Cancellation MUST first request graceful termination and MUST force termination after a bounded grace period.
 - **FR-7:** Job timeout MUST include all container setup and step execution after dispatch acceptance, but not queue time.
 - **FR-8:** The runner MUST remove containers and ephemeral volumes after terminal state, while preserving declared artifacts and logs according to retention policy.
-- **FR-9:** The runner MUST reconcile and clean orphaned resources bearing its labels after restart.
+- **FR-9:** The runner MUST reconcile and clean orphaned resources bearing its instance-scoped labels after restart, without touching resources owned by another Robine instance sharing the Docker Engine.
 - **FR-10:** Container execution MUST use a non-root user when the image supports it and MUST default to dropped Linux capabilities, no privileged mode, and no host network.
 - **FR-11:** Secret environment values MUST be injected only for the duration of the attempt and MUST not be written into the execution specification stored with public job metadata.
 
@@ -76,7 +76,7 @@ A developer running tests for a trusted repository and an operator sharing one D
 
 The runner lifecycle is `accepted → preparing → running → cancelling → cleaning → terminal`. It creates a labeled workspace volume, pulls or locates the image, starts a long-lived container with a minimal command, then executes each step through Docker exec. Built-ins execute through runner-owned implementations against the workspace.
 
-Before claiming a job, the control plane checks the storage filesystem and refuses admission below 2 GiB free or above 95% usage in production; both thresholds are configurable with `ROBINE_RUNNER_MIN_FREE_BYTES` and `ROBINE_RUNNER_MAX_USED_PERCENT`. Development defaults to 98% so self-hosted DinD can operate on smaller workstations, while tests isolate scheduling behavior from host disk occupancy. A queued-job view exposes disk admission separately from runner-label placement. Image inspection and any required pull are bounded and persisted as runner phase position `0`. Every container and volume carries the opaque `io.robine.attempt` label. A five-minute durable reconciliation compares those labels with active attempt IDs and removes only stale Robine-owned resources.
+Before claiming a job, the control plane checks the storage filesystem and refuses admission below 2 GiB free or above 95% usage in production; both thresholds are configurable with `ROBINE_RUNNER_MIN_FREE_BYTES` and `ROBINE_RUNNER_MAX_USED_PERCENT`. Development defaults to 98% so self-hosted DinD can operate on smaller workstations, while tests isolate scheduling behavior from host disk occupancy. A queued-job view exposes disk admission separately from runner-label placement. Image inspection and any required pull are bounded and persisted as runner phase position `0`. Every container, service container, volume, and network carries the opaque `io.robine.attempt` label and an `io.robine.instance` namespace label. The namespace defaults to the Mix environment and can be overridden with `ROBINE_RUNNER_RESOURCE_NAMESPACE`. A five-minute durable reconciliation filters by both labels before comparing attempt IDs, so colocated development, test, and production instances cannot delete one another's active resources.
 
 Every container defaults to 2 vCPU, 4 GiB of memory with swap disabled beyond that same limit, and 512 processes. Development raises the memory default to 16 GiB so Robine's self-hosted compilation and Docker-in-Docker test workload has sufficient headroom; production and test retain the 4 GiB default. Operators configure these ceilings with `ROBINE_RUNNER_CPU_MILLIS`, `ROBINE_RUNNER_MEMORY_BYTES`, and `ROBINE_RUNNER_PIDS_LIMIT`. Robine honors an image's configured `USER`. Images with no non-root user remain supported for trusted repositories, but still run with all capabilities dropped and `no-new-privileges`; the MVP does not claim this makes root images safe for hostile code.
 
@@ -111,7 +111,7 @@ Metrics include active and queued attempts, phase duration, image pull duration,
 - [x] Files created by one step are available to later steps in the same job.
 - [x] Writable files from one job are unavailable to another job unless explicitly transferred.
 - [x] Cancellation and timeouts terminate the full container process tree within the configured grace period.
-- [x] Restart reconciliation removes or adopts every labeled orphan deterministically.
+- [x] Restart reconciliation removes or adopts every labeled orphan deterministically without crossing instance namespaces.
 - [x] The configured concurrency limit is respected under simultaneous dispatch.
 - [x] Job containers cannot access the Docker socket through Robine-provided mounts.
 

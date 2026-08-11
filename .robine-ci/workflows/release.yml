@@ -7,11 +7,10 @@ on:
 
 jobs:
   package:
-    image: elixir@sha256:7ee41a9a8a8427dbd40c9133ee5b9047f585b58db4968fd675fbcd9498e3b22e
+    image: hexpm/elixir@sha256:e8a44c3a48b7ea1fb23a90a5abfaafa3e145277d0e74fa9dc61951f68d5bd9ec
     shell: /bin/bash
     timeout: 20m
     env:
-      MIX_ENV: cli
       ERL_FLAGS: "+S 4:4"
       MAKEFLAGS: "-j4"
     steps:
@@ -19,16 +18,32 @@ jobs:
         uses: checkout
       - name: Install build tooling
         run: |
+          apt-get update
+          apt-get install --yes --no-install-recommends build-essential ca-certificates git
           mix local.hex --force
           mix local.rebar --force
           mix deps.get
       - name: Build CLI release
-        run: mix robine.release --output dist
+        run: MIX_ENV=cli mix robine.release --output dist/cli
       - name: Build runner release
-        run: mix robine.runner_release --output dist/runner
-      - name: Upload GitHub release payload
+        run: MIX_ENV=cli mix robine.runner_release --output dist/runner
+      - name: Build server release
+        run: MIX_ENV=prod mix robine.server_release --output dist/server
+      - name: Upload server release archive
         uses: artifacts/upload
         with:
-          name: github-release-${{ runner.os }}-${{ runner.arch }}
-          paths: [dist]
+          name: github-release-robine-server-${{ runner.os }}-${{ runner.arch }}
+          paths: [dist/server]
+          retention-days: 30
+      - name: Upload CLI release archive
+        uses: artifacts/upload
+        with:
+          name: github-release-robine-cli-${{ runner.os }}-${{ runner.arch }}
+          paths: [dist/cli]
+          retention-days: 30
+      - name: Upload runner release archive
+        uses: artifacts/upload
+        with:
+          name: github-release-robine-runner-${{ runner.os }}-${{ runner.arch }}
+          paths: [dist/runner]
           retention-days: 30

@@ -107,6 +107,24 @@ defmodule Robine.Adapters.Persistence.Postgres.StorageRepository do
   end
 
   @impl true
+  def get_job_artifacts_by_prefix(job_id, prefix) do
+    pattern = prefix <> "%"
+
+    artifacts =
+      Repo.all(
+        from artifact in Artifact,
+          join: attempt in Attempt,
+          on: attempt.id == artifact.attempt_id,
+          where: attempt.job_id == ^job_id and like(artifact.name, ^pattern),
+          distinct: artifact.name,
+          order_by: [asc: artifact.name, desc: attempt.number],
+          select: artifact
+      )
+
+    {:ok, Enum.map(artifacts, &artifact_domain/1)}
+  end
+
+  @impl true
   def get_dependency_artifact(pipeline_id, job_key, name) do
     case Repo.one(
            from artifact in Artifact,

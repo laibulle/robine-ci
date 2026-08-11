@@ -166,6 +166,7 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - [x] Give development self-hosted jobs a 16 GiB memory ceiling while retaining the 4 GiB production default.
 - [x] Surface disk-pressure admission separately from runner-label placement and use environment-appropriate development/test thresholds.
 - [x] Reconcile labeled orphan containers and volumes after restart.
+- [x] Scope Docker ownership and orphan reconciliation by instance so colocated dev, test, and production runtimes cannot delete one another's resources.
 - [x] Capture stopped-container exit state, including OOM status, in retained logs before cleanup.
 
 ### EXEC-103 — Connect scheduler to local runner
@@ -381,11 +382,12 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - **Spec:** [REL-002](docs/specs/releases/rel-002-github-tag-releases.md)
 - **Depends on:** REL-101, DATA-102, GH-103
 - [x] Normalize exact tag pushes and support distinct `push.tags` glob filters.
-- [x] Add a tag-only workflow that retains CLI and runner release outputs as `github-release`.
+- [x] Add a tag-only workflow that retains server, CLI, and runner release outputs as three distinct `github-release` artifacts.
 - [x] Publish the retained payload idempotently with the control-plane installation token.
 - [x] Approve `Contents: write` on the live GitHub App and verify an annotated tag release with its retained 13.1 MB payload.
 - [x] Resolve allowlisted runner OS and architecture variables in retained and GitHub release asset names.
 - [x] Preserve a project-specific GitHub release asset prefix for repositories built by Robine CI.
+- [x] Keep GitHub release asset filenames stable without duplicating the version carried by the tag.
 
 ## Phase 9 — Remote runners
 

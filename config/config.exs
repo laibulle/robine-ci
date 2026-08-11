@@ -28,6 +28,7 @@ config :robine,
     max_graph_depth: 16
   ],
   runner_admission: [min_free_bytes: 2_147_483_648, max_used_percent: 95],
+  runner_resource_namespace: Atom.to_string(config_env()),
   runner_resources: [cpu_millis: 2_000, memory_bytes: 4_294_967_296, pids_limit: 512],
   runner_control: [
     lease_seconds: 60,

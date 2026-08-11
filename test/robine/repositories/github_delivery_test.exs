@@ -484,28 +484,40 @@ defmodule Robine.Repositories.GitHubDeliveryTest do
     })
     |> Repo.insert!()
 
-    assert {:ok, artifact} =
-             Storage.upload_artifact(
-               %{
-                 repository_id: repository.id,
-                 attempt_id: attempt_id,
-                 name: "github-release-robine_nas-linux-amd64",
-                 content: "release-payload"
-               },
-               context
-             )
+    artifacts =
+      for component <- ["cli", "runner", "server"] do
+        assert {:ok, artifact} =
+                 Storage.upload_artifact(
+                   %{
+                     repository_id: repository.id,
+                     attempt_id: attempt_id,
+                     name: "github-release-robine-#{component}-linux-amd64",
+                     content: "#{component}-payload"
+                   },
+                   context
+                 )
+
+        artifact
+      end
 
     assert {:ok, 2} = Repositories.sync_github_checks(%{pipeline_id: pipeline_id}, context)
 
-    assert_receive {:publish_release, "acme/widget",
-                    %{
-                      tag: "v0.1.0",
-                      sha: ^sha,
-                      asset_name: "robine_nas-v0.1.0-linux-amd64.tar.gz",
-                      content: "release-payload"
-                    }}
+    for component <- ["cli", "runner", "server"] do
+      asset_name = "robine-#{component}-linux-amd64.tar.gz"
+      content = "#{component}-payload"
 
-    assert :ok = Robine.Adapters.Storage.LocalBlobStore.delete(artifact.digest)
+      assert_receive {:publish_release, "acme/widget",
+                      %{
+                        tag: "v0.1.0",
+                        sha: ^sha,
+                        asset_name: ^asset_name,
+                        content: ^content
+                      }}
+    end
+
+    Enum.each(artifacts, fn artifact ->
+      assert :ok = Robine.Adapters.Storage.LocalBlobStore.delete(artifact.digest)
+    end)
   end
 
   test "ignores fork pull requests without fetching or creating a pipeline" do

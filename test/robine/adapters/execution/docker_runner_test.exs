@@ -860,6 +860,9 @@ defmodule Robine.Adapters.Execution.DockerRunnerTest do
     orphan_network = orphan_container <> "-network"
     active_network = active_container <> "-network"
 
+    instance_label =
+      "io.robine.instance=#{Application.fetch_env!(:robine, :runner_resource_namespace)}"
+
     on_exit(fn ->
       System.cmd("docker", ["rm", "--force", orphan_container], stderr_to_stdout: true)
       System.cmd("docker", ["rm", "--force", active_container], stderr_to_stdout: true)
@@ -875,6 +878,8 @@ defmodule Robine.Adapters.Execution.DockerRunnerTest do
       orphan_container,
       "--label",
       "io.robine.attempt=#{orphan_attempt}",
+      "--label",
+      instance_label,
       "alpine:3.22",
       "sleep",
       "3600"
@@ -886,19 +891,40 @@ defmodule Robine.Adapters.Execution.DockerRunnerTest do
       active_container,
       "--label",
       "io.robine.attempt=#{active_attempt}",
+      "--label",
+      instance_label,
       "alpine:3.22",
       "sleep",
       "3600"
     ])
 
-    docker!(["volume", "create", "--label", "io.robine.attempt=#{orphan_attempt}", orphan_volume])
-    docker!(["volume", "create", "--label", "io.robine.attempt=#{active_attempt}", active_volume])
+    docker!([
+      "volume",
+      "create",
+      "--label",
+      "io.robine.attempt=#{orphan_attempt}",
+      "--label",
+      instance_label,
+      orphan_volume
+    ])
+
+    docker!([
+      "volume",
+      "create",
+      "--label",
+      "io.robine.attempt=#{active_attempt}",
+      "--label",
+      instance_label,
+      active_volume
+    ])
 
     docker!([
       "network",
       "create",
       "--label",
       "io.robine.attempt=#{orphan_attempt}",
+      "--label",
+      instance_label,
       orphan_network
     ])
 
@@ -907,6 +933,8 @@ defmodule Robine.Adapters.Execution.DockerRunnerTest do
       "create",
       "--label",
       "io.robine.attempt=#{active_attempt}",
+      "--label",
+      instance_label,
       active_network
     ])
 
@@ -928,6 +956,32 @@ defmodule Robine.Adapters.Execution.DockerRunnerTest do
     assert docker_status(["volume", "inspect", active_volume]) == 0
     assert docker_status(["network", "inspect", orphan_network]) == 1
     assert docker_status(["network", "inspect", active_network]) == 0
+  end
+
+  @tag :docker
+  test "does not reconcile resources owned by another Robine instance" do
+    suffix = System.unique_integer([:positive])
+    container = "robine-test-foreign-#{suffix}"
+
+    on_exit(fn ->
+      System.cmd("docker", ["rm", "--force", container], stderr_to_stdout: true)
+    end)
+
+    docker!([
+      "create",
+      "--name",
+      container,
+      "--label",
+      "io.robine.attempt=foreign-attempt-#{suffix}",
+      "--label",
+      "io.robine.instance=foreign",
+      "alpine:3.22",
+      "sleep",
+      "3600"
+    ])
+
+    assert {:ok, _counts} = DockerRunner.reconcile_resources([])
+    assert docker_status(["container", "inspect", container]) == 0
   end
 
   @tag :docker
