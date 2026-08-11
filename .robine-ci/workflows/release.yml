@@ -30,7 +30,9 @@ jobs:
       - name: Build runner release
         run: MIX_ENV=cli mix robine.runner_release --output dist/runner
       - name: Build server release
-        run: MIX_ENV=prod mix robine.server_release --output dist/server
+        run: |
+          mkdir -p "$PWD/.robine-tmp"
+          TMPDIR="$PWD/.robine-tmp" MIX_ENV=prod mix robine.server_release --output dist/server
       - name: Upload server release archive
         uses: artifacts/upload
         with:
