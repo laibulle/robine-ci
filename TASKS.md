@@ -166,6 +166,7 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - [x] Give development self-hosted jobs a 16 GiB memory ceiling while retaining the 4 GiB production default.
 - [x] Surface disk-pressure admission separately from runner-label placement and use environment-appropriate development/test thresholds.
 - [x] Reconcile labeled orphan containers and volumes after restart.
+- [x] Capture stopped-container exit state, including OOM status, in retained logs before cleanup.
 
 ### EXEC-103 — Connect scheduler to local runner
 

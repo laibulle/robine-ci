@@ -21,6 +21,56 @@ defmodule Robine.Adapters.Execution.DockerRunnerTest do
            ]
   end
 
+  test "renders the retained Docker state with an actionable OOM diagnostic" do
+    assert DockerRunner.container_state_diagnostic(%{
+             "Status" => "exited",
+             "ExitCode" => 137,
+             "OOMKilled" => true,
+             "Error" => "",
+             "FinishedAt" => "2026-08-10T11:42:00Z"
+           }) ==
+             "Container stopped unexpectedly: status=exited, exit_code=137, " <>
+               "oom_killed=true, error=none, finished_at=2026-08-10T11:42:00Z"
+  end
+
+  @tag :docker
+  test "reports a job container that stops during a command as a system failure" do
+    attempt_id = "docker-stopped-#{System.unique_integer([:positive])}"
+
+    suffix =
+      :crypto.hash(:sha256, attempt_id) |> Base.encode16(case: :lower) |> binary_part(0, 20)
+
+    resource = "robine-#{suffix}"
+
+    specification = %Specification{
+      version: 1,
+      attempt_id: attempt_id,
+      image: "alpine:3.22",
+      workspace: "/workspace",
+      shell: "/bin/sh",
+      timeout_ms: 20_000,
+      secrets: %{},
+      steps: [%Step{name: "Stop container", kind: :run, value: "echo ready; sleep 30"}]
+    }
+
+    on_output = fn
+      %{status: :running, content: "ready\n"} ->
+        {_output, 0} = System.cmd("docker", ["kill", resource], stderr_to_stdout: true)
+        :ok
+
+      _event ->
+        :ok
+    end
+
+    assert {:ok, result} = DockerRunner.run(specification, on_output)
+    assert result.status == :failed
+    assert result.reason == :system_failure
+    assert [%{status: :failed, output: output}] = result.steps
+    assert output =~ "Container stopped unexpectedly"
+    assert output =~ "oom_killed=false"
+    assert_resources_absent(attempt_id)
+  end
+
   @tag :docker
   test "runs sequential steps in one container and always cleans resources" do
     attempt_id = "docker-test-#{System.unique_integer([:positive])}"

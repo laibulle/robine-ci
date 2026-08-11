@@ -11,7 +11,7 @@ dev_github_private_key =
 # Stable local-only credential for the first-run setup screen. Production
 # continues to require ROBINE_BOOTSTRAP_TOKEN at runtime.
 config :robine,
-  public_url: "https://ci.base59.dev",
+  public_url: "https://ci-dev.base59.dev",
   bootstrap_token_hash: :crypto.hash(:sha256, "dev-bootstrap-token"),
   bootstrap_expires_at: ~U[2100-01-01 00:00:00Z],
   github_app_id: "4536638",
