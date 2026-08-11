@@ -7,7 +7,7 @@ on:
 
 jobs:
   package:
-    image: hexpm/elixir@sha256:e8a44c3a48b7ea1fb23a90a5abfaafa3e145277d0e74fa9dc61951f68d5bd9ec
+    image: hexpm/elixir@sha256:1d7b070659ac993d5778b605bf767bc2477faedaea26f09bfa945d5e91d5fa14
     shell: /bin/bash
     timeout: 20m
     env:
@@ -18,8 +18,10 @@ jobs:
         uses: checkout
       - name: Install build tooling
         run: |
-          apt-get update
-          apt-get install --yes --no-install-recommends build-essential ca-certificates git
+          mkdir -p /tmp/robine-apt/cache/archives/partial /tmp/robine-apt/state/lists/partial /tmp/robine-apt/log
+          APT_OPTIONS="-o APT::Sandbox::User=root -o Dir::Cache=/tmp/robine-apt/cache -o Dir::State=/tmp/robine-apt/state -o Dir::State::status=/var/lib/dpkg/status -o Dir::Log=/tmp/robine-apt/log"
+          apt-get $APT_OPTIONS update
+          apt-get $APT_OPTIONS install --yes --no-install-recommends build-essential ca-certificates git
           mix local.hex --force
           mix local.rebar --force
           mix deps.get
@@ -28,7 +30,9 @@ jobs:
       - name: Build runner release
         run: MIX_ENV=cli mix robine.runner_release --output dist/runner
       - name: Build server release
-        run: MIX_ENV=prod mix robine.server_release --output dist/server
+        run: |
+          mkdir -p "$PWD/.robine-tmp"
+          TMPDIR="$PWD/.robine-tmp" MIX_ENV=prod mix robine.server_release --output dist/server
       - name: Upload server release archive
         uses: artifacts/upload
         with:

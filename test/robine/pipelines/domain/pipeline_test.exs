@@ -10,12 +10,14 @@ defmodule Robine.Pipelines.Domain.PipelineTest do
     input = %{
       repository_id: "17c78df0-bb10-46d6-9176-004cf068c56c",
       workflow_name: "CI",
-      commit_sha: String.duplicate("a", 40)
+      commit_sha: String.duplicate("a", 40),
+      source_ref: "main"
     }
 
     assert {:ok, pipeline} = Pipeline.create(input, @id, @now)
     assert pipeline.id == @id
     assert pipeline.status == :created
+    assert pipeline.source_ref == "main"
     assert pipeline.inserted_at == @now
   end
 

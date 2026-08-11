@@ -10,6 +10,7 @@ defmodule Robine.Adapters.Persistence.Postgres.Schemas.Pipeline do
     field :repository_id, :binary_id
     field :workflow_name, :string
     field :commit_sha, :string
+    field :source_ref, :string
     field :trigger, :string
     field :actor, :string
     field :correlation_id, :string
@@ -31,6 +32,7 @@ defmodule Robine.Adapters.Persistence.Postgres.Schemas.Pipeline do
       :repository_id,
       :workflow_name,
       :commit_sha,
+      :source_ref,
       :trigger,
       :actor,
       :correlation_id,

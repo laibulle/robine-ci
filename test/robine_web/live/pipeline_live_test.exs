@@ -22,6 +22,7 @@ defmodule RobineWeb.PipelineLiveTest do
                  repository_id: Ecto.UUID.generate(),
                  workflow_name: "CI",
                  commit_sha: String.duplicate("e", 40),
+                 source_ref: "main",
                  jobs: %{"build" => %{needs: []}, "test" => %{needs: ["build"]}},
                  workflow_revision: %{
                    path: ".robine-ci/workflows/ci.yml",
@@ -39,6 +40,34 @@ defmodule RobineWeb.PipelineLiveTest do
     assert html =~ "Pipelines"
     assert has_element?(index, ".app-shell.h-dvh.overflow-hidden")
     assert has_element?(index, ".app-content.h-dvh.overflow-y-auto.overscroll-y-none")
+    assert has_element?(index, "#pipeline-#{pipeline.id}", "CI")
+    assert has_element?(index, "#pipeline-watchlist #pipeline-#{pipeline.id}", "main")
+    assert has_element?(index, "#pipeline-filters")
+    assert has_element?(index, "#pipeline-search")
+    assert has_element?(index, "#pipeline-status-filter")
+    assert has_element?(index, "#pipeline-repository-filter")
+    assert has_element?(index, "#pipeline-refresh-status", "Up to date")
+
+    assert has_element?(
+             index,
+             "#pipeline-#{pipeline.id} a[aria-label='Open CI in Unknown repository']"
+           )
+
+    assert has_element?(
+             index,
+             "#pipeline-#{pipeline.id} time[datetime='#{DateTime.to_iso8601(pipeline.inserted_at)}']"
+           )
+
+    index
+    |> form("#pipeline-filters", filters: %{query: "no-such-workflow"})
+    |> render_change()
+
+    assert assert_patch(index) == "/pipelines?filters[query]=no-such-workflow"
+    assert has_element?(index, "#pipeline-result-count", "0 pipelines")
+    assert has_element?(index, "#clear-pipeline-filters")
+
+    index |> element("#clear-pipeline-filters") |> render_click()
+    assert_patch(index, "/pipelines")
     assert has_element?(index, "#pipeline-#{pipeline.id}", "CI")
 
     assert {:ok, show, html} = live(conn, ~p"/pipelines/#{pipeline.id}")
@@ -199,6 +228,9 @@ defmodule RobineWeb.PipelineLiveTest do
                context
              )
 
+    assert {:ok, index_view, _index_html} = live(conn, ~p"/pipelines")
+    assert has_element?(index_view, "#pipeline-#{pipeline.id}", "Failed in test")
+
     assert {:ok, _view, html} = live(conn, ~p"/pipelines/#{pipeline.id}")
     assert html =~ "Infrastructure failure"
     assert html =~ "Trigger"
@@ -212,6 +244,13 @@ defmodule RobineWeb.PipelineLiveTest do
 
     snapshot = Pipelines.pipeline_snapshot(%{pipeline_id: pipeline.id}, context) |> elem(1)
     job = hd(snapshot.jobs)
+
+    assert has_element?(
+             index_view,
+             "#pipeline-#{pipeline.id} a[href='/pipelines/#{pipeline.id}/jobs/#{job.id}']",
+             "Failed in test"
+           )
+
     assert {:ok, job_view, _job_html} = live(conn, ~p"/pipelines/#{pipeline.id}/jobs/#{job.id}")
 
     assert has_element?(

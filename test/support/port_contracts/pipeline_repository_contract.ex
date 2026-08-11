@@ -20,6 +20,30 @@ defmodule Robine.TestSupport.PortContracts.PipelineRepositoryContract do
         assert {:ok, recent} = @pipeline_repository_adapter.list_recent(10)
         assert Enum.any?(recent, &(&1 == updated))
 
+        assert {:ok, repository_recent} =
+                 @pipeline_repository_adapter.list_recent_for_repository(
+                   pipeline.repository_id,
+                   10
+                 )
+
+        assert Enum.any?(repository_recent, &(&1 == updated))
+
+        other = %{
+          contract_pipeline()
+          | id: Ecto.UUID.generate(),
+            repository_id: Ecto.UUID.generate()
+        }
+
+        assert :ok = @pipeline_repository_adapter.insert(other)
+
+        assert {:ok, repository_recent} =
+                 @pipeline_repository_adapter.list_recent_for_repository(
+                   pipeline.repository_id,
+                   10
+                 )
+
+        refute Enum.any?(repository_recent, &(&1.id == other.id))
+
         assert {:error, {:persistence, _changeset}} =
                  @pipeline_repository_adapter.insert(pipeline)
       end

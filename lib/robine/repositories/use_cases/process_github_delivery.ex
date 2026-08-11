@@ -58,6 +58,7 @@ defmodule Robine.Repositories.UseCases.ProcessGitHubDelivery do
               repository_id: repository.id,
               workflow_name: validated.workflow.name,
               commit_sha: event.sha,
+              source_ref: event.branch,
               trigger: event.type,
               actor: event.actor,
               inputs: event_inputs(event),

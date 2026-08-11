@@ -19,6 +19,7 @@ defmodule Robine.Pipelines.Domain.Pipeline do
     :repository_id,
     :workflow_name,
     :commit_sha,
+    :source_ref,
     :trigger,
     :actor,
     :correlation_id,
@@ -45,6 +46,7 @@ defmodule Robine.Pipelines.Domain.Pipeline do
           repository_id: String.t(),
           workflow_name: String.t(),
           commit_sha: String.t(),
+          source_ref: String.t() | nil,
           trigger: String.t(),
           actor: String.t(),
           correlation_id: String.t(),
@@ -69,6 +71,7 @@ defmodule Robine.Pipelines.Domain.Pipeline do
          repository_id: repository_id,
          workflow_name: workflow_name,
          commit_sha: commit_sha,
+         source_ref: optional_source_ref(input),
          trigger: optional_label(input, :trigger, "manual"),
          actor: optional_label(input, :actor, "system"),
          correlation_id: optional_label(input, :correlation_id, "unknown"),
@@ -196,6 +199,13 @@ defmodule Robine.Pipelines.Domain.Pipeline do
 
       _ ->
         default
+    end
+  end
+
+  defp optional_source_ref(input) do
+    case Map.get(input, :source_ref) do
+      value when is_binary(value) and value != "" -> String.slice(value, 0, 255)
+      _ -> nil
     end
   end
 

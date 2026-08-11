@@ -5,7 +5,7 @@
 - **State:** Accepted
 - **Owner:** Web
 - **Target:** MVP
-- **Last updated:** 2026-08-09
+- **Last updated:** 2026-08-11
 
 ## Summary
 
@@ -57,6 +57,11 @@ A developer diagnosing a build and an operator configuring repositories, identit
 - **FR-8:** Job pages MUST provide a copyable local reproduction command and list CI-only inputs that are omitted locally.
 - **FR-9:** Log virtualization or pagination MUST prevent unbounded browser memory use.
 - **FR-10:** URLs MUST remain stable across real-time state transitions.
+- **FR-11:** Pipeline history MUST expose repository, workflow, source reference when retained, immutable commit, trigger, actor, durable or elapsed duration, status, start time, and the first failed job when known without requiring detail navigation.
+- **FR-12:** Pipeline history MUST support URL-persisted search plus status and repository filters over a bounded recent result window.
+- **FR-13:** Repository catalogue entries MUST expose provider, trust, integration-health state, active-run count, previously run workflow count, last activity, and latest pipeline outcome.
+- **FR-14:** Repository pipeline history MUST use a repository-scoped query rather than filtering a global recent window and MUST link to the global cockpit with the repository filter preserved.
+- **FR-15:** Repository schedule discovery MUST show a human-readable UTC recurrence, bounded next-occurrence preview, active state, and latest retained scheduled-run outcome when known.
 
 ### UX requirements
 
@@ -65,6 +70,12 @@ A developer diagnosing a build and an operator configuring repositories, identit
 - **UX-3:** LiveView reconnects MUST restore the current view and request only missing log segments.
 - **UX-4:** Destructive or costly actions MUST use clear confirmations and prevent duplicate submission.
 - **UX-5:** The interface MUST be responsive down to a practical phone viewport, while desktop remains the primary log-analysis target.
+- **UX-6:** Active and recently failed pipelines MUST be elevated above ordinary history, while the remaining runs are grouped chronologically and remain available in a compact scan-friendly layout.
+- **UX-7:** Pipeline history rows MUST provide one clear full-row navigation target, relative time with an exact accessible timestamp, and explicit live refresh, retrying, filtered-empty, and result-window feedback.
+- **UX-8:** The repository catalogue MUST prioritize connected-project activity over provider provisioning and MUST support URL-persisted search, provider, and attention filters.
+- **UX-9:** Connecting a repository MUST be a progressive administrator-only flow with explicit provider selection, available-repository search, and confirmation that trusted workflow code may execute.
+- **UX-10:** Repository detail MUST present an operational overview and recent pipelines before integration settings, manual runs, schedules, and historical workflow names, with stable section navigation.
+- **UX-11:** Manual launch MUST resolve the default branch when no branch is entered, require explicit selection for required choice inputs without defaults, associate validation errors with fields, summarize the immutable revision in a confirmation, and prevent duplicate submission.
 
 ### Operational requirements
 
@@ -78,6 +89,12 @@ A developer diagnosing a build and an operator configuring repositories, identit
 The UI follows the semantic token and component contracts in `docs/design-system.md`. Light and dark themes implement the palette, while product templates consume intent-level surface, content, action, and status semantics. All interactive controls share a visible keyboard focus treatment, status text never depends on color alone, and operating-system reduced-motion preferences override decorative transitions.
 
 The primary navigation contains Repositories, Pipelines, and Administration. Repository pages show integration health, workflows, recent runs, secrets, and settings. Pipeline pages use a compact graph on desktop and an ordered dependency list on small screens.
+
+Pipeline history is an operational cockpit rather than a gallery. A bounded 50-run projection is searchable by workflow, repository, source reference, or commit and filterable by status and repository; non-default filters are encoded in the URL. Active pipelines and failures from the last 24 hours appear in a dedicated watchlist. Remaining results form a compact, date-grouped history. Every row exposes the repository and workflow, source reference when known, exact commit abbreviation, actor, trigger, elapsed or durable duration, relative age, exact machine-readable timestamp, first failed job when applicable, and a full-row detail link. Polling retains the last known projection during transient errors and reports whether results are current or retrying.
+
+The repository catalogue is a project-operations surface. Connected repositories appear before a collapsed administrator-only connection flow and are searchable and filterable through URL state. Every full-row navigation target distinguishes durable trust from current integration health and summarizes active runs, previously executed workflows, last activity, and latest outcome. Provider discovery uses an explicit provider selector, filters large catalogues, and confirms the execution authority granted by trust.
+
+Repository detail starts with trust, health, provider, operational statistics, and the repository-scoped recent pipeline projection. Stable section links lead to manual execution, schedules, integration checks, secrets, and explicitly labelled historical workflow names. Manual runs display the resolved immutable revision and require confirmation after input validation. Schedule cards pair the raw cron contract with a human description, bounded next occurrence, active state, and latest retained scheduled execution.
 
 The MVP graph representation is an accessible dependency-ordered list: every job names its prerequisites, durable status, latest runner phase, elapsed duration, and terminal reason. Pipeline metadata persists the source trigger, initiating actor, exact commit, execution start, and terminal finish. Runner-loss and system-failure reasons are elevated as infrastructure failures and are visually and textually distinct from repository command failures and timeouts. This list is the canonical accessible graph; a decorative node-edge rendering may be layered on later without replacing it.
 
@@ -112,6 +129,10 @@ Measure LiveView connection count, reconnect rate, page latency, log segment lat
 - [x] A failed step is apparent from the pipeline page and directly linkable.
 - [ ] All core journeys pass automated keyboard and accessibility checks, plus a manual screen-reader smoke test.
 - [x] Retry clearly handles present and expired dependency artifacts.
+- [x] Pipeline history supports URL-persisted search/status/repository filtering and elevates active or recently failed runs.
+- [x] Pipeline rows expose operational context, duration, relative and exact time, full-row navigation, bounded-window feedback, and explicit refresh health.
+- [x] Repository catalogue filtering, activity summaries, full-row navigation, progressive provider discovery, trust confirmation, and filtered-empty states are implemented.
+- [x] Repository detail uses repository-scoped pipelines, prioritizes operational status, deep-links to the filtered cockpit, confirms manual runs, and contextualizes schedules.
 
 ## Open questions
 

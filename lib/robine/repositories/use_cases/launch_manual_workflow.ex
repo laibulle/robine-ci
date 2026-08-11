@@ -40,6 +40,7 @@ defmodule Robine.Repositories.UseCases.LaunchManualWorkflow do
                  repository_id: repository.id,
                  workflow_name: prepared.workflow.name,
                  commit_sha: head.sha,
+                 source_ref: head.branch,
                  trigger: :workflow_dispatch,
                  actor: actor_id,
                  inputs: prepared.inputs,
