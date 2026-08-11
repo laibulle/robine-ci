@@ -197,6 +197,31 @@
     transform: translateX(3px);
   }
 
+  .app-nav-link-active {
+    background: color-mix(in oklab, var(--color-primary) 13%, var(--color-base-100));
+    color: var(--color-base-content);
+    box-shadow: inset 3px 0 0 var(--color-primary);
+  }
+
+  .mobile-nav-link {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.25rem;
+    border-radius: 0.75rem;
+    padding: 0.5rem 0.75rem;
+    color: color-mix(in oklab, var(--color-base-content) 60%, transparent);
+    font-size: 0.65rem;
+    font-weight: 700;
+    transition: background-color 160ms ease, color 160ms ease;
+  }
+
+  .mobile-nav-link:hover,
+  .mobile-nav-link-active {
+    background: color-mix(in oklab, var(--color-primary) 11%, var(--color-base-100));
+    color: var(--color-base-content);
+  }
+
   .surface-panel {
     border: 1px solid color-mix(in oklab, var(--color-base-300) 82%, transparent);
     background: color-mix(in oklab, var(--color-base-100) 94%, transparent);

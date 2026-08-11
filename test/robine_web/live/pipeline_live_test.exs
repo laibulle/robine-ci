@@ -50,7 +50,8 @@ defmodule RobineWeb.PipelineLiveTest do
     assert has_element?(index, "#pipeline-repository-filter")
     assert has_element?(index, "#pipeline-refresh-status", "Up to date")
     assert has_element?(index, "#application-build-footer a[href='/build-information']")
-    assert has_element?(index, "#mobile-build-information[href='/build-information']")
+    assert has_element?(index, "a[aria-label='About this Robine build']")
+    assert has_element?(index, "a[href='/pipelines'][aria-current='page']")
 
     assert has_element?(
              index,

@@ -107,6 +107,7 @@ defmodule RobineWeb.RepositoryLiveTest do
     assert has_element?(index, "#repository-provider-filter")
     assert has_element?(index, "#repository-attention-filter")
     assert has_element?(index, "#repository-sort")
+    assert has_element?(index, "a[href='/repositories'][aria-current='page']")
     assert has_element?(index, "#repository-#{repository.id} a[aria-label='Open acme/widget']")
     assert has_element?(index, "#repository-#{repository.id}", "Health unchecked")
 
@@ -123,6 +124,8 @@ defmodule RobineWeb.RepositoryLiveTest do
     assert html =~ "No valid workflow has run yet"
     assert html =~ "Manage secrets"
     assert html =~ "Metadata read, Contents write, Checks write"
+    assert has_element?(show, "nav[aria-label='Breadcrumb']")
+    assert has_element?(show, "#repository-section-navigation.sticky")
     assert has_element?(show, "#check-github-installation", "Check permissions")
     assert has_element?(show, "#overview")
     assert has_element?(show, "#recent-pipelines")

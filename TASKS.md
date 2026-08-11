@@ -325,6 +325,7 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - [x] Upgrade pipeline history to the WEB-001 operational cockpit with URL-persisted filters, attention prioritization, compact responsive rows, source context, durations, and explicit refresh health.
 - [x] Upgrade repository catalogue and detail to the WEB-001 operational experience with scoped activity, health/trust distinction, progressive connection, safe manual launch, and schedule context.
 - [x] Embed Robine's own CI provenance and expose it through a discreet application footer and authenticated Build information page.
+- [x] Unify product navigation and page hierarchy with active states, breadcrumbs, focused administration sections, responsive provenance access, normalized surfaces, and isolated destructive actions.
 
 ### WEB-103 — Implement scalable live logs
 

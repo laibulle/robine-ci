@@ -540,6 +540,53 @@ defmodule RobineWeb.CoreComponents do
     """
   end
 
+  @doc "Renders a consistent product page heading with optional breadcrumbs and actions."
+  attr :title, :string, required: true
+  attr :eyebrow, :string, default: nil
+  attr :description, :string, default: nil
+  attr :breadcrumbs, :list, default: []
+  attr :title_id, :string, default: nil
+  attr :class, :string, default: nil
+  slot :actions
+  slot :meta
+
+  def page_header(assigns) do
+    ~H"""
+    <header class={[@class, "border-b border-base-300/70 pb-7"]}>
+      <nav :if={@breadcrumbs != []} aria-label="Breadcrumb" class="mb-4 overflow-x-auto">
+        <ol class="flex min-w-max items-center gap-2 text-xs font-semibold text-base-content/45">
+          <li :for={{crumb, index} <- Enum.with_index(@breadcrumbs)} class="flex items-center gap-2">
+            <span :if={index > 0} aria-hidden="true" class="text-base-content/25">/</span>
+            <.link
+              :if={crumb[:navigate]}
+              navigate={crumb.navigate}
+              class="rounded hover:text-base-content focus-visible:text-base-content"
+            >{crumb.label}</.link>
+            <span :if={!crumb[:navigate]} aria-current="page" class="text-base-content/70">
+              {crumb.label}
+            </span>
+          </li>
+        </ol>
+      </nav>
+      <div class="flex flex-col justify-between gap-5 sm:flex-row sm:items-end">
+        <div class="min-w-0">
+          <div :if={@eyebrow} class="page-eyebrow mb-3">{@eyebrow}</div>
+          <div class="flex flex-wrap items-center gap-3">
+            <h1 id={@title_id} class="break-words text-4xl font-bold sm:text-5xl">{@title}</h1>
+            {render_slot(@meta)}
+          </div>
+          <p :if={@description} class="mt-3 max-w-3xl text-base leading-7 text-base-content/60">
+            {@description}
+          </p>
+        </div>
+        <div :if={@actions != []} class="flex shrink-0 flex-wrap items-center gap-2">
+          {render_slot(@actions)}
+        </div>
+      </div>
+    </header>
+    """
+  end
+
   ## JS Commands
 
   def show(js \\ %JS{}, selector) do

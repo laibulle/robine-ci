@@ -32,6 +32,7 @@ defmodule RobineWeb.Layouts do
     doc: "the current [scope](https://phoenix.hexdocs.pm/scopes.html)"
 
   attr :current_actor, :map, default: nil
+  attr :nav_section, :atom, default: nil
   attr :shell, :boolean, default: true, doc: "renders the authenticated application chrome"
 
   slot :inner_block, required: true
@@ -57,18 +58,27 @@ defmodule RobineWeb.Layouts do
             <p class="mb-3 px-3 text-[0.65rem] font-bold uppercase tracking-[0.18em] text-base-content/35">
               Workspace
             </p>
-            <.link navigate={~p"/pipelines"} class="app-nav-link"><.icon
+            <.link
+              navigate={~p"/pipelines"}
+              class={["app-nav-link", @nav_section == :pipelines && "app-nav-link-active"]}
+              aria-current={@nav_section == :pipelines && "page"}
+            ><.icon
               name="hero-bolt"
               class="size-4"
             /> Pipelines</.link>
-            <.link navigate={~p"/repositories"} class="app-nav-link"><.icon
+            <.link
+              navigate={~p"/repositories"}
+              class={["app-nav-link", @nav_section == :repositories && "app-nav-link-active"]}
+              aria-current={@nav_section == :repositories && "page"}
+            ><.icon
               name="hero-code-bracket-square"
               class="size-4"
             /> Repositories</.link>
             <.link
               :if={@current_actor.role == :administrator}
               navigate={~p"/admin"}
-              class="app-nav-link"
+              class={["app-nav-link", @nav_section == :admin && "app-nav-link-active"]}
+              aria-current={@nav_section == :admin && "page"}
             ><.icon name="hero-adjustments-horizontal" class="size-4" /> Administration</.link>
           </div>
           <div class="mt-auto space-y-3 pb-1">
@@ -122,6 +132,12 @@ defmodule RobineWeb.Layouts do
               class="flex items-center gap-2 font-bold"
             ><.brand_mark class="size-8 shrink-0" /> Robine CI</a>
             <div class="flex items-center gap-1">
+              <.link
+                :if={@current_actor}
+                navigate={~p"/build-information"}
+                class="btn btn-ghost btn-sm btn-square"
+                aria-label="About this Robine build"
+              ><.icon name="hero-information-circle" class="size-4" /></.link>
               <.theme_toggle />
               <.link :if={is_nil(@current_actor)} href={~p"/sign-in"} class="btn btn-primary btn-sm">Sign in</.link>
             </div>
@@ -142,32 +158,32 @@ defmodule RobineWeb.Layouts do
         aria-label="Mobile navigation"
       >
         <.link
-          id="mobile-build-information"
-          navigate={~p"/build-information"}
-          class="col-span-3 flex items-center justify-center gap-1.5 border-b border-base-300/60 px-2 pb-1.5 text-[0.58rem] text-base-content/35 transition hover:text-base-content"
-          aria-label="Open build information"
-        >
-          <.icon name="hero-code-bracket" class="size-3" />
-          Robine {@build_info.version} · {@build_info.display_ref}@{@build_info.short_commit}
-        </.link>
-        <.link
           navigate={~p"/pipelines"}
-          class="flex flex-col items-center gap-1 rounded-xl px-3 py-2 text-[0.65rem] font-bold text-base-content/60 transition hover:bg-base-200 hover:text-base-content"
+          class={[
+            "mobile-nav-link",
+            @nav_section == :pipelines && "mobile-nav-link-active"
+          ]}
+          aria-current={@nav_section == :pipelines && "page"}
         ><.icon name="hero-bolt" class="size-5" />Pipelines</.link>
         <.link
           navigate={~p"/repositories"}
-          class="flex flex-col items-center gap-1 rounded-xl px-3 py-2 text-[0.65rem] font-bold text-base-content/60 transition hover:bg-base-200 hover:text-base-content"
+          class={[
+            "mobile-nav-link",
+            @nav_section == :repositories && "mobile-nav-link-active"
+          ]}
+          aria-current={@nav_section == :repositories && "page"}
         ><.icon name="hero-code-bracket-square" class="size-5" />Repositories</.link>
         <.link
           :if={@current_actor.role == :administrator}
           navigate={~p"/admin"}
-          class="flex flex-col items-center gap-1 rounded-xl px-3 py-2 text-[0.65rem] font-bold text-base-content/60 transition hover:bg-base-200 hover:text-base-content"
+          class={["mobile-nav-link", @nav_section == :admin && "mobile-nav-link-active"]}
+          aria-current={@nav_section == :admin && "page"}
         ><.icon name="hero-adjustments-horizontal" class="size-5" />Admin</.link>
         <.link
           :if={@current_actor.role != :administrator}
           href={~p"/sign-out"}
           method="delete"
-          class="flex flex-col items-center gap-1 rounded-xl px-3 py-2 text-[0.65rem] font-bold text-base-content/60 transition hover:bg-base-200 hover:text-base-content"
+          class="mobile-nav-link"
         ><.icon name="hero-arrow-right-start-on-rectangle" class="size-5" />Sign out</.link>
       </nav>
     </div>

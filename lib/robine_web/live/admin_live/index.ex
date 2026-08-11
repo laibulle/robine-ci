@@ -2,8 +2,16 @@ defmodule RobineWeb.AdminLive.Index do
   use RobineWeb, :live_view
   alias Robine.{Autoscaling, Identities, Operations, Runners, Secrets}
 
+  @sections ~w(overview runners source-control security users)
+
   @impl true
   def mount(_params, _session, socket), do: {:ok, load(socket)}
+
+  @impl true
+  def handle_params(params, _uri, socket) do
+    section = if params["section"] in @sections, do: params["section"], else: "overview"
+    {:noreply, assign(socket, :admin_section, section)}
+  end
 
   @impl true
   def handle_event("preflight-oidc", _params, socket) do
@@ -336,16 +344,42 @@ defmodule RobineWeb.AdminLive.Index do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_actor={@current_actor}>
-      <section class="space-y-10">
-        <header>
-          <p class="text-sm font-semibold uppercase tracking-[0.2em] text-primary">Instance</p><h1 class="mt-2 text-4xl font-bold">
-            Administration
-          </h1><p class="mt-2 text-base-content/60">
-            Identity configuration and operator recovery status.
-          </p>
-        </header>
-        <section class="rounded-3xl border border-base-300 bg-base-100 p-6">
+    <Layouts.app flash={@flash} current_actor={@current_actor} nav_section={:admin}>
+      <section class="space-y-8">
+        <.page_header
+          eyebrow="Instance control"
+          title="Administration"
+          description="Operate capacity, integrations, security, and access from focused work areas."
+        />
+        <nav
+          id="admin-section-navigation"
+          class="grid gap-1 rounded-2xl border border-base-300/70 bg-base-100/75 p-1.5 sm:grid-cols-5"
+          aria-label="Administration sections"
+        >
+          <.link
+            :for={
+              {id, label, icon} <- [
+                {"overview", "Overview", "hero-squares-2x2"},
+                {"runners", "Runners", "hero-cpu-chip"},
+                {"source-control", "Source control", "hero-code-bracket-square"},
+                {"security", "Security", "hero-shield-check"},
+                {"users", "Users", "hero-users"}
+              ]
+            }
+            id={"admin-section-#{id}"}
+            patch={"/admin?section=#{id}"}
+            aria-current={@admin_section == id && "page"}
+            class={[
+              "flex items-center justify-center gap-2 rounded-xl px-3 py-2.5 text-xs font-bold transition",
+              @admin_section == id && "bg-primary/15 text-base-content shadow-sm",
+              @admin_section != id && "text-base-content/50 hover:bg-base-200 hover:text-base-content"
+            ]}
+          ><.icon name={icon} class="size-4" />{label}</.link>
+        </nav>
+        <section
+          :if={@admin_section == "overview"}
+          class="surface-panel rounded-2xl p-6"
+        >
           <div class="flex flex-wrap items-start justify-between gap-4">
             <div>
               <h2 class="text-xl font-semibold">Instance health</h2>
@@ -375,7 +409,7 @@ defmodule RobineWeb.AdminLive.Index do
             </article>
           </div>
         </section>
-        <section class="rounded-3xl border border-base-300 bg-base-100 p-6">
+        <section :if={@admin_section == "runners"} class="surface-panel rounded-2xl p-6">
           <div>
             <p class="text-sm font-semibold uppercase tracking-[0.16em] text-primary">
               Elastic capacity
@@ -413,7 +447,7 @@ defmodule RobineWeb.AdminLive.Index do
             </article>
           </div>
         </section>
-        <section class="rounded-3xl border border-base-300 bg-base-100 p-6">
+        <section :if={@admin_section == "runners"} class="surface-panel rounded-2xl p-6">
           <div>
             <p class="text-sm font-semibold uppercase tracking-[0.16em] text-primary">Fleet</p>
             <h2 class="mt-1 text-xl font-semibold">Remote runners</h2>
@@ -461,7 +495,7 @@ defmodule RobineWeb.AdminLive.Index do
                     )}</span>
                   </div>
                 </div>
-                <div :if={runner.admin_state != :revoked} class="flex flex-wrap gap-2">
+                <div :if={runner.admin_state != :revoked} class="flex flex-wrap items-center gap-2">
                   <button
                     id={"runner-state-#{runner.id}"}
                     phx-click="set-runner-state"
@@ -473,24 +507,29 @@ defmodule RobineWeb.AdminLive.Index do
                   >
                     {if runner.admin_state == :draining, do: "Enable", else: "Drain"}
                   </button>
-                  <button
-                    id={"rotate-runner-#{runner.id}"}
-                    phx-click="rotate-runner"
-                    phx-value-runner_id={runner.id}
-                    data-confirm="Rotate this credential? The previous credential remains valid for five minutes."
-                    class="btn btn-outline btn-sm"
+                  <div
+                    class="ml-1 flex gap-2 border-l border-error/25 pl-3"
+                    aria-label="Sensitive runner actions"
                   >
-                    Rotate credential
-                  </button>
-                  <button
-                    id={"revoke-runner-#{runner.id}"}
-                    phx-click="revoke-runner"
-                    phx-value-runner_id={runner.id}
-                    data-confirm="Revoke this runner immediately? It will be disconnected and cannot authenticate again."
-                    class="btn btn-error btn-outline btn-sm"
-                  >
-                    Revoke
-                  </button>
+                    <button
+                      id={"rotate-runner-#{runner.id}"}
+                      phx-click="rotate-runner"
+                      phx-value-runner_id={runner.id}
+                      data-confirm="Rotate this credential? The previous credential remains valid for five minutes."
+                      class="btn btn-outline btn-sm"
+                    >
+                      Rotate credential
+                    </button>
+                    <button
+                      id={"revoke-runner-#{runner.id}"}
+                      phx-click="revoke-runner"
+                      phx-value-runner_id={runner.id}
+                      data-confirm="Revoke this runner immediately? It will be disconnected and cannot authenticate again."
+                      class="btn btn-error btn-outline btn-sm"
+                    >
+                      Revoke
+                    </button>
+                  </div>
                 </div>
               </div>
               <.form
@@ -511,7 +550,7 @@ defmodule RobineWeb.AdminLive.Index do
             </article>
           </div>
         </section>
-        <section class="rounded-3xl border border-base-300 bg-base-100 p-6">
+        <section :if={@admin_section == "source-control"} class="surface-panel rounded-2xl p-6">
           <h2 class="text-xl font-semibold">GitLab and Forgejo credentials</h2>
           <p class="mt-1 max-w-3xl text-sm text-base-content/60">
             Configure provider origins with <code>GITLAB_URL</code>
@@ -548,7 +587,7 @@ defmodule RobineWeb.AdminLive.Index do
             </form>
           </div>
         </section>
-        <section class="rounded-3xl border border-base-300 bg-base-100 p-6">
+        <section :if={@admin_section == "runners"} class="surface-panel rounded-2xl p-6">
           <div class="flex flex-wrap items-start justify-between gap-4">
             <div>
               <h2 class="text-xl font-semibold">Remote runner enrollment</h2>
@@ -581,7 +620,11 @@ defmodule RobineWeb.AdminLive.Index do
             <pre class="mt-3 overflow-x-auto whitespace-pre-wrap break-all rounded-xl bg-base-300 p-3 text-xs"><code>ROBINE_RUNNER_ENROLLMENT_TOKEN='{@runner_enrollment.token}' robine-runner enroll --server '{Application.fetch_env!(:robine, :public_url)}' --name 'RUNNER_NAME' --config /etc/robine-runner/config.json</code></pre>
           </div>
         </section>
-        <section id="github-setup-assistant" class="surface-panel overflow-hidden rounded-3xl">
+        <section
+          :if={@admin_section == "source-control"}
+          id="github-setup-assistant"
+          class="surface-panel overflow-hidden rounded-2xl"
+        >
           <div class="border-b border-base-300/70 bg-base-200/40 p-6 sm:p-8">
             <div class="flex flex-wrap items-start justify-between gap-4">
               <div>
@@ -931,7 +974,7 @@ defmodule RobineWeb.AdminLive.Index do
             </section>
           </div>
         </section>
-        <section class="rounded-3xl border border-base-300 bg-base-100 p-6">
+        <section :if={@admin_section == "security"} class="surface-panel rounded-2xl p-6">
           <div class="flex flex-wrap items-start justify-between gap-4">
             <div>
               <h2 class="text-xl font-semibold">Secret encryption keys</h2>
@@ -950,7 +993,7 @@ defmodule RobineWeb.AdminLive.Index do
             </button>
           </div>
         </section>
-        <section class="rounded-3xl border border-base-300 bg-base-100 p-6">
+        <section :if={@admin_section == "overview"} class="surface-panel rounded-2xl p-6">
           <div class="flex flex-wrap items-start justify-between gap-4">
             <div>
               <h2 class="text-xl font-semibold">Retention policy</h2>
@@ -984,7 +1027,7 @@ defmodule RobineWeb.AdminLive.Index do
             </div>
           </dl>
         </section>
-        <section class="rounded-3xl border border-base-300 bg-base-100 p-6">
+        <section :if={@admin_section == "security"} class="surface-panel rounded-2xl p-6">
           <div class="flex flex-wrap items-start justify-between gap-4">
             <div>
               <h2 class="text-xl font-semibold">OpenID Connect</h2><p class="mt-1 text-sm text-base-content/60">
@@ -1010,8 +1053,8 @@ defmodule RobineWeb.AdminLive.Index do
             </div>
           </dl>
         </section>
-        <section>
-          <h2 class="text-xl font-semibold">Users and roles</h2><div class="mt-4 overflow-x-auto rounded-3xl border border-base-300 bg-base-100">
+        <section :if={@admin_section == "users"} class="surface-panel rounded-2xl p-6">
+          <h2 class="text-xl font-semibold">Users and roles</h2><div class="mt-4 overflow-x-auto rounded-xl border border-base-300 bg-base-100">
             <table class="table">
               <thead>
                 <tr>

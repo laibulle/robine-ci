@@ -343,15 +343,19 @@ defmodule RobineWeb.JobLive.Show do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} current_actor={@current_actor}>
+    <Layouts.app flash={@flash} current_actor={@current_actor} nav_section={:pipelines}>
       <section class="space-y-8">
-        <header>
-          <.link navigate={~p"/pipelines/#{@pipeline.id}"} class="link text-sm">← {@pipeline.workflow_name}</.link>
-          <div class="mt-4 flex items-center gap-3">
-            <h1 class="text-4xl font-bold">{@job.job_key}</h1><.status_badge
-              status={@job.status}
-              size="lg"
-            />
+        <.page_header
+          title={@job.job_key}
+          eyebrow="Job execution"
+          breadcrumbs={[
+            %{label: "Pipelines", navigate: ~p"/pipelines"},
+            %{label: @pipeline.workflow_name, navigate: ~p"/pipelines/#{@pipeline.id}"},
+            %{label: @job.job_key}
+          ]}
+        >
+          <:meta><.status_badge status={@job.status} size="lg" /></:meta>
+          <:actions>
             <button
               :if={
                 @current_actor.role in [:administrator, :maintainer] and
@@ -361,18 +365,18 @@ defmodule RobineWeb.JobLive.Show do
               data-confirm="Retry this job using its retained dependency inputs?"
               class="btn btn-primary btn-sm"
             >Retry job</button>
-          </div>
-          <div
-            :if={map_size(@job.matrix_values) > 0}
-            id="matrix-values"
-            class="mt-3 flex flex-wrap gap-2"
-          >
-            <span
-              :for={{axis, value} <- Enum.sort(@job.matrix_values)}
-              class="badge badge-outline font-mono"
-            >{axis}={value}</span>
-          </div>
-        </header>
+          </:actions>
+        </.page_header>
+        <div
+          :if={map_size(@job.matrix_values) > 0}
+          id="matrix-values"
+          class="mt-3 flex flex-wrap gap-2"
+        >
+          <span
+            :for={{axis, value} <- Enum.sort(@job.matrix_values)}
+            class="badge badge-outline font-mono"
+          >{axis}={value}</span>
+        </div>
         <div
           :if={map_size(@pipeline.inputs) > 0}
           id="manual-inputs"
@@ -426,7 +430,7 @@ defmodule RobineWeb.JobLive.Show do
             Rerun dependencies
           </button>
         </div>
-        <div class="rounded-3xl border border-base-300 bg-neutral p-6 text-neutral-content">
+        <div class="rounded-2xl border border-base-300 bg-neutral p-6 text-neutral-content">
           <div class="flex items-center justify-between">
             <h2 class="font-semibold">Local reproduction</h2><span class="badge badge-outline">Docker</span>
           </div>
@@ -437,7 +441,7 @@ defmodule RobineWeb.JobLive.Show do
         </div>
         <div
           :if={@log_chunks == []}
-          class="rounded-3xl border border-dashed border-base-300 p-10 text-center"
+          class="rounded-2xl border border-dashed border-base-300 p-10 text-center"
         >
           <span
             :if={@job.status in [:preparing, :running]}
