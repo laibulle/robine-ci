@@ -102,12 +102,37 @@ defmodule RobineWeb.RepositoryLiveTest do
     assert {:ok, index, html} = live(conn, ~p"/repositories")
     assert html =~ "acme/widget"
     assert has_element?(index, "#repository-#{repository.id}")
+    assert has_element?(index, "#repository-filters")
+    assert has_element?(index, "#repository-search")
+    assert has_element?(index, "#repository-provider-filter")
+    assert has_element?(index, "#repository-attention-filter")
+    assert has_element?(index, "#repository-sort")
+    assert has_element?(index, "#repository-#{repository.id} a[aria-label='Open acme/widget']")
+    assert has_element?(index, "#repository-#{repository.id}", "Health unchecked")
+
+    index
+    |> form("#repository-filters", filters: %{query: "missing-project"})
+    |> render_change()
+
+    assert assert_patch(index) == "/repositories?filters[query]=missing-project"
+    assert has_element?(index, "#repository-result-count", "0 repositories")
+    index |> element("#clear-repository-filters") |> render_click()
+    assert_patch(index, "/repositories")
 
     assert {:ok, show, html} = live(conn, ~p"/repositories/#{repository.id}")
     assert html =~ "No valid workflow has run yet"
     assert html =~ "Manage secrets"
     assert html =~ "Metadata read, Contents write, Checks write"
     assert has_element?(show, "#check-github-installation", "Check permissions")
+    assert has_element?(show, "#overview")
+    assert has_element?(show, "#recent-pipelines")
+    assert has_element?(show, "#run-workflow")
+    assert has_element?(show, "#scheduled-workflows")
+    assert has_element?(show, "#previous-workflows")
+    assert has_element?(show, "#all-repository-pipelines[href*='filters[repository]']")
+
+    show |> element("#check-github-installation") |> render_click()
+    assert has_element?(show, "#integration-last-checked time[datetime]")
 
     assert {:ok, secrets, html} = live(conn, ~p"/repositories/#{repository.id}/secrets")
     assert html =~ "write-only"
@@ -135,6 +160,7 @@ defmodule RobineWeb.RepositoryLiveTest do
     html = view |> element("#discover-github-repositories") |> render_click()
     assert html =~ "acme/discovered"
     assert html =~ "Installation 42"
+    assert has_element?(view, "#available-repository-73001 button[data-confirm]")
 
     html =
       view
@@ -242,6 +268,8 @@ defmodule RobineWeb.RepositoryLiveTest do
     assert has_element?(show, "#manual-input-environment-error[role='alert']")
 
     form_id = "manual-workflow-#{:erlang.phash2(".robine-ci/workflows/release.yml")}"
+    assert has_element?(show, "##{form_id}[data-confirm]")
+    assert has_element?(show, "#manual-input-environment option[value=''][disabled]", "Select…")
 
     show
     |> form("##{form_id}", %{
@@ -257,12 +285,17 @@ defmodule RobineWeb.RepositoryLiveTest do
     assert_redirect(show, ~p"/pipelines/#{pipeline.id}")
     assert pipeline.commit_sha == String.duplicate("c", 40)
     assert pipeline.trigger == "workflow_dispatch"
+    assert pipeline.source_ref == "feature/dogfood"
 
     assert pipeline.inputs == %{
              "environment" => "production",
              "version" => "2.4.0",
              "dry_run" => "false"
            }
+
+    assert {:ok, repository_show, _html} = live(conn, ~p"/repositories/#{repository.id}")
+    assert has_element?(repository_show, "#repository-pipeline-#{pipeline.id}", "feature/dogfood")
+    assert has_element?(repository_show, "#repository-pipeline-#{pipeline.id} time[datetime]")
 
     assert {:ok, pipeline_view, pipeline_html} = live(conn, ~p"/pipelines/#{pipeline.id}")
     assert has_element?(pipeline_view, "#manual-inputs")
@@ -282,6 +315,9 @@ defmodule RobineWeb.RepositoryLiveTest do
     schedule_html = schedule_show |> element("#discover-scheduled-workflows") |> render_click()
     assert schedule_html =~ String.duplicate("c", 40)
     assert schedule_html =~ "0 2 * * *"
+    assert schedule_html =~ "Every day at 02:00 UTC"
+    assert schedule_html =~ "Next:"
+    assert schedule_html =~ "Active"
     assert has_element?(schedule_show, "#schedule-workflow-head")
   end
 

@@ -79,6 +79,20 @@ defmodule Robine.Adapters.Persistence.Postgres.PipelineRepository do
   end
 
   @impl true
+  def list_recent_for_repository(repository_id, limit)
+      when is_binary(repository_id) and is_integer(limit) and limit > 0 do
+    pipelines =
+      Repo.all(
+        from pipeline in PipelineSchema,
+          where: pipeline.repository_id == ^repository_id,
+          order_by: [desc: pipeline.inserted_at],
+          limit: ^limit
+      )
+
+    {:ok, Enum.map(pipelines, &to_domain/1)}
+  end
+
+  @impl true
   def insert_revision(%WorkflowRevision{} = revision) do
     revision
     |> Map.from_struct()
@@ -104,6 +118,7 @@ defmodule Robine.Adapters.Persistence.Postgres.PipelineRepository do
       repository_id: schema.repository_id,
       workflow_name: schema.workflow_name,
       commit_sha: schema.commit_sha,
+      source_ref: schema.source_ref,
       trigger: schema.trigger,
       actor: schema.actor,
       correlation_id: schema.correlation_id,

@@ -185,6 +185,7 @@ defmodule Robine.Repositories.UseCases.ReconcileScheduledWorkflows do
                repository_id: repository.id,
                workflow_name: validated.workflow.name,
                commit_sha: head.sha,
+               source_ref: head.branch,
                trigger: :schedule,
                actor: context.actor.id,
                scheduled_for: slot,

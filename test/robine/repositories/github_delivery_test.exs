@@ -217,6 +217,7 @@ defmodule Robine.Repositories.GitHubDeliveryTest do
              id: ^pipeline_id,
              repository_id: ^repository_id,
              commit_sha: ^sha,
+             source_ref: "main",
              trigger: "push",
              actor: "github:octocat",
              correlation_id: "github-test"

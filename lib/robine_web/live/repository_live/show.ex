@@ -8,20 +8,21 @@ defmodule RobineWeb.RepositoryLive.Show do
            Repositories.list_repositories(%{}, socket.assigns.execution_context),
          repository when not is_nil(repository) <- Enum.find(repositories, &(&1.id == id)),
          {:ok, pipelines} <-
-           Pipelines.list_pipelines(%{limit: 100}, socket.assigns.execution_context) do
-      repository_pipelines = Enum.filter(pipelines, &(&1.repository_id == id))
-
-      workflows =
-        repository_pipelines |> Enum.map(& &1.workflow_name) |> Enum.uniq() |> Enum.sort()
+           Pipelines.list_pipelines(
+             %{repository_id: id, limit: 100},
+             socket.assigns.execution_context
+           ) do
+      workflows = pipelines |> Enum.map(& &1.workflow_name) |> Enum.uniq() |> Enum.sort()
 
       {:ok,
        assign(socket,
          repository: repository,
-         pipelines: repository_pipelines,
+         pipelines: pipelines,
          workflows: workflows,
          github_preflight: :not_run,
+         github_preflight_checked_at: nil,
          manual_state: :not_run,
-         manual_branch_form: to_form(%{"branch" => "main"}, as: :branch_lookup),
+         manual_branch_form: to_form(%{"branch" => ""}, as: :branch_lookup),
          manual_head: nil,
          manual_workflows: [],
          manual_request_ids: %{},
@@ -55,7 +56,11 @@ defmodule RobineWeb.RepositoryLive.Show do
          put_flash(socket, :error, "You do not have permission to check GitHub installations.")}
 
       result ->
-        {:noreply, assign(socket, github_preflight: result)}
+        {:noreply,
+         assign(socket,
+           github_preflight: result,
+           github_preflight_checked_at: DateTime.utc_now()
+         )}
     end
   end
 
@@ -72,7 +77,11 @@ defmodule RobineWeb.RepositoryLive.Show do
          put_flash(socket, :error, "You do not have permission to check provider access.")}
 
       result ->
-        {:noreply, assign(socket, github_preflight: result)}
+        {:noreply,
+         assign(socket,
+           github_preflight: result,
+           github_preflight_checked_at: DateTime.utc_now()
+         )}
     end
   end
 
@@ -148,7 +157,7 @@ defmodule RobineWeb.RepositoryLive.Show do
         {:noreply,
          assign(socket,
            manual_error:
-             "The workflow changed or the source-control provider is unavailable. Refresh and retry.",
+             "The branch head or workflow changed, or the provider is unavailable. Load workflows again, review the new immutable revision, then retry.",
            manual_input_errors: %{}
          )}
     end
@@ -190,25 +199,181 @@ defmodule RobineWeb.RepositoryLive.Show do
   defp provider_label(:gitlab), do: "GitLab"
   defp provider_label(:forgejo), do: "Forgejo"
 
+  defp active_status?(status), do: status in [:created, :queued, :running, :cancelling]
+
+  defp health_label(:not_run), do: "Health unchecked"
+  defp health_label({:ok, %{status: :ok}}), do: "Connected"
+  defp health_label({:ok, %{status: :degraded}}), do: "Degraded"
+  defp health_label({:error, _reason}), do: "Unavailable"
+
+  defp duration_label(%{started_at: nil}), do: "Not started"
+
+  defp duration_label(%{started_at: started_at, finished_at: finished_at}) do
+    seconds = max(DateTime.diff(finished_at || DateTime.utc_now(), started_at, :second), 0)
+
+    cond do
+      seconds < 60 -> "#{seconds}s"
+      seconds < 3_600 -> "#{div(seconds, 60)}m #{rem(seconds, 60)}s"
+      true -> "#{div(seconds, 3_600)}h #{seconds |> rem(3_600) |> div(60)}m"
+    end
+  end
+
+  defp relative_time(datetime) do
+    seconds = DateTime.diff(DateTime.utc_now(), datetime, :second)
+    past? = seconds >= 0
+    seconds = abs(seconds)
+
+    value =
+      cond do
+        seconds < 60 -> "less than a minute"
+        seconds < 3_600 -> "#{div(seconds, 60)}m"
+        seconds < 86_400 -> "#{div(seconds, 3_600)}h"
+        true -> "#{div(seconds, 86_400)}d"
+      end
+
+    if past?, do: "#{value} ago", else: "in #{value}"
+  end
+
+  defp schedule_description(cron) do
+    case String.split(cron) do
+      [minute, hour, "*", "*", "*"] ->
+        "Every day at #{pad(hour)}:#{pad(minute)} UTC"
+
+      [minute, hour, "*", "*", weekday] ->
+        "Every #{weekday_name(weekday)} at #{pad(hour)}:#{pad(minute)} UTC"
+
+      [minute, hour, day, "*", "*"] ->
+        "Every month on day #{day} at #{pad(hour)}:#{pad(minute)} UTC"
+
+      ["*/" <> interval, "*", "*", "*", "*"] ->
+        "Every #{interval} minutes"
+
+      _ ->
+        "Custom UTC schedule"
+    end
+  end
+
+  defp pad(value), do: String.pad_leading(value, 2, "0")
+
+  defp weekday_name(value) do
+    Map.get(
+      %{
+        "0" => "Sunday",
+        "1" => "Monday",
+        "2" => "Tuesday",
+        "3" => "Wednesday",
+        "4" => "Thursday",
+        "5" => "Friday",
+        "6" => "Saturday"
+      },
+      value,
+      "weekday #{value}"
+    )
+  end
+
+  defp next_occurrence(cron) do
+    alias Robine.Workflows.Domain.CronExpression
+
+    with {:ok, expression} <- CronExpression.parse(cron) do
+      now = DateTime.utc_now() |> DateTime.truncate(:second)
+      first = DateTime.add(now, 60 - now.second, :second)
+
+      Enum.find_value(0..46_080, fn offset ->
+        candidate = DateTime.add(first, offset, :minute)
+        if CronExpression.matches?(expression, candidate), do: candidate
+      end)
+    else
+      _error -> nil
+    end
+  end
+
+  defp latest_scheduled_pipeline(pipelines, workflow_name) do
+    Enum.find(pipelines, &(&1.workflow_name == workflow_name and &1.trigger == "schedule"))
+  end
+
   @impl true
   def render(assigns) do
     ~H"""
     <Layouts.app flash={@flash} current_actor={@current_actor}>
       <section class="space-y-8">
-        <header>
-          <.link navigate={~p"/repositories"} class="link text-sm">← Repositories</.link><div class="mt-4 flex flex-wrap items-center gap-3">
-            <h1 class="text-4xl font-bold">{@repository.full_name}</h1><span class="badge badge-success">Trusted</span>
-          </div><div :if={@current_actor.role in [:administrator, :maintainer]} class="mt-5">
-            <.link
-              navigate={~p"/repositories/#{@repository.id}/secrets"}
-              class="btn btn-outline btn-sm"
-            >Manage secrets</.link>
+        <header class="border-b border-base-300/70 pb-7">
+          <.link
+            navigate={~p"/repositories"}
+            class="text-sm font-semibold text-base-content/55 hover:text-primary"
+          >
+            <.icon name="hero-arrow-left" class="mr-1 inline size-4" /> Repositories
+          </.link>
+          <div class="mt-4 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
+            <div class="min-w-0">
+              <div class="flex flex-wrap items-center gap-2">
+                <span class="badge badge-outline badge-sm">{provider_label(@repository.provider)}</span>
+                <span class="badge badge-success badge-sm">Trusted</span>
+                <span class="badge badge-ghost badge-sm">{health_label(@github_preflight)}</span>
+              </div>
+              <h1 class="mt-3 break-words text-4xl font-bold">{@repository.full_name}</h1>
+              <p class="mt-2 text-sm text-base-content/50">
+                Instance {@repository.provider_instance}
+              </p>
+            </div>
+            <div class="flex flex-wrap gap-2">
+              <a href="#run-workflow" class="btn btn-primary btn-sm">Run workflow</a>
+              <.link
+                :if={@current_actor.role in [:administrator, :maintainer]}
+                navigate={~p"/repositories/#{@repository.id}/secrets"}
+                class="btn btn-outline btn-sm"
+              >Manage secrets</.link>
+            </div>
           </div>
+          <nav class="mt-6 flex gap-1 overflow-x-auto pb-1" aria-label="Repository sections">
+            <a href="#overview" class="btn btn-ghost btn-sm">Overview</a>
+            <a href="#recent-pipelines" class="btn btn-ghost btn-sm">Pipelines</a>
+            <a href="#run-workflow" class="btn btn-ghost btn-sm">Manual run</a>
+            <a href="#scheduled-workflows" class="btn btn-ghost btn-sm">Schedules</a>
+            <a href="#previous-workflows" class="btn btn-ghost btn-sm">Workflows</a>
+          </nav>
         </header>
-        <section class="rounded-3xl border border-base-300 bg-base-100 p-6">
+
+        <section id="overview" class="scroll-mt-8" aria-labelledby="overview-title">
+          <h2 id="overview-title" class="sr-only">Repository overview</h2>
+          <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            <.repository_stat
+              label="Latest pipeline"
+              value={
+                if(List.first(@pipelines),
+                  do: to_string(List.first(@pipelines).status),
+                  else: "No runs"
+                )
+              }
+              icon="hero-bolt"
+            />
+            <.repository_stat
+              label="Active pipelines"
+              value={Enum.count(@pipelines, &active_status?(&1.status))}
+              icon="hero-play"
+            />
+            <.repository_stat
+              label="Previously run workflows"
+              value={length(@workflows)}
+              icon="hero-command-line"
+            />
+            <.repository_stat
+              label="Last activity"
+              value={
+                if(List.first(@pipelines),
+                  do: relative_time(List.first(@pipelines).inserted_at),
+                  else: "Never"
+                )
+              }
+              icon="hero-clock"
+            />
+          </div>
+        </section>
+
+        <.repository_pipelines repository={@repository} pipelines={@pipelines} />
+        <section class="surface-panel rounded-2xl p-5 sm:p-6" aria-labelledby="integration-title">
           <div class="flex flex-wrap items-start justify-between gap-4">
             <div>
-              <h2 class="text-xl font-semibold">
+              <h2 id="integration-title" class="text-xl font-semibold">
                 {provider_label(@repository.provider)} integration
               </h2>
               <p class="mt-1 text-sm text-base-content/60">
@@ -240,7 +405,7 @@ defmodule RobineWeb.RepositoryLive.Show do
             >Check connection</button>
           </div>
           <p :if={@github_preflight == :not_run} class="mt-4 text-sm text-base-content/60">
-            Permission preflight has not run in this session.
+            Health has not been checked in this browser session. Trust remains enabled independently.
           </p>
           <div
             :if={match?({:ok, %{status: :ok}}, @github_preflight)}
@@ -268,11 +433,27 @@ defmodule RobineWeb.RepositoryLive.Show do
           >
             {provider_label(@repository.provider)} could not verify this repository. Check credentials, connectivity, and provider access.
           </div>
+          <p
+            :if={@github_preflight_checked_at}
+            id="integration-last-checked"
+            class="mt-3 text-xs text-base-content/45"
+          >
+            Last checked
+            <time
+              datetime={DateTime.to_iso8601(@github_preflight_checked_at)}
+              title={Calendar.strftime(@github_preflight_checked_at, "%Y-%m-%d %H:%M:%S UTC")}
+            >{relative_time(@github_preflight_checked_at)}</time>
+            in this session.
+          </p>
         </section>
-        <section class="rounded-3xl border border-base-300 bg-base-100 p-6">
+        <section
+          id="run-workflow"
+          class="surface-panel scroll-mt-8 rounded-2xl p-5 sm:p-6"
+          aria-labelledby="run-workflow-title"
+        >
           <div class="flex flex-wrap items-start justify-between gap-4">
             <div>
-              <h2 class="text-xl font-semibold">Run a workflow</h2>
+              <h2 id="run-workflow-title" class="text-xl font-semibold">Run a workflow</h2>
               <p class="mt-1 text-sm text-base-content/60">
                 Choose a branch. Robine resolves its current head to an immutable commit before launch.
               </p>
@@ -283,7 +464,11 @@ defmodule RobineWeb.RepositoryLive.Show do
               phx-submit="discover-manual-workflows"
               class="flex items-end gap-2"
             >
-              <.input field={@manual_branch_form[:branch]} label="Branch" required placeholder="main" />
+              <.input
+                field={@manual_branch_form[:branch]}
+                label="Branch"
+                placeholder="Default branch"
+              />
               <button
                 id="discover-manual-workflows"
                 phx-disable-with="Loading…"
@@ -320,6 +505,7 @@ defmodule RobineWeb.RepositoryLive.Show do
               id={manual_form_id(workflow.path)}
               phx-submit="launch-manual-workflow"
               class="rounded-2xl border border-base-300 p-5"
+              data-confirm={"Run #{workflow.name} from #{@manual_head.branch} at #{String.slice(@manual_head.commit_sha, 0, 8)}? Review all inputs before continuing."}
             >
               <input type="hidden" name="workflow_path" value={workflow.path} />
               <input type="hidden" name="branch" value={@manual_head.branch} />
@@ -328,7 +514,7 @@ defmodule RobineWeb.RepositoryLive.Show do
               <code class="mt-1 block break-all text-xs text-base-content/55">{workflow.path}</code>
               <div class="mt-5 space-y-4">
                 <div :for={{id, input} <- Enum.sort(workflow.inputs)}>
-                  <label class="form-control w-full">
+                  <label for={"manual-input-#{id}"} class="form-control w-full">
                     <span class="label-text font-medium">
                       {id}{if input.required, do: " · required", else: ""}
                     </span>
@@ -337,10 +523,15 @@ defmodule RobineWeb.RepositoryLive.Show do
                     </span>
                     <select
                       :if={input.type in [:choice, :boolean]}
+                      id={"manual-input-#{id}"}
                       name={"inputs[#{id}]"}
                       required={input.required}
+                      aria-describedby={@manual_input_errors[id] && "manual-input-#{id}-error"}
                       class="select select-bordered w-full"
                     >
+                      <option :if={input.required && is_nil(input.default)} value="" selected disabled>
+                        Select…
+                      </option>
                       <option
                         :for={value <- input.options || ["false", "true"]}
                         value={value}
@@ -351,12 +542,14 @@ defmodule RobineWeb.RepositoryLive.Show do
                     </select>
                     <input
                       :if={input.type == :string}
+                      id={"manual-input-#{id}"}
                       type="text"
                       name={"inputs[#{id}]"}
                       value={input.default || ""}
                       required={input.required}
                       maxlength="1024"
                       autocomplete="off"
+                      aria-describedby={@manual_input_errors[id] && "manual-input-#{id}-error"}
                       class="input input-bordered w-full"
                     />
                   </label>
@@ -370,7 +563,10 @@ defmodule RobineWeb.RepositoryLive.Show do
                   </p>
                 </div>
               </div>
-              <p class="mt-4 text-xs text-warning">Do not enter passwords or tokens.</p>
+              <p class="mt-4 flex items-center gap-1 text-xs font-semibold text-warning">
+                <.icon name="hero-shield-exclamation" class="size-3.5" />
+                Do not enter passwords or tokens.
+              </p>
               <button
                 :if={@current_actor.role in [:administrator, :maintainer]}
                 type="submit"
@@ -383,10 +579,16 @@ defmodule RobineWeb.RepositoryLive.Show do
             </form>
           </div>
         </section>
-        <section class="rounded-3xl border border-base-300 bg-base-100 p-6">
+        <section
+          id="scheduled-workflows"
+          class="surface-panel scroll-mt-8 rounded-2xl p-5 sm:p-6"
+          aria-labelledby="scheduled-workflows-title"
+        >
           <div class="flex flex-wrap items-start justify-between gap-4">
             <div>
-              <h2 class="text-xl font-semibold">Scheduled workflows</h2>
+              <h2 id="scheduled-workflows-title" class="text-xl font-semibold">
+                Scheduled workflows
+              </h2>
               <p class="mt-1 text-sm text-base-content/60">
                 Cron expressions use UTC. Discovery reads one immutable default-branch revision.
               </p>
@@ -425,55 +627,144 @@ defmodule RobineWeb.RepositoryLive.Show do
             >
               <p class="font-semibold">{workflow.name}</p>
               <code class="mt-1 block break-all text-xs text-base-content/55">{workflow.path}</code>
+              <div class="mt-3 flex flex-wrap items-center gap-2 text-xs">
+                <span class="badge badge-success badge-sm">Active</span>
+                <%= if latest = latest_scheduled_pipeline(@pipelines, workflow.name) do %>
+                  <.status_badge status={latest.status} size="sm" />
+                  <span class="text-base-content/50">Last run {relative_time(latest.inserted_at)}</span>
+                <% else %>
+                  <span class="text-base-content/50">No scheduled run retained</span>
+                <% end %>
+              </div>
               <ul class="mt-4 space-y-2" aria-label={"Schedules for #{workflow.name}"}>
                 <li
                   :for={cron <- workflow.schedules}
-                  class="rounded-xl bg-base-200 px-3 py-2 font-mono text-sm"
+                  class="rounded-xl bg-base-200 px-3 py-3"
                 >
-                  {cron} <span class="font-sans text-xs text-base-content/55">UTC</span>
+                  <p class="text-sm font-semibold">{schedule_description(cron)}</p>
+                  <p class="mt-1 text-xs text-base-content/55">
+                    <%= if next = next_occurrence(cron) do %>
+                      Next:
+                      <time
+                        datetime={DateTime.to_iso8601(next)}
+                        title={Calendar.strftime(next, "%Y-%m-%d %H:%M UTC")}
+                      >{relative_time(next)}</time>
+                    <% else %>
+                      Next occurrence is outside the 32-day preview window.
+                    <% end %>
+                  </p>
+                  <code class="mt-2 block text-xs">{cron} UTC</code>
                 </li>
               </ul>
             </li>
           </ul>
         </section>
-        <div class="grid gap-6 lg:grid-cols-2">
-          <section>
-            <h2 class="text-xl font-semibold">Workflows</h2><div
-              :if={@workflows == []}
-              class="mt-4 rounded-2xl border border-dashed border-base-300 p-8 text-center text-base-content/60"
+        <section
+          id="previous-workflows"
+          class="scroll-mt-8"
+          aria-labelledby="previous-workflows-title"
+        >
+          <h2 id="previous-workflows-title" class="text-xl font-semibold">
+            Previously run workflows
+          </h2><div
+            :if={@workflows == []}
+            class="mt-4 rounded-2xl border border-dashed border-base-300 p-8 text-center text-base-content/60"
+          >
+            No valid workflow has run yet. This reflects execution history, not every workflow currently present in the repository.
+          </div><ul :if={@workflows != []} class="mt-4 space-y-3">
+            <li
+              :for={workflow <- @workflows}
+              class="rounded-2xl border border-base-300 p-5 font-semibold"
             >
-              No valid workflow has run yet.
-            </div><ul :if={@workflows != []} class="mt-4 space-y-3">
-              <li
-                :for={workflow <- @workflows}
-                class="rounded-2xl border border-base-300 p-5 font-semibold"
-              >
-                {workflow}
-              </li>
-            </ul>
-          </section><section>
-            <h2 class="text-xl font-semibold">Recent pipelines</h2><div
-              :if={@pipelines == []}
-              class="mt-4 rounded-2xl border border-dashed border-base-300 p-8 text-center text-base-content/60"
-            >
-              Waiting for a matching push or pull request.
-            </div><ul class="mt-4 space-y-3">
-              <li
-                :for={pipeline <- Enum.take(@pipelines, 10)}
-                class="rounded-2xl border border-base-300 p-5"
-              >
-                <div class="flex justify-between gap-4">
-                  <.link
-                    navigate={~p"/pipelines/#{pipeline.id}"}
-                    class="font-semibold link link-hover"
-                  >{pipeline.workflow_name}</.link><.status_badge status={pipeline.status} />
-                </div><code class="mt-2 block text-xs">{String.slice(pipeline.commit_sha, 0, 12)}</code>
-              </li>
-            </ul>
-          </section>
-        </div>
+              {workflow}
+            </li>
+          </ul>
+        </section>
       </section>
     </Layouts.app>
+    """
+  end
+
+  attr :label, :string, required: true
+  attr :value, :any, required: true
+  attr :icon, :string, required: true
+
+  defp repository_stat(assigns) do
+    ~H"""
+    <div class="surface-panel rounded-2xl p-4">
+      <div class="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-base-content/40">
+        <.icon name={@icon} class="size-4 text-primary" />{@label}
+      </div>
+      <p class="mt-3 truncate text-xl font-bold capitalize">{@value}</p>
+    </div>
+    """
+  end
+
+  attr :repository, :map, required: true
+  attr :pipelines, :list, required: true
+
+  defp repository_pipelines(assigns) do
+    ~H"""
+    <section
+      id="recent-pipelines"
+      class="scroll-mt-8 space-y-4"
+      aria-labelledby="recent-pipelines-title"
+    >
+      <div class="flex flex-wrap items-end justify-between gap-3 border-b border-base-300/70 pb-3">
+        <div>
+          <p class="text-[0.68rem] font-bold uppercase tracking-[0.16em] text-primary">
+            Project activity
+          </p>
+          <h2 id="recent-pipelines-title" class="mt-1 text-2xl font-bold">Recent pipelines</h2>
+        </div>
+        <.link
+          navigate={~p"/pipelines?#{%{"filters" => %{"repository" => @repository.id}}}"}
+          id="all-repository-pipelines"
+          class="btn btn-outline btn-sm"
+        >View all</.link>
+      </div>
+      <.ui_state :if={@pipelines == []} kind={:empty} title="No pipeline has run yet" class="p-8">
+        Push a matching commit or run a manually enabled workflow.
+      </.ui_state>
+      <div :if={@pipelines != []} id="repository-pipelines" class="grid gap-2">
+        <article
+          :for={pipeline <- Enum.take(@pipelines, 10)}
+          id={"repository-pipeline-#{pipeline.id}"}
+          class="surface-panel group relative grid gap-3 rounded-xl p-4 transition hover:border-primary/35 focus-within:outline-3 focus-within:outline-offset-2 focus-within:outline-primary sm:grid-cols-[minmax(0,1.3fr)_minmax(10rem,0.8fr)_auto] sm:items-center"
+        >
+          <div class="min-w-0">
+            <div class="flex flex-wrap items-center gap-2">
+              <.status_badge status={pipeline.status} size="sm" />
+              <.link
+                navigate={~p"/pipelines/#{pipeline.id}"}
+                class="truncate font-bold after:absolute after:inset-0 group-hover:text-primary"
+              >{pipeline.workflow_name}</.link>
+            </div>
+            <.link
+              :if={pipeline.failure_job}
+              navigate={~p"/pipelines/#{pipeline.id}/jobs/#{pipeline.failure_job.id}"}
+              class="relative z-10 mt-2 inline-flex items-center gap-1 text-xs font-bold text-error hover:underline"
+            ><.icon name="hero-exclamation-triangle" class="size-3.5" />Failed in {pipeline.failure_job.job_key}</.link>
+          </div>
+          <div class="text-xs text-base-content/50">
+            <p class="truncate font-semibold text-base-content/70">
+              {pipeline.source_ref || pipeline.trigger}
+            </p>
+            <p class="mt-1">
+              <code>{String.slice(pipeline.commit_sha, 0, 8)}</code> · {pipeline.actor}
+            </p>
+          </div>
+          <div class="flex justify-between gap-4 border-t border-base-300/60 pt-2 text-xs sm:block sm:border-0 sm:pt-0 sm:text-right">
+            <span class="font-bold">{duration_label(pipeline)}</span>
+            <time
+              datetime={DateTime.to_iso8601(pipeline.inserted_at)}
+              title={Calendar.strftime(pipeline.inserted_at, "%Y-%m-%d %H:%M:%S UTC")}
+              class="block text-base-content/45"
+            >{relative_time(pipeline.inserted_at)}</time>
+          </div>
+        </article>
+      </div>
+    </section>
     """
   end
 end

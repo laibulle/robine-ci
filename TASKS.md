@@ -321,6 +321,8 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - [x] Implement authorized cancellation and job retry with confirmation.
 - [x] Show copyable local reproduction commands and omitted CI-only inputs.
 - [x] Preserve stable deep links across state changes.
+- [x] Upgrade pipeline history to the WEB-001 operational cockpit with URL-persisted filters, attention prioritization, compact responsive rows, source context, durations, and explicit refresh health.
+- [x] Upgrade repository catalogue and detail to the WEB-001 operational experience with scoped activity, health/trust distinction, progressive connection, safe manual launch, and schedule context.
 
 ### WEB-103 — Implement scalable live logs
 

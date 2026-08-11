@@ -51,6 +51,7 @@ defmodule Robine.Pipelines.UseCases.CreatePipeline do
       Map.get(input, :repository_id),
       Map.get(input, :workflow_name),
       Map.get(input, :commit_sha),
+      Map.get(input, :source_ref),
       input |> Map.get(:trigger, :manual) |> to_string(),
       Map.get(input, :inputs, %{}),
       Map.get(input, :scheduled_for)
@@ -60,6 +61,7 @@ defmodule Robine.Pipelines.UseCases.CreatePipeline do
       existing.repository_id,
       existing.workflow_name,
       existing.commit_sha,
+      existing.source_ref,
       to_string(existing.trigger),
       existing.inputs,
       existing.scheduled_for
