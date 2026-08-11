@@ -25,8 +25,9 @@ Keep clear space around the mark and do not place it inside an additional colore
 
 Robine should feel calm and cared for, not clinical. Warm paper neutrals, deep petroleum surfaces, restrained
 teal, and one mineral amber accent create recognition without weakening the operational signal hierarchy.
-The diagonal cut from the `R` may appear as a small eyebrow glyph or faint corner line, never as a repeated
-decorative pattern.
+The diagonal cut from the `R` may appear as a faint structural corner line, never as a standalone glyph or
+repeated decorative pattern. Small navigation and eyebrow indicators stay monochrome so they never compete
+with the logo.
 
 Product language is precise but human. Prefer short phrases such as “The workshop”, “Inside the run”, and
 “The engine room” when they add orientation. Avoid mascot language, jokes during failures, or copy that makes
@@ -34,4 +35,4 @@ serious infrastructure states feel frivolous.
 
 The desktop sidebar is Robine's control column. It combines the brand lockup, contextual destinations,
 provenance, and account controls in that order. Navigation labels may include one short operational description;
-the active destination uses the teal/amber diagonal signal instead of a generic solid selection bar.
+the active destination uses a simple teal status dot rather than introducing another brand symbol.

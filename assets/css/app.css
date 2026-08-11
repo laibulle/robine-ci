@@ -260,12 +260,12 @@
   }
 
   .app-nav-signal {
-    width: 0.45rem;
-    height: 0.45rem;
+    width: 0.42rem;
+    height: 0.42rem;
     flex: none;
-    background: linear-gradient(135deg, var(--color-primary) 0 52%, var(--color-accent) 52% 100%);
-    clip-path: polygon(0 0, 100% 0, 52% 100%, 0 48%);
-    transform: rotate(-8deg);
+    border-radius: 999px;
+    background: var(--color-primary);
+    box-shadow: 0 0 0 3px color-mix(in oklab, var(--color-primary) 12%, transparent);
   }
 
   .sidebar-meta-link {
@@ -331,11 +331,10 @@
 
   .page-eyebrow::before {
     content: "";
-    width: 0.85rem;
-    height: 0.85rem;
-    background: linear-gradient(135deg, var(--color-primary) 0 52%, var(--color-accent) 52% 100%);
-    clip-path: polygon(0 0, 100% 0, 52% 100%, 0 48%);
-    transform: rotate(-8deg);
+    width: 1.15rem;
+    height: 2px;
+    border-radius: 999px;
+    background: var(--color-primary);
   }
 
   .product-page-header {

@@ -83,7 +83,7 @@ A developer diagnosing a build and an operator configuring repositories, identit
 - **UX-15:** Administration MUST separate overview, runners, source control, security, and users into URL-addressable work areas instead of rendering one continuous control surface.
 - **UX-16:** Destructive controls MUST be confirmed and visually separated from routine actions. Product surfaces MUST use the shared radius hierarchy: panel, list item, then control.
 - **UX-17:** Robine MUST retain a recognizable but restrained product character through warm neutral surfaces, petroleum dark surfaces, teal and mineral-amber accents, the diagonal geometry of the `R`, and precise human microcopy. The husky reference MUST remain confined to the logo's negative space.
-- **UX-18:** The desktop sidebar MUST act as a Robine control column with a clear brand lockup, contextual destination descriptions, a brand-specific active signal, low-emphasis provenance, and a distinct account area.
+- **UX-18:** The desktop sidebar MUST act as a Robine control column with a clear brand lockup, contextual destination descriptions, a simple monochrome active signal, low-emphasis provenance, and a distinct account area.
 
 ### Operational requirements
 
