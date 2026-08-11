@@ -5,7 +5,7 @@
 - **State:** Shipped
 - **Owner:** Execution
 - **Target:** MVP
-- **Last updated:** 2026-08-09
+- **Last updated:** 2026-08-10
 
 ## Summary
 
@@ -62,6 +62,8 @@ A developer running tests for a trusted repository and an operator sharing one D
 
 - **UX-1:** Image pull, container creation, checkout, command execution, cancellation, and cleanup MUST appear as distinct phases.
 - **UX-2:** Failures MUST state whether they came from the command, image pull, Docker daemon, timeout, cancellation, or cleanup.
+- **UX-3:** When the job container stops unexpectedly, the retained log MUST include its Docker status, exit code, OOM-killed flag, daemon error, and finish time captured before cleanup.
+- **UX-4:** Active log views MUST retain at most 50 recent segments and follow new cursor pages without displacing a developer who scrolled away from the tail. Terminal log views MUST stop polling, freeze durations, and expose the complete retained log through an independently streamed, non-LiveView reader with stable scrolling and no segment truncation.
 
 ### Operational requirements
 
@@ -91,6 +93,7 @@ The local CLI calls the same execution library and constructs the same normalize
 | Image pull fails | Attempt fails as infrastructure/image error | Fix image or registry access and retry |
 | Configured shell is absent | Preparation fails with `shell_unavailable`; no user step starts | Select `/bin/sh`, `/bin/bash`, or an image containing the configured shell |
 | Docker daemon disappears | Attempt is marked runner-lost after reconciliation | Restore Docker and retry |
+| Job container exits unexpectedly | Attempt fails as `system_failure`; its final Docker state is appended to the step log before cleanup | Use the exit code, OOM flag, and daemon error to adjust resources or repair the runner |
 | Command exceeds timeout | Process and container are terminated | Increase timeout or optimize command |
 | Cleanup partially fails | Result is retained with cleanup warning | Background reconciler retries cleanup |
 | Host disk is low | No new job is accepted | Free disk or adjust storage policy |

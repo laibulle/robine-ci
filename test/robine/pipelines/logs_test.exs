@@ -61,6 +61,16 @@ defmodule Robine.Pipelines.LogsTest do
     assert Enum.all?(first.chunks ++ second.chunks, &(&1.stream == "combined"))
     assert Enum.map_join(first.chunks ++ second.chunks, & &1.content) == output
 
+    assert {:ok, latest} =
+             Pipelines.list_job_logs(
+               %{job_id: attempt.job_id, latest: true, limit: 1},
+               context
+             )
+
+    assert [latest_chunk] = latest.chunks
+    assert latest_chunk.sequence == second.next_cursor
+    assert String.ends_with?(latest_chunk.content, "finished\n")
+
     assert {:ok, %{attempt: %{id: attempt_id}, job: %{id: job_id}}} =
              Pipelines.job_detail(%{job_id: attempt.job_id}, context)
 

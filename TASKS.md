@@ -166,6 +166,7 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - [x] Give development self-hosted jobs a 16 GiB memory ceiling while retaining the 4 GiB production default.
 - [x] Surface disk-pressure admission separately from runner-label placement and use environment-appropriate development/test thresholds.
 - [x] Reconcile labeled orphan containers and volumes after restart.
+- [x] Capture stopped-container exit state, including OOM status, in retained logs before cleanup.
 
 ### EXEC-103 — Connect scheduler to local runner
 
@@ -330,6 +331,7 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - [x] Group persisted logs explicitly by runner phase and step with accessible expand/collapse, bounded search, and stable phase/step/segment deep links.
 - [x] Sanitize ANSI output before HTML rendering.
 - [x] Avoid loading complete logs into a LiveView process or browser DOM.
+- [x] Stop terminal-job log polling and render the complete retained output in an independently streamed reader with stable scrolling.
 - [x] Pass an exact 100 MB bounded navigation test and automated semantic accessibility smoke checks for core journeys.
 
 ## Phase 8 — MVP hardening and release

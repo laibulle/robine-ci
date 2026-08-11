@@ -918,10 +918,22 @@ defmodule Robine.Adapters.Execution.DockerRunner do
       {:error, %{exit_code: exit_code, output: output, chunk_count: chunk_count}} ->
         duration = System.monotonic_time(:millisecond) - started
 
-        _ =
-          emit_terminal(on_output, step, position, chunk_count + 1, :failed, exit_code, duration)
+        {status, reported_exit_code, diagnostic, reason} =
+          command_failure(resource, exit_code, output, Map.values(specification.secrets))
 
-        {:failed, step_result(step, :failed, exit_code, output, started, []), :command_failed}
+        _ =
+          emit_terminal(
+            on_output,
+            step,
+            position,
+            chunk_count + 1,
+            status,
+            reported_exit_code,
+            duration,
+            diagnostic
+          )
+
+        {:failed, step_result(step, :failed, reported_exit_code, diagnostic, started, []), reason}
 
       {:error, reason} ->
         {:error, reason}
@@ -1414,6 +1426,75 @@ defmodule Robine.Adapters.Execution.DockerRunner do
     do:
       {:error,
        %{exit_code: exit_status, output: rendered_output(state), chunk_count: state.chunk_count}}
+
+  defp command_failure(resource, exit_code, output, secret_values) do
+    case container_state(resource) do
+      {:ok, %{"Running" => false} = state} ->
+        diagnostic =
+          [output, container_state_diagnostic(state)]
+          |> Enum.reject(&(&1 in [nil, ""]))
+          |> Enum.join("\n")
+          |> redact_and_truncate(secret_values)
+
+        {:failed, container_exit_code(state, exit_code), diagnostic, :system_failure}
+
+      {:ok, _running_state} ->
+        {:failed, exit_code, output, :command_failed}
+
+      {:error, inspect_error} ->
+        if docker_runtime_failure_output?(output) do
+          diagnostic =
+            redact_and_truncate(
+              output <> "\nContainer state unavailable before cleanup: " <> inspect_error,
+              secret_values
+            )
+
+          {:failed, exit_code, diagnostic, :system_failure}
+        else
+          {:failed, exit_code, output, :command_failed}
+        end
+    end
+  end
+
+  defp container_state(resource) do
+    case docker(["inspect", "--format", "{{json .State}}", resource], 5_000) do
+      {:ok, output} -> Jason.decode(String.trim(output))
+      {:error, %{output: output}} -> {:error, String.trim(output)}
+    end
+  end
+
+  @doc false
+  def container_state_diagnostic(state) when is_map(state) do
+    status = Map.get(state, "Status", "unknown")
+    exit_code = Map.get(state, "ExitCode", "unknown")
+    oom_killed = Map.get(state, "OOMKilled", false)
+    error = blank_as_none(Map.get(state, "Error"))
+    finished_at = blank_as_none(Map.get(state, "FinishedAt"))
+
+    "Container stopped unexpectedly: status=#{status}, exit_code=#{exit_code}, " <>
+      "oom_killed=#{oom_killed}, error=#{error}, finished_at=#{finished_at}"
+  end
+
+  defp container_exit_code(%{"ExitCode" => exit_code}, _fallback)
+       when is_integer(exit_code) and exit_code >= 0,
+       do: exit_code
+
+  defp container_exit_code(_state, fallback), do: fallback
+
+  defp blank_as_none(value) when value in [nil, ""], do: "none"
+  defp blank_as_none(value), do: value
+
+  defp docker_runtime_failure_output?(output) do
+    Enum.any?(
+      [
+        "is not running",
+        "No such container",
+        "Cannot connect to the Docker daemon",
+        "Error response from daemon"
+      ],
+      &String.contains?(output, &1)
+    )
+  end
 
   defp stop_stream(task, process) do
     _ =
