@@ -5,27 +5,25 @@ defmodule Robine.Adapters.Background.RunNextJobWorker do
   alias Robine.Execution
   alias Robine.Adapters.Runner.RemoteJobOffer
   alias Robine.Adapters.Background.RunnerControl
+  alias Robine.Adapters.Background.TenantJob
   alias Robine.Observability.Log
   alias Robine.Pipelines
   alias Robine.Repositories
   alias Robine.Runners
   alias Robine.Runtime.Dependencies
+  alias Robine.Runtime.Events
   alias Robine.Storage
 
   @impl Oban.Worker
-  def perform(%Oban.Job{}) do
-    context =
-      Dependencies.context(
-        %{id: "system:local-runner", role: :administrator},
-        "local-runner:#{Ecto.UUID.generate()}"
-      )
-
+  def perform(%Oban.Job{} = job) do
     runner_control = Application.fetch_env!(:robine, :runner_control)
 
-    case dispatch_remote(context, runner_control) do
-      :local -> claim_local(context, runner_control)
-      result -> result
-    end
+    TenantJob.run(job, __MODULE__, "local-runner:#{Ecto.UUID.generate()}", fn context ->
+      case dispatch_remote(context, runner_control) do
+        :local -> claim_local(context, runner_control)
+        result -> result
+      end
+    end)
   end
 
   defp claim_local(context, runner_control) do
@@ -67,17 +65,9 @@ defmodule Robine.Adapters.Background.RunNextJobWorker do
              context
            ),
          runner_context =
-           Dependencies.context(
-             %{id: runner.id, role: :runner},
-             "attempt:#{attempt.id}"
-           ),
+           Dependencies.runner_context(context.tenant_id, runner.id, "attempt:#{attempt.id}"),
          {:ok, offer} <- RemoteJobOffer.build(attempt.id, runner_context),
-         :ok <-
-           Phoenix.PubSub.broadcast(
-             Robine.PubSub,
-             "runner:#{runner.id}",
-             {:job_offer, offer}
-           ) do
+         :ok <- Events.broadcast("runner:#{runner.id}", {:job_offer, offer}) do
       :ok
     else
       {:error, :none} -> :local
@@ -233,11 +223,7 @@ defmodule Robine.Adapters.Background.RunNextJobWorker do
     result = Pipelines.append_log_event(Map.put(event, :attempt_id, attempt_id), context)
 
     if result == :ok do
-      Phoenix.PubSub.broadcast(
-        Robine.PubSub,
-        "attempt-logs:#{attempt_id}",
-        {:log_appended, attempt_id}
-      )
+      Events.broadcast("attempt-logs:#{attempt_id}", {:log_appended, attempt_id})
 
       :telemetry.execute(
         [:robine, :runner, :logs],
@@ -381,7 +367,7 @@ defmodule Robine.Adapters.Background.RunNextJobWorker do
   end
 
   defp enqueue_next do
-    case Oban.insert(new(%{})) do
+    case %{} |> TenantJob.put_tenant() |> new() |> Oban.insert() do
       {:ok, _job} -> :ok
       {:error, reason} -> {:error, reason}
     end

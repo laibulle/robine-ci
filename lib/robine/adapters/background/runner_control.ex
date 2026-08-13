@@ -4,6 +4,7 @@ defmodule Robine.Adapters.Background.RunnerControl do
   use GenServer
 
   alias Robine.Pipelines
+  alias Robine.Backend
 
   @type server :: GenServer.server()
 
@@ -67,12 +68,16 @@ defmodule Robine.Adapters.Background.RunnerControl do
   end
 
   defp renew_lease(state) do
-    case Pipelines.heartbeat_attempt(
-           %{
-             idempotency_token: state.idempotency_token,
-             lease_seconds: state.lease_seconds
-           },
-           state.context
+    case Backend.call(
+           state.context,
+           Pipelines,
+           :heartbeat_attempt,
+           [
+             %{
+               idempotency_token: state.idempotency_token,
+               lease_seconds: state.lease_seconds
+             }
+           ]
          ) do
       {:ok, _attempt} -> :ok
       {:error, reason} -> {:error, reason}
@@ -80,10 +85,9 @@ defmodule Robine.Adapters.Background.RunnerControl do
   end
 
   defp fetch_cancellation_request(state) do
-    case Pipelines.cancellation_requested(
-           %{idempotency_token: state.idempotency_token},
-           state.context
-         ) do
+    case Backend.call(state.context, Pipelines, :cancellation_requested, [
+           %{idempotency_token: state.idempotency_token}
+         ]) do
       {:ok, requested?} -> requested?
       {:error, _reason} -> false
     end

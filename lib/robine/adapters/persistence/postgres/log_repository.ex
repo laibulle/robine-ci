@@ -13,7 +13,7 @@ defmodule Robine.Adapters.Persistence.Postgres.LogRepository do
 
     Repo.insert_all(LogChunk, rows,
       on_conflict: :nothing,
-      conflict_target: [:attempt_id, :sequence]
+      conflict_target: {:unsafe_fragment, "(tenant_id, attempt_id, sequence)"}
     )
 
     :ok

@@ -90,9 +90,11 @@ defmodule Robine.Architecture.DependencyRulesTest do
       |> Enum.reject(
         &(&1 in [
             "lib/robine/application.ex",
+            "lib/robine/backend.ex",
             "lib/robine/execution_context.ex",
             "lib/robine/mailer.ex",
-            "lib/robine/repo.ex"
+            "lib/robine/repo.ex",
+            "lib/robine/runtime.ex"
           ])
       )
 
@@ -112,9 +114,11 @@ defmodule Robine.Architecture.DependencyRulesTest do
       |> Enum.reject(
         &(&1 in [
             "lib/robine/application.ex",
+            "lib/robine/backend.ex",
             "lib/robine/execution_context.ex",
             "lib/robine/mailer.ex",
-            "lib/robine/repo.ex"
+            "lib/robine/repo.ex",
+            "lib/robine/runtime.ex"
           ])
       )
 

@@ -8,7 +8,7 @@ defmodule Robine.Repo.Migrations.NamespaceSourceControlDeliveries do
       add :provider_delivery_id, :string
     end
 
-    execute("UPDATE github_deliveries SET provider_delivery_id = id")
+    execute("UPDATE #{qualified_table()} SET provider_delivery_id = id")
 
     alter table(:github_deliveries) do
       modify :provider_delivery_id, :string, null: false
@@ -30,6 +30,13 @@ defmodule Robine.Repo.Migrations.NamespaceSourceControlDeliveries do
       remove :provider
       remove :provider_instance
       remove :provider_delivery_id
+    end
+  end
+
+  defp qualified_table do
+    case prefix() do
+      nil -> ~s("github_deliveries")
+      database_prefix -> ~s("#{database_prefix}"."github_deliveries")
     end
   end
 end

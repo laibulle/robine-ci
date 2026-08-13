@@ -24,7 +24,7 @@ defmodule Robine.Adapters.Persistence.Postgres.SecretRepository do
                  inserted_at: secret.inserted_at
                ]
              ],
-             conflict_target: [:scope, :repository_id, :name],
+             conflict_target: {:unsafe_fragment, "(tenant_id, scope, repository_id, name)"},
              returning: true
            ) do
         {:ok, stored} ->

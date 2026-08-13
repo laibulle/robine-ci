@@ -4,22 +4,19 @@ defmodule Robine.Adapters.Background.ReconcileOutboxWorker do
 
   alias Robine.Pipelines
   alias Robine.Adapters.Background.RunNextJobWorker
-  alias Robine.Runtime.Dependencies
+  alias Robine.Adapters.Background.TenantJob
 
   @impl Oban.Worker
-  def perform(%Oban.Job{}) do
-    context =
-      Dependencies.context(
-        %{id: "system:outbox-reconciler", role: :administrator},
-        "outbox-reconciliation:#{Ecto.UUID.generate()}"
-      )
-
-    with {:ok, count} <- Pipelines.reconcile_outbox(%{limit: 100}, context),
-         {:ok, _job} <- Oban.insert(RunNextJobWorker.new(%{})) do
-      :telemetry.execute([:robine, :outbox, :reconciliation], %{count: count}, %{})
-      :ok
-    else
-      {:error, reason} -> {:error, reason}
-    end
+  def perform(%Oban.Job{} = job) do
+    TenantJob.run(job, __MODULE__, "outbox-reconciliation:#{Ecto.UUID.generate()}", fn context ->
+      with {:ok, count} <- Pipelines.reconcile_outbox(%{limit: 100}, context),
+           {:ok, _job} <-
+             %{} |> TenantJob.put_tenant() |> RunNextJobWorker.new() |> Oban.insert() do
+        :telemetry.execute([:robine, :outbox, :reconciliation], %{count: count}, %{})
+        :ok
+      else
+        {:error, reason} -> {:error, reason}
+      end
+    end)
   end
 end

@@ -80,7 +80,7 @@ defmodule Robine.Adapters.Persistence.Postgres.AutoscalingRepository do
     case AutoscalingIntent.changeset(%AutoscalingIntent{}, changes)
          |> Repo.insert(
            on_conflict: {:replace, [:attempted_at, :updated_at]},
-           conflict_target: :idempotency_key,
+           conflict_target: {:unsafe_fragment, "(tenant_id, idempotency_key)"},
            returning: true
          ) do
       {:ok, intent} -> {:ok, intent_view(intent)}

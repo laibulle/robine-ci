@@ -4,6 +4,6 @@ defmodule Robine.Adapters.Runner.PhoenixSessionNotifier do
 
   @impl true
   def runner_revoked(runner_id) do
-    Phoenix.PubSub.broadcast(Robine.PubSub, "runner:#{runner_id}", {:runner_revoked, runner_id})
+    Robine.Runtime.Events.broadcast("runner:#{runner_id}", {:runner_revoked, runner_id})
   end
 end

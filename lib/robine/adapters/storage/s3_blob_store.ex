@@ -184,10 +184,9 @@ defmodule Robine.Adapters.Storage.S3BlobStore do
   defp object_key(blob_id), do: object_prefix() <> binary_part(blob_id, 0, 2) <> "/" <> blob_id
 
   defp object_prefix do
-    case Keyword.get(config(), :prefix, "") |> String.trim("/") do
-      "" -> "objects/"
-      prefix -> prefix <> "/objects/"
-    end
+    config()
+    |> Keyword.get(:prefix, "")
+    |> Robine.Runtime.TenantStorage.object_prefix()
   end
 
   defp validate_id(blob_id),
@@ -229,7 +228,13 @@ defmodule Robine.Adapters.Storage.S3BlobStore do
   defp valid_prefix?(_prefix), do: false
   defp sha256(content), do: :crypto.hash(:sha256, content) |> Base.encode16(case: :lower)
   defp temporary_path, do: Path.join(spool_root(), Ecto.UUID.generate())
-  defp spool_root, do: Keyword.fetch!(config(), :spool_root)
+
+  defp spool_root do
+    config()
+    |> Keyword.fetch!(:spool_root)
+    |> Robine.Runtime.TenantStorage.local_root()
+  end
+
   defp client, do: Keyword.fetch!(config(), :client)
   defp config, do: Application.fetch_env!(:robine, :s3_blob_store)
 end

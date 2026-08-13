@@ -127,7 +127,7 @@ defmodule Robine.Adapters.Persistence.Postgres.StorageRetention do
     {count, _result} =
       Repo.insert_all(StorageGcCandidate, rows,
         on_conflict: :nothing,
-        conflict_target: [:blob_id]
+        conflict_target: {:unsafe_fragment, "(tenant_id, blob_id)"}
       )
 
     count

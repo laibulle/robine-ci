@@ -13,6 +13,8 @@ config :ex_aws,
 
 config :robine,
   ecto_repos: [Robine.Repo],
+  runtime_profile: :standalone,
+  database_prefix: nil,
   generators: [timestamp_type: :utc_datetime],
   blob_store_adapter: Robine.Adapters.Storage.LocalBlobStore,
   storage_backend_migration_ack: nil,

@@ -170,7 +170,7 @@ defmodule Robine.Adapters.Persistence.Postgres.StorageRepository do
             last_restored_at: nil
           ]
         ],
-        conflict_target: [:repository_id, :key]
+        conflict_target: {:unsafe_fragment, "(tenant_id, repository_id, key)"}
       )
       |> case do
         {:ok, _schema} -> :ok
@@ -206,7 +206,10 @@ defmodule Robine.Adapters.Persistence.Postgres.StorageRepository do
   @impl true
   def stage_blob_gc(blob_id, not_before, now) do
     %StorageGcCandidate{blob_id: blob_id, not_before: not_before, inserted_at: now}
-    |> Repo.insert(on_conflict: :nothing, conflict_target: [:blob_id])
+    |> Repo.insert(
+      on_conflict: :nothing,
+      conflict_target: {:unsafe_fragment, "(tenant_id, blob_id)"}
+    )
     |> case do
       {:ok, _candidate} -> :ok
       {:error, changeset} -> {:error, {:blob_gc_persistence, changeset}}

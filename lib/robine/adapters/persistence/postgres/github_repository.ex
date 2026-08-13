@@ -4,6 +4,7 @@ defmodule Robine.Adapters.Persistence.Postgres.GitHubRepository do
   import Ecto.Query
 
   alias Robine.Adapters.Background.ProcessGitHubDeliveryWorker
+  alias Robine.Adapters.Background.TenantJob
 
   alias Robine.Adapters.Persistence.Postgres.Schemas.{
     AuditEvent,
@@ -32,7 +33,7 @@ defmodule Robine.Adapters.Persistence.Postgres.GitHubRepository do
           trusted: repository.trusted
         ]
       ],
-      conflict_target: [:provider, :provider_instance, :provider_id]
+      conflict_target: {:unsafe_fragment, "(tenant_id, provider, provider_instance, provider_id)"}
     )
     |> normalize(:repository_persistence)
   end
@@ -86,7 +87,10 @@ defmodule Robine.Adapters.Persistence.Postgres.GitHubRepository do
       if count == 0 do
         :duplicate
       else
-        case %{delivery_id: delivery.id} |> ProcessGitHubDeliveryWorker.new() |> Oban.insert() do
+        case %{delivery_id: delivery.id}
+             |> TenantJob.put_tenant()
+             |> ProcessGitHubDeliveryWorker.new()
+             |> Oban.insert() do
           {:ok, _job} -> :accepted
           {:error, reason} -> Repo.rollback({:delivery_job, reason})
         end
@@ -150,7 +154,8 @@ defmodule Robine.Adapters.Persistence.Postgres.GitHubRepository do
           updated_at: DateTime.utc_now()
         ]
       ],
-      conflict_target: [:provider, :provider_instance, :external_key]
+      conflict_target:
+        {:unsafe_fragment, "(tenant_id, provider, provider_instance, external_key)"}
     )
     |> normalize(:check_persistence)
   end
@@ -220,7 +225,7 @@ defmodule Robine.Adapters.Persistence.Postgres.GitHubRepository do
                  }
                ],
                on_conflict: :nothing,
-               conflict_target: [:key]
+               conflict_target: {:unsafe_fragment, "(tenant_id, key)"}
              ) do
           {1, _rows} -> :ok
           {0, _rows} -> Repo.rollback(:cursor_conflict)
@@ -272,7 +277,7 @@ defmodule Robine.Adapters.Persistence.Postgres.GitHubRepository do
            on_conflict: [
              set: [last_attempt_at: attempted_at, last_failure: failure, updated_at: now]
            ],
-           conflict_target: [:key]
+           conflict_target: {:unsafe_fragment, "(tenant_id, key)"}
          ) do
       {1, _rows} -> :ok
       {_count, _rows} -> :ok

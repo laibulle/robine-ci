@@ -11,7 +11,7 @@ defmodule Robine.Adapters.Background.OutboxDeliveryWorker do
 
   alias Robine.Pipelines
   alias Robine.Adapters.Background.RunNextJobWorker
-  alias Robine.Runtime.Dependencies
+  alias Robine.Adapters.Background.TenantJob
 
   @impl Oban.Worker
   def backoff(%Oban.Job{attempt: attempt}) do
@@ -20,30 +20,29 @@ defmodule Robine.Adapters.Background.OutboxDeliveryWorker do
   end
 
   @impl Oban.Worker
-  def perform(%Oban.Job{args: %{"event_id" => event_id}}) do
-    context =
-      Dependencies.context(
-        %{id: "system:outbox", role: :administrator},
-        "outbox:#{event_id}"
-      )
-
+  def perform(%Oban.Job{args: %{"event_id" => event_id}} = job) do
     result =
-      case Pipelines.deliver_event(%{event_id: event_id}, context) do
-        {:ok, :dispatch} ->
-          case Oban.insert(RunNextJobWorker.new(%{})) do
-            {:ok, _job} -> :ok
-            {:error, reason} -> {:error, reason}
-          end
+      TenantJob.run(job, __MODULE__, "outbox:#{event_id}", fn context ->
+        case Pipelines.deliver_event(%{event_id: event_id}, context) do
+          {:ok, :dispatch} ->
+            case %{}
+                 |> TenantJob.put_tenant()
+                 |> RunNextJobWorker.new()
+                 |> Oban.insert() do
+              {:ok, _job} -> :ok
+              {:error, reason} -> {:error, reason}
+            end
 
-        {:ok, :none} ->
-          :ok
+          {:ok, :none} ->
+            :ok
 
-        {:error, :not_found} ->
-          {:cancel, :event_not_found}
+          {:error, :not_found} ->
+            {:cancel, :event_not_found}
 
-        {:error, reason} ->
-          {:error, reason}
-      end
+          {:error, reason} ->
+            {:error, reason}
+        end
+      end)
 
     :telemetry.execute(
       [:robine, :outbox, :delivery],

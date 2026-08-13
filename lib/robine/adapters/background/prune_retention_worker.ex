@@ -3,19 +3,15 @@ defmodule Robine.Adapters.Background.PruneRetentionWorker do
   use Oban.Worker, queue: :default, max_attempts: 5, unique: [period: 3_000]
 
   alias Robine.Operations
-  alias Robine.Runtime.Dependencies
+  alias Robine.Adapters.Background.TenantJob
 
   @impl Oban.Worker
-  def perform(%Oban.Job{id: id}) do
-    context =
-      Dependencies.context(
-        %{id: "system:retention", role: :administrator},
-        "retention:#{id}"
-      )
-
-    case Operations.prune_retention(%{}, context) do
-      {:ok, _result} -> :ok
-      {:error, reason} -> {:error, reason}
-    end
+  def perform(%Oban.Job{id: id} = job) do
+    TenantJob.run(job, __MODULE__, "retention:#{id}", fn context ->
+      case Operations.prune_retention(%{}, context) do
+        {:ok, _result} -> :ok
+        {:error, reason} -> {:error, reason}
+      end
+    end)
   end
 end

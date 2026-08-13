@@ -4,6 +4,7 @@ defmodule Robine.Adapters.Persistence.Postgres.EventOutbox do
 
   alias Robine.Adapters.Persistence.Postgres.Schemas.OutboxEvent
   alias Robine.Adapters.Background.OutboxDeliveryWorker
+  alias Robine.Adapters.Background.TenantJob
   alias Robine.Pipelines.Domain.{PipelineCreated, PipelineProjectionRequested}
   alias Robine.Repo
   import Ecto.Query
@@ -39,6 +40,7 @@ defmodule Robine.Adapters.Persistence.Postgres.EventOutbox do
            |> Repo.insert(),
          {:ok, _job} <-
            %{event_id: attributes.id}
+           |> TenantJob.put_tenant()
            |> OutboxDeliveryWorker.new()
            |> Oban.insert() do
       :ok
@@ -98,7 +100,10 @@ defmodule Robine.Adapters.Persistence.Postgres.EventOutbox do
       )
 
     Enum.reduce_while(event_ids, {:ok, 0}, fn event_id, {:ok, count} ->
-      case %{event_id: event_id} |> OutboxDeliveryWorker.new() |> Oban.insert() do
+      case %{event_id: event_id}
+           |> TenantJob.put_tenant()
+           |> OutboxDeliveryWorker.new()
+           |> Oban.insert() do
         {:ok, %Oban.Job{conflict?: true}} -> {:cont, {:ok, count}}
         {:ok, _job} -> {:cont, {:ok, count + 1}}
         {:error, reason} -> {:halt, {:error, {:outbox_reconciliation, reason}}}

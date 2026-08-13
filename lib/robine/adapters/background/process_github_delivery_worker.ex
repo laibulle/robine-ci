@@ -6,16 +6,20 @@ defmodule Robine.Adapters.Background.ProcessGitHubDeliveryWorker do
     unique: [period: :infinity, fields: [:args], keys: [:delivery_id]]
 
   alias Robine.Repositories
+  alias Robine.Adapters.Background.TenantJob
   alias Robine.Observability.Log
   alias Robine.Runtime.Dependencies
+  alias Robine.Runtime.TenantScope
 
   @impl Oban.Worker
-  def perform(%Oban.Job{args: %{"delivery_id" => delivery_id}}) do
+  def perform(%Oban.Job{args: %{"delivery_id" => delivery_id} = arguments}) do
     started = System.monotonic_time()
+    tenant_id = TenantJob.tenant_id(arguments)
 
     context =
-      Dependencies.context(
-        %{id: "system:source-control-delivery", role: :administrator},
+      Dependencies.system_context(
+        tenant_id,
+        "system:source-control-delivery",
         "source-control:#{delivery_id}"
       )
 
@@ -25,7 +29,14 @@ defmodule Robine.Adapters.Background.ProcessGitHubDeliveryWorker do
       outcome: :started
     })
 
-    result = Repositories.process_github_delivery(%{delivery_id: delivery_id}, context)
+    result =
+      if tenant_id == Robine.ExecutionContext.standalone_tenant() do
+        Repositories.process_github_delivery(%{delivery_id: delivery_id}, context)
+      else
+        TenantScope.run(context, fn ->
+          Repositories.process_github_delivery(%{delivery_id: delivery_id}, context)
+        end)
+      end
 
     worker_result =
       case result do

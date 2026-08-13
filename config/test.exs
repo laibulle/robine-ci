@@ -9,6 +9,7 @@ config :robine, Robine.Repo,
   username: "postgres",
   password: "postgres",
   hostname: System.get_env("ROBINE_TEST_DATABASE_HOST", "localhost"),
+  port: System.get_env("ROBINE_TEST_DATABASE_PORT", "5432") |> String.to_integer(),
   database: "robine_test#{System.get_env("MIX_TEST_PARTITION")}",
   pool: Ecto.Adapters.SQL.Sandbox,
   pool_size: System.schedulers_online() * 2

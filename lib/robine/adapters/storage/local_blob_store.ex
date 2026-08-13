@@ -197,5 +197,10 @@ defmodule Robine.Adapters.Storage.LocalBlobStore do
     do: Path.join([root(), "objects", binary_part(blob_id, 0, 2), blob_id])
 
   defp temporary_path, do: Path.join([root(), ".tmp", Ecto.UUID.generate()])
-  defp root, do: Application.fetch_env!(:robine, :storage_root)
+
+  defp root do
+    :robine
+    |> Application.fetch_env!(:storage_root)
+    |> Robine.Runtime.TenantStorage.local_root()
+  end
 end

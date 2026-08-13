@@ -57,6 +57,16 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 
 ## Phase 1 — Repository and architecture foundation
 
+### ARCH-004 — Expose the embeddable backend runtime
+
+- **Spec:** [PLAT-003](docs/specs/platform/plat-003-embeddable-backend-runtime.md)
+- **Depends on:** ARCH-003
+- [x] Implement standalone and embedded supervision profiles without exporting UI.
+- [x] Publish migration metadata and an isolated `robine_ci` storage prefix.
+- [x] Enforce tenant isolation in every tenant-owned persistence adapter and constraint.
+- [x] Add host-style integration tests proving embedded startup, authorization, and tenant isolation.
+- [x] Verify standalone compatibility and the complete precommit suite.
+
 ### BOOT-001 — Bootstrap the Elixir/Phoenix project
 
 - **Depends on:** DEC-001
