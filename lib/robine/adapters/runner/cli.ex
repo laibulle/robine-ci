@@ -5,6 +5,8 @@ defmodule Robine.Adapters.Runner.CLI do
 
   alias Robine.Adapters.Runner.RemoteClient
   alias Robine.Adapters.Runner.RemoteExecutor
+  alias Robine.Adapters.Runner.Capabilities
+  alias Robine.Adapters.CLI.NativeRuntime
 
   @version Mix.Project.config()[:version]
 
@@ -81,10 +83,12 @@ defmodule Robine.Adapters.Runner.CLI do
   defp enrollment_request(options, token) do
     url = String.trim_trailing(options[:server], "/") <> "/api/v1/runners/enroll"
 
-    case Req.post(url: url, json: %{token: token, name: options[:name]}) do
-      {:ok, %{status: 201} = response} -> {:ok, response}
-      {:ok, %{status: status}} -> {:error, {:http, status}}
-      {:error, exception} -> {:error, {:request, exception.__struct__}}
+    with {:ok, _applications} <- Application.ensure_all_started(:req) do
+      case Req.post(url: url, json: %{token: token, name: options[:name]}) do
+        {:ok, %{status: 201} = response} -> {:ok, response}
+        {:ok, %{status: status}} -> {:error, {:http, status}}
+        {:error, exception} -> {:error, {:request, exception.__struct__}}
+      end
     end
   end
 
@@ -95,7 +99,8 @@ defmodule Robine.Adapters.Runner.CLI do
        "server_url" => server,
        "runner_id" => runner_id,
        "credential" => credential,
-       "name" => name
+       "name" => name,
+       "executor" => Capabilities.detect()["executor"]
      }}
   end
 
@@ -130,7 +135,7 @@ defmodule Robine.Adapters.Runner.CLI do
          {:ok, encoded} <- File.read(path),
          {:ok, config} <- Jason.decode(encoded),
          :ok <- validate_config(config) do
-      {:start, config}
+      {:start, Map.put(config, "executor", Capabilities.detect()["executor"])}
     else
       false -> {:exit, 4, "Runner config must not be readable or writable by group or others."}
       {:error, reason} -> {:exit, 3, "Cannot load runner config: #{safe_reason(reason)}"}
@@ -154,14 +159,17 @@ defmodule Robine.Adapters.Runner.CLI do
   defp validate_config(_config), do: {:error, :invalid_config}
 
   defp start_foreground(config) do
+    :ok = prepare_native_runtime!()
     {:ok, _applications} = Application.ensure_all_started(:websockex)
+    {:ok, _applications} = Application.ensure_all_started(:req)
 
     case RemoteClient.start_link(
            server_url: config["server_url"],
            runner_id: config["runner_id"],
            credential: config["credential"],
            owner: self(),
-           software_version: @version
+           software_version: @version,
+           capabilities: Capabilities.detect()
          ) do
       {:ok, client} ->
         monitor(client, config)
@@ -169,6 +177,13 @@ defmodule Robine.Adapters.Runner.CLI do
       {:error, reason} ->
         IO.puts(:stderr, "Runner failed to start: #{safe_reason(reason)}")
         System.halt(3)
+    end
+  end
+
+  defp prepare_native_runtime! do
+    case NativeRuntime.prepare() do
+      :ok -> :ok
+      {:error, reason} -> raise "runner native runtime is unavailable: #{inspect(reason)}"
     end
   end
 

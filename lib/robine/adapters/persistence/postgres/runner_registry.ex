@@ -181,7 +181,8 @@ defmodule Robine.Adapters.Persistence.Postgres.RunnerRegistry do
         where:
           runner.admin_state == :enabled and runner.protocol_version == 1 and
             runner.last_seen_at >= ^stale_before and
-            fragment("COALESCE((?->>'docker')::boolean, false)", runner.capabilities) and
+            (fragment("COALESCE((?->>'docker')::boolean, false)", runner.capabilities) or
+               fragment("COALESCE((?->>'native')::boolean, false)", runner.capabilities)) and
             fragment(
               "COALESCE(?, 0) < COALESCE(NULLIF(?->>'concurrency', '')::integer, 1)",
               active.active_count,

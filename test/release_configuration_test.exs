@@ -22,4 +22,24 @@ defmodule Robine.ReleaseConfigurationTest do
 
     assert violations == [], Enum.join(violations, "\n")
   end
+
+  test "the standalone runner builds in a server-secret-free environment" do
+    task = File.read!("lib/mix/tasks/robine.runner_release.ex")
+    runner_config = File.read!("config/runner.exs")
+
+    assert task =~ ~s({"MIX_ENV", "runner"})
+    assert runner_config =~ "standalone runner is an outbound CLI process"
+    assert runner_config =~ "bootstrap secrets"
+    refute runner_config =~ "DATABASE_URL"
+    refute runner_config =~ "ROBINE_BOOTSTRAP_TOKEN"
+    refute runner_config =~ "SECRET_KEY_BASE"
+  end
+
+  test "the macOS launch agent invokes the escript through its pinned runtime" do
+    launchd = File.read!("docs/launchd/com.robine.runner.plist")
+
+    assert launchd =~ "__ROBINE_RUNNER_HOME__/.local/bin/mise"
+    assert launchd =~ "<string>exec</string>"
+    assert launchd =~ "<string>--</string>"
+  end
 end

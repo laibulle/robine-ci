@@ -57,3 +57,48 @@ The reverse proxy must support WebSocket upgrade for `/runner/socket/websocket`,
 - Never paste a runner config, enrollment token, credential, job secret, or full environment into logs or support tickets.
 
 The runner accepts durably acknowledged job offers, downloads attempt-scoped source and secrets, executes Docker jobs, streams redacted logs, supports cancellation, and transfers caches and artifacts through authenticated endpoints. Control frames are bounded, log delivery blocks on socket writes, file responses use 64 KiB chunks, and uploads stream into blob storage under a cumulative 100 MiB transfer limit. Archive validation and extraction still require a bounded in-memory representation on the runner.
+
+## Native macOS runner
+
+Build the runner on the target Mac so its Erlang/OTP and Exile runtime files match that operating system and architecture. Install current project-supported Erlang/OTP and Elixir versions, Xcode Command Line Tools, and any project-specific Apple SDKs first. The provided launchd plist invokes the escript through `~/.local/bin/mise exec`, so install the runtimes with mise at that location or adapt `ProgramArguments` to an equivalent pinned runtime. Docker Desktop is not used by native jobs.
+
+Create a dedicated standard macOS account such as `robine-runner`. It must not be an administrator and must not own personal keychains, SSH keys, cloud credentials, or unrelated source trees. Log in as that account to build, install, and enroll:
+
+```sh
+mise use --global erlang@29.0.5 elixir@1.20.3-otp-29
+mise exec -- mix deps.get
+mise exec -- mix robine.runner_release --output dist/runner
+install -m 0755 dist/runner/robine-runner-0.2.0.escript "$HOME/bin/robine-runner"
+mkdir -m 0700 -p "$HOME/.config/robine-runner"
+ROBINE_RUNNER_ENROLLMENT_TOKEN='replace-once' "$HOME/bin/robine-runner" enroll \
+  --server https://ci.example.com \
+  --name mac-mini-arm64 \
+  --config "$HOME/.config/robine-runner/config.json"
+```
+
+On Darwin the runner automatically announces `macos`, normalized `arm64` or `amd64`, and `native`; it does not announce `docker`. A native job must opt in explicitly:
+
+```yaml
+jobs:
+  macos-test:
+    runs-on: [macos, arm64]
+    image: native
+    steps:
+      - name: Test on macOS
+        run: swift test
+```
+
+The `image` field remains required by workflow schema v1 but is not used by native execution. Native execution is not a sandbox and is supported only for trusted repositories. Cache and artifact built-ins use the same attempt-scoped server transfers as Docker jobs. The initial native executor rejects service containers explicitly.
+
+Install `docs/launchd/com.robine.runner.plist` as the runner account at `~/Library/LaunchAgents/com.robine.runner.plist`, then load it:
+
+```sh
+mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs/RobineRunner"
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.robine.runner.plist"
+launchctl kickstart -k "gui/$(id -u)/com.robine.runner"
+launchctl print "gui/$(id -u)/com.robine.runner"
+```
+
+Before installation, replace `__ROBINE_RUNNER_HOME__` in the plist with the absolute home directory of the dedicated account. Logs are retained under `~/Library/Logs/RobineRunner/`; the credential remains in the mode-`0600` config file and never belongs in the plist.
+
+For upgrades, build the new artifact on the same target architecture, stop the service, atomically replace `~/bin/robine-runner`, and kickstart it again. To remove the service, run `launchctl bootout "gui/$(id -u)/com.robine.runner"`, remove the plist and executable, revoke the runner in Robine, and only then remove its private config and logs.

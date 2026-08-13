@@ -91,6 +91,7 @@ runner_max_used_default =
     :prod -> 95
     :dev -> 98
     :test -> 100
+    :runner -> 95
   end
 
 config :robine, :runner_admission,

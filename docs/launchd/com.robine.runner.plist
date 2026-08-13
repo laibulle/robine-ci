@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>com.robine.runner</string>
+    <key>ProgramArguments</key>
+    <array>
+      <string>__ROBINE_RUNNER_HOME__/.local/bin/mise</string>
+      <string>exec</string>
+      <string>--</string>
+      <string>__ROBINE_RUNNER_HOME__/bin/robine-runner</string>
+      <string>start</string>
+      <string>--config</string>
+      <string>__ROBINE_RUNNER_HOME__/.config/robine-runner/config.json</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>__ROBINE_RUNNER_HOME__</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+      <key>HOME</key>
+      <string>__ROBINE_RUNNER_HOME__</string>
+      <key>PATH</key>
+      <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+      <key>SuccessfulExit</key>
+      <false/>
+    </dict>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+    <key>StandardOutPath</key>
+    <string>__ROBINE_RUNNER_HOME__/Library/Logs/RobineRunner/stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>__ROBINE_RUNNER_HOME__/Library/Logs/RobineRunner/stderr.log</string>
+  </dict>
+</plist>

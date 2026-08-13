@@ -73,4 +73,11 @@ defmodule Robine.Adapters.Runner.CLITest do
     assert message =~ "ROBINE_RUNNER_ENROLLMENT_TOKEN is required"
     refute message =~ "--token"
   end
+
+  test "the standalone enrollment path starts its HTTP client application" do
+    source = File.read!("lib/robine/adapters/runner/cli.ex")
+
+    assert length(Regex.scan(~r/Application\.ensure_all_started\(:req\)/, source)) == 2
+    assert source =~ "Application.ensure_all_started(:websockex)"
+  end
 end

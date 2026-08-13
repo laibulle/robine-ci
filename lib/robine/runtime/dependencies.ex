@@ -87,8 +87,7 @@ defmodule Robine.Runtime.Dependencies do
     retention = Application.fetch_env!(:robine, :retention)
     blob_store = Application.fetch_env!(:robine, :blob_store_adapter)
 
-    context(%{id: "startup", role: :administrator}, "startup")
-    |> Map.fetch!(:dependencies)
+    production_dependencies(profile)
     |> Map.fetch!(:pipelines)
     |> PipelineDependencies.validate!()
 

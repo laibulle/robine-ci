@@ -111,7 +111,7 @@ defmodule Robine.Adapters.Persistence.Postgres.JobRepository do
 
     if runner && runner.admin_state == :enabled && runner.protocol_version == 1 &&
          runner.last_seen_at && DateTime.compare(runner.last_seen_at, stale_before) != :lt &&
-         runner.capabilities["docker"] == true do
+         executable_runner?(runner.capabilities) do
       concurrency = normalize_concurrency(runner.capabilities["concurrency"])
 
       active =
@@ -133,10 +133,14 @@ defmodule Robine.Adapters.Persistence.Postgres.JobRepository do
   defp normalize_concurrency(value) when is_integer(value) and value in 1..64, do: value
   defp normalize_concurrency(_value), do: 1
 
+  defp executable_runner?(capabilities),
+    do: capabilities["docker"] == true or capabilities["native"] == true
+
   defp effective_labels(runner) do
     system =
       [
         if(runner.capabilities["docker"] == true, do: "docker"),
+        if(runner.capabilities["native"] == true, do: "native"),
         runner.capabilities["os"],
         runner.capabilities["architecture"]
       ]

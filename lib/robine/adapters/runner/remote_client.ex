@@ -3,6 +3,8 @@ defmodule Robine.Adapters.Runner.RemoteClient do
 
   use WebSockex
 
+  alias Robine.Adapters.Runner.Capabilities
+
   @topic "runner:v1"
   @join_ref "1"
   @max_backoff_ms 30_000
@@ -229,7 +231,7 @@ defmodule Robine.Adapters.Runner.RemoteClient do
          credential: credential,
          software_version: Keyword.get(options, :software_version, "0.1.0"),
          supported_protocol_versions: Keyword.get(options, :supported_protocol_versions, [1]),
-         capabilities: Keyword.get(options, :capabilities, default_capabilities()),
+         capabilities: Keyword.get(options, :capabilities, Capabilities.detect()),
          active_attempt_ids: Keyword.get(options, :active_attempt_ids, []),
          pending_events: %{},
          pending_offers: %{},
@@ -362,13 +364,4 @@ defmodule Robine.Adapters.Runner.RemoteClient do
 
   defp notify(%{owner: owner}, message) when is_pid(owner), do: send(owner, message)
   defp notify(_state, _message), do: :ok
-
-  defp default_capabilities do
-    %{
-      "os" => :os.type() |> elem(0) |> Atom.to_string(),
-      "architecture" => :erlang.system_info(:system_architecture) |> to_string(),
-      "docker" => true,
-      "concurrency" => 1
-    }
-  end
 end

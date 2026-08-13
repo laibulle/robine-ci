@@ -16,6 +16,7 @@ defmodule Mix.Tasks.Robine.RunnerReleaseSmoke do
       manifest = Path.join(output, "RUNNER_SHA256SUMS")
 
       :ok = Robine.Release.Checksums.verify(manifest, output)
+      assert_native_bundle!(output)
 
       case System.cmd(artifact, ["version"], stderr_to_stdout: true) do
         {"robine-runner " <> returned, 0} ->
@@ -34,4 +35,11 @@ defmodule Mix.Tasks.Robine.RunnerReleaseSmoke do
   end
 
   def run(_arguments), do: Mix.raise("usage: mix robine.runner_release_smoke")
+
+  defp assert_native_bundle!(output) do
+    for name <- ~w(robine-exile.app robine-exile.so robine-exile-spawner),
+        not File.regular?(Path.join(output, name)) do
+      Mix.raise("runner release is missing #{name}")
+    end
+  end
 end

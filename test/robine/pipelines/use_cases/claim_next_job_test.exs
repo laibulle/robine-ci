@@ -215,6 +215,68 @@ defmodule Robine.Pipelines.UseCases.ClaimNextJobTest do
     assert runner.last_seen_at
   end
 
+  test "native macOS capacity claims macOS work but not default Docker work" do
+    context = Dependencies.context(%{id: "admin", role: :administrator}, "macos-capacity")
+    runner_context = Dependencies.context(%{id: "anonymous", role: :runner}, "macos-capacity")
+
+    assert {:ok, enrollment} = Runners.create_enrollment_token(%{}, context)
+
+    assert {:ok, identity} =
+             Runners.enroll(%{token: enrollment.token, name: "mac-mini"}, runner_context)
+
+    authenticated =
+      Dependencies.context(%{id: identity.runner_id, role: :runner}, "macos-capacity")
+
+    assert {:ok, _welcome} =
+             Runners.negotiate_protocol(
+               %{
+                 supported_protocol_versions: [1],
+                 software_version: "0.2.0-dev",
+                 capabilities: %{
+                   "os" => "macos",
+                   "architecture" => "arm64",
+                   "native" => true,
+                   "docker" => false,
+                   "executor" => "native",
+                   "concurrency" => 1
+                 }
+               },
+               authenticated
+             )
+
+    assert {:ok, pipeline} =
+             Pipelines.create_pipeline(
+               %{
+                 repository_id: Ecto.UUID.generate(),
+                 workflow_name: "Apple platforms",
+                 commit_sha: String.duplicate("b", 40),
+                 jobs: %{
+                   "linux-default" => %{needs: []},
+                   "macos" => %{needs: [], runs_on: ["macos", "arm64"]}
+                 }
+               },
+               context
+             )
+
+    outbox_job = Repo.one!(from job in Oban.Job, where: job.queue == "outbox")
+    assert :ok = perform_job(OutboxDeliveryWorker, outbox_job.args)
+    assert {:ok, selected} = Runners.select_available(%{}, context)
+
+    assert {:ok, attempt} =
+             Pipelines.claim_next_job(%{runner_id: selected.id}, context)
+
+    claimed = Repo.get!(Job, attempt.job_id)
+    assert claimed.job_key == "macos"
+    assert claimed.execution_spec["runs_on"] == ["macos", "arm64"]
+
+    default =
+      Repo.one!(
+        from job in Job, where: job.pipeline_id == ^pipeline.id and job.job_key == "linux-default"
+      )
+
+    assert default.status == :queued
+  end
+
   test "a saturated repository cannot hide another repository behind a deep queue" do
     context = Dependencies.context(%{id: "admin", role: :administrator}, "fairness")
     first_repository = Ecto.UUID.generate()

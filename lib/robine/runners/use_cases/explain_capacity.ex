@@ -33,6 +33,7 @@ defmodule Robine.Runners.UseCases.ExplainCapacity do
     system =
       [
         if(runner.capabilities["docker"] == true, do: "docker"),
+        if(runner.capabilities["native"] == true, do: "native"),
         runner.capabilities["os"],
         runner.capabilities["architecture"]
       ]

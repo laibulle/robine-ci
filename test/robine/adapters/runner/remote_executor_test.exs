@@ -87,6 +87,56 @@ defmodule Robine.Adapters.Runner.RemoteExecutorTest do
            end)
   end
 
+  test "runs an offered job through the native host executor" do
+    client = fake_client(self())
+    attempt_id = Ecto.UUID.generate()
+    token = Ecto.UUID.generate()
+
+    offer = %{
+      "attempt_id" => attempt_id,
+      "idempotency_token" => token,
+      "source_url" => nil,
+      "secrets_url" => "https://ci.example.test/secrets",
+      "execution" => %{
+        "attempt_id" => attempt_id,
+        "idempotency_token" => token,
+        "image" => "native",
+        "shell" => "/bin/sh",
+        "timeout_ms" => 5_000,
+        "env" => %{},
+        "secret_names" => ["TOKEN"],
+        "steps" => [
+          %{
+            "name" => "Native",
+            "kind" => "run",
+            "value" => "printf 'host:%s' \"$TOKEN\"",
+            "with" => %{}
+          }
+        ]
+      }
+    }
+
+    config = %{
+      "runner_id" => Ecto.UUID.generate(),
+      "credential" => "rrc_test",
+      "executor" => "native",
+      transfer_adapter: FakeTransfer
+    }
+
+    assert :ok = RemoteExecutor.run(offer, client, config)
+    messages = drain_messages([])
+
+    assert Enum.any?(messages, fn
+             {:log_event, %{"content" => "host:[REDACTED]"}} -> true
+             _message -> false
+           end)
+
+    assert Enum.any?(messages, fn
+             {:attempt_event, %{"sequence" => 3, "status" => "succeeded"}} -> true
+             _message -> false
+           end)
+  end
+
   @tag :docker
   test "evaluates the same conditional step contract on a remote runner" do
     client = fake_client(self())

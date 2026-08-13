@@ -3,6 +3,8 @@ defmodule Robine.Adapters.Runner.RemoteExecutor do
 
   alias Robine.Adapters.Archive.SafeTar
   alias Robine.Adapters.Execution.DockerRunner
+  alias Robine.Adapters.Execution.NativeRunner
+  alias Robine.Adapters.Runner.Capabilities
   alias Robine.Adapters.Runner.RemoteClient
   alias Robine.Execution
   alias Robine.Execution.Dependencies, as: ExecutionDependencies
@@ -27,7 +29,7 @@ defmodule Robine.Adapters.Runner.RemoteExecutor do
 
   defp execute(offer, identifiers, source_path, secrets, client, config) do
     raw = Map.put(offer["execution"], "resolved_secrets", secrets)
-    context = execution_context(identifiers.attempt_id)
+    context = execution_context(identifiers.attempt_id, config)
 
     case Execution.build_ci_specification(
            %{persisted: raw, source_path: source_path},
@@ -241,11 +243,18 @@ defmodule Robine.Adapters.Runner.RemoteExecutor do
 
   defp maybe_fail_preparation(_offer, _client), do: :ok
 
-  defp execution_context(attempt_id) do
+  defp execution_context(attempt_id, config) do
+    runner =
+      case Capabilities.execution_mode(config) do
+        :native -> NativeRunner
+        :docker -> DockerRunner
+        {:error, reason} -> raise ArgumentError, "invalid runner executor: #{inspect(reason)}"
+      end
+
     ExecutionContext.new(
       %{id: "remote-runner", role: :administrator},
       "attempt:#{attempt_id}",
-      %{execution: %ExecutionDependencies{runner: DockerRunner}}
+      %{execution: %ExecutionDependencies{runner: runner}}
     )
   end
 

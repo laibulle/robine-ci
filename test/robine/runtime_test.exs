@@ -1,7 +1,8 @@
 defmodule Robine.RuntimeTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Robine.Runtime
+  alias Robine.Runtime.Dependencies
   alias Robine.Runtime.Metadata
 
   test "embedded runtime exports engine children without standalone web delivery" do
@@ -33,5 +34,21 @@ defmodule Robine.RuntimeTest do
     assert_raise ArgumentError, ~r/unsupported Robine runtime profile/, fn ->
       Runtime.start_link(profile: :invalid, name: :invalid_robine_runtime)
     end
+  end
+
+  test "embedded dependency validation does not require standalone identity configuration" do
+    identity_keys = [:oidc_adapter, :oidc_config, :bootstrap_token_hash, :bootstrap_expires_at]
+    previous = Map.new(identity_keys, &{&1, Application.fetch_env(:robine, &1)})
+
+    Enum.each(identity_keys, &Application.delete_env(:robine, &1))
+
+    on_exit(fn ->
+      Enum.each(previous, fn
+        {key, :error} -> Application.delete_env(:robine, key)
+        {key, {:ok, value}} -> Application.put_env(:robine, key, value)
+      end)
+    end)
+
+    assert :ok = Dependencies.validate!(:embedded)
   end
 end

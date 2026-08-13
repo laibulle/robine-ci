@@ -41,6 +41,7 @@ New specifications MUST start from [TEMPLATE.md](TEMPLATE.md). A feature is not 
 |---|---|---|
 | Runners | [RUN-001 remote runner protocol](runners/run-001-remote-runner-protocol.md) | Enrollment, authentication, versioned delivery, and reconnection |
 | Runners | [RUN-002 runner fleet and scheduling](runners/run-002-runner-fleet-and-scheduling.md) | Labels, capacity matching, lifecycle administration, and autoscaling boundary |
+| Runners | [RUN-003 macOS native runner](runners/run-003-macos-native-runner.md) | Dedicated Darwin host execution for trusted Apple-platform CI |
 | Storage | [DATA-002 S3-compatible blob storage](storage/data-002-s3-compatible-storage.md) | Provider-neutral object storage, multipart transfer, and reconciliation |
 | Execution | [EXEC-002 service containers](execution/exec-002-service-containers.md) | Attempt-scoped Docker services, readiness, secrets, and cleanup |
 | Workflows | [WF-002 conditional execution](workflows/wf-002-conditional-execution.md) | Fixed success, failure, and always job/step conditions |
