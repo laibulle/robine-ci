@@ -1265,6 +1265,101 @@ impl PipelineRepository for Database {
         Ok(tenants)
     }
 
+    async fn schedule_cursor(
+        &self,
+        tenant_id: &str,
+        key: &str,
+        attempted_at: DateTime<Utc>,
+    ) -> Result<Option<DateTime<Utc>>, PortError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        let cursor = sqlx::query_scalar::<_, Option<NaiveDateTime>>(
+            "INSERT INTO schedule_reconciliation_states \
+             (tenant_id, key, cursor, inserted_at, updated_at, last_attempt_at) \
+             VALUES ($1, $2, NULL, $3, $3, $3) \
+             ON CONFLICT (tenant_id, key) DO UPDATE \
+             SET last_attempt_at = EXCLUDED.last_attempt_at, updated_at = EXCLUDED.updated_at \
+             RETURNING cursor",
+        )
+        .bind(tenant_id)
+        .bind(key)
+        .bind(attempted_at)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| PortError::Unavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        Ok(cursor.map(|value| value.and_utc()))
+    }
+
+    async fn advance_schedule_cursor(
+        &self,
+        tenant_id: &str,
+        key: &str,
+        expected: Option<DateTime<Utc>>,
+        cursor: DateTime<Utc>,
+        completed_at: DateTime<Utc>,
+    ) -> Result<bool, PortError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        let advanced = sqlx::query(
+            "UPDATE schedule_reconciliation_states \
+             SET cursor = $3, updated_at = $4, last_success_at = $4, last_failure = NULL \
+             WHERE tenant_id = $1 AND key = $2 AND cursor IS NOT DISTINCT FROM $5",
+        )
+        .bind(tenant_id)
+        .bind(key)
+        .bind(cursor)
+        .bind(completed_at)
+        .bind(expected)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| PortError::Unavailable)?
+        .rows_affected()
+            == 1;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        Ok(advanced)
+    }
+
+    async fn record_schedule_failure(
+        &self,
+        tenant_id: &str,
+        key: &str,
+        failure: &str,
+        failed_at: DateTime<Utc>,
+    ) -> Result<(), PortError> {
+        let failure = failure.chars().take(255).collect::<String>();
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        sqlx::query(
+            "UPDATE schedule_reconciliation_states \
+             SET updated_at = $3, last_failure = $4 \
+             WHERE tenant_id = $1 AND key = $2",
+        )
+        .bind(tenant_id)
+        .bind(key)
+        .bind(failed_at)
+        .bind(failure)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| PortError::Unavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PortError::Unavailable)
+    }
+
     async fn accept_source_control_delivery(
         &self,
         tenant_id: &str,

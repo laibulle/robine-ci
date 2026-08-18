@@ -10,7 +10,7 @@ use argon2::{
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use chrono::Utc;
+use chrono::{Duration, Timelike, Utc};
 use hmac::{Hmac, Mac};
 use robine_core::{
     execution_context::{Actor, ActorKind, Capability, ExecutionContext},
@@ -80,6 +80,15 @@ pub struct RetentionConfig {
     pub log_seconds: i64,
     pub gc_grace_seconds: i64,
     pub batch_size: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScheduleReconciliation {
+    pub scanned_minutes: u32,
+    pub due_occurrences: u32,
+    pub pipelines: u32,
+    pub truncated_minutes: u64,
+    pub cursor_advanced: bool,
 }
 
 impl Default for RetentionConfig {
@@ -323,6 +332,16 @@ pub enum ApplicationError {
     InvalidAttemptEvent,
     #[error("application dependency is unavailable")]
     Unavailable,
+}
+
+fn schedule_failure_code(error: &ApplicationError) -> &'static str {
+    match error {
+        ApplicationError::InvalidWorkflow(_) => "invalid_workflow",
+        ApplicationError::IdempotencyConflict => "idempotency_conflict",
+        ApplicationError::InvalidPipelineInput => "invalid_pipeline",
+        ApplicationError::PipelineNotFound => "repository_not_found",
+        _ => "dependency_unavailable",
+    }
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -960,6 +979,160 @@ impl ControlPlane {
         )
     }
 
+    /// Reconciles all trusted scheduled workflows against a bounded durable UTC cursor.
+    ///
+    /// Source heads and archives are fetched once per repository and no database
+    /// transaction remains open while a provider is contacted. A failed scan records
+    /// only sanitized health metadata and deliberately retains the previous cursor.
+    ///
+    /// # Errors
+    ///
+    /// Returns unavailable when persistence or a provider fails, or invalid workflow
+    /// when a trusted default-branch workflow cannot be resolved.
+    pub async fn reconcile_scheduled_workflows(
+        &self,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<ScheduleReconciliation, ApplicationError> {
+        const TENANT: &str = "standalone";
+        const CURSOR_KEY: &str = "scheduled-workflows:v1";
+        let minute = now
+            .with_second(0)
+            .and_then(|value| value.with_nanosecond(0))
+            .ok_or(ApplicationError::Unavailable)?;
+        let cursor = self
+            .pipelines
+            .schedule_cursor(TENANT, CURSOR_KEY, now)
+            .await
+            .map_err(|_| ApplicationError::Unavailable)?;
+        let outcome = self.reconcile_schedule_window(TENANT, cursor, minute).await;
+        match outcome {
+            Ok(mut outcome) => {
+                outcome.cursor_advanced = self
+                    .pipelines
+                    .advance_schedule_cursor(TENANT, CURSOR_KEY, cursor, minute, Utc::now())
+                    .await
+                    .map_err(|_| ApplicationError::Unavailable)?;
+                Ok(outcome)
+            }
+            Err(error) => {
+                let failure = schedule_failure_code(&error);
+                let _ = self
+                    .pipelines
+                    .record_schedule_failure(TENANT, CURSOR_KEY, failure, Utc::now())
+                    .await;
+                Err(error)
+            }
+        }
+    }
+
+    async fn reconcile_schedule_window(
+        &self,
+        tenant_id: &str,
+        cursor: Option<chrono::DateTime<Utc>>,
+        minute: chrono::DateTime<Utc>,
+    ) -> Result<ScheduleReconciliation, ApplicationError> {
+        if cursor.is_some_and(|cursor| cursor >= minute) {
+            return Ok(ScheduleReconciliation {
+                scanned_minutes: 0,
+                due_occurrences: 0,
+                pipelines: 0,
+                truncated_minutes: 0,
+                cursor_advanced: false,
+            });
+        }
+        let desired_start = cursor.map_or(minute, |cursor| cursor + Duration::minutes(1));
+        let oldest_bounded = minute - Duration::minutes(1_439);
+        let start = desired_start.max(oldest_bounded);
+        let truncated_minutes = (start - desired_start)
+            .num_minutes()
+            .max(0)
+            .cast_unsigned();
+        let scanned_minutes = u32::try_from((minute - start).num_minutes() + 1)
+            .map_err(|_| ApplicationError::Unavailable)?;
+        let repositories = self
+            .source_repositories
+            .as_ref()
+            .ok_or(ApplicationError::Unavailable)?
+            .list_trusted(tenant_id)
+            .await
+            .map_err(|_| ApplicationError::Unavailable)?;
+        let mut due_occurrences = 0_u32;
+        let mut pipelines = 0_u32;
+        for repository in repositories {
+            let (head, sources) = self
+                .workflow_sources_for_repository(tenant_id, &repository, None)
+                .await?;
+            for (path, source) in &sources {
+                let resolved = robine_workflows::resolve(path, &sources, &self.workflow_limits)
+                    .map_err(ApplicationError::InvalidWorkflow)?;
+                let Some(schedules) = resolved
+                    .workflow
+                    .triggers
+                    .get("schedule")
+                    .and_then(serde_json::Value::as_array)
+                else {
+                    continue;
+                };
+                for schedule in schedules {
+                    let Some(cron) = schedule.get("cron").and_then(serde_json::Value::as_str)
+                    else {
+                        continue;
+                    };
+                    for offset in 0..i64::from(scanned_minutes) {
+                        let scheduled_for = start + Duration::minutes(offset);
+                        if !robine_workflows::cron_matches(cron, scheduled_for) {
+                            continue;
+                        }
+                        due_occurrences = due_occurrences.saturating_add(1);
+                        let identity = format!(
+                            "{}\0{}\0{}\0{}",
+                            repository.id,
+                            path,
+                            cron,
+                            scheduled_for.to_rfc3339()
+                        );
+                        let idempotency_key =
+                            format!("schedule:{:x}", Sha256::digest(identity.as_bytes()));
+                        let mut included_sources = sources.clone();
+                        included_sources.remove(path);
+                        self.create_pipeline_as(
+                            tenant_id,
+                            "system:scheduler",
+                            ActorKind::System,
+                            CreatePipelineInput {
+                                repository_id: repository.id,
+                                workflow_name: resolved.workflow.name.clone(),
+                                commit_sha: head.commit_sha.clone(),
+                                source_ref: Some(head.branch.clone()),
+                                trigger: "schedule".into(),
+                                inputs: std::collections::BTreeMap::new(),
+                                scheduled_for: Some(scheduled_for),
+                                idempotency_key: Some(idempotency_key),
+                                jobs: std::collections::BTreeMap::new(),
+                                workflow_revision: Some(
+                                    robine_core::pipelines::CreateWorkflowRevisionInput {
+                                        path: path.clone(),
+                                        source: source.clone(),
+                                        sources: included_sources,
+                                    },
+                                ),
+                            },
+                        )
+                        .await?;
+                        pipelines = pipelines.saturating_add(1);
+                    }
+                }
+            }
+        }
+        Ok(ScheduleReconciliation {
+            scanned_minutes,
+            due_occurrences,
+            pipelines,
+            truncated_minutes,
+            cursor_advanced: false,
+        })
+    }
+
     /// Revalidates and launches a manual workflow at the current exact branch SHA.
     ///
     /// # Errors
@@ -1033,13 +1206,29 @@ impl ControlPlane {
             .find_trusted("standalone", repository_id)
             .await
             .map_err(|_| ApplicationError::PipelineNotFound)?;
+        self.workflow_sources_for_repository("standalone", &repository, branch)
+            .await
+    }
+
+    async fn workflow_sources_for_repository(
+        &self,
+        _tenant_id: &str,
+        repository: &robine_source::Repository,
+        branch: Option<&str>,
+    ) -> Result<
+        (
+            robine_source::BranchHead,
+            std::collections::BTreeMap<String, String>,
+        ),
+        ApplicationError,
+    > {
         let inspector = self
             .source_inspector
             .as_ref()
             .ok_or(ApplicationError::Unavailable)?;
         let head = match branch.filter(|branch| !branch.is_empty()) {
-            Some(branch) => inspector.branch_head(&repository, branch).await,
-            None => inspector.default_branch_head(&repository).await,
+            Some(branch) => inspector.branch_head(repository, branch).await,
+            None => inspector.default_branch_head(repository).await,
         }
         .map_err(|_| ApplicationError::Unavailable)?;
         if !valid_commit_sha(&head.commit_sha) {
@@ -1049,7 +1238,7 @@ impl ControlPlane {
             .source_fetcher
             .as_ref()
             .ok_or(ApplicationError::Unavailable)?
-            .fetch_archive(&repository, &head.commit_sha)
+            .fetch_archive(repository, &head.commit_sha)
             .await
             .map_err(|_| ApplicationError::Unavailable)?;
         let files = extract_tar_gz(&archive, ArchiveLimits::default())
@@ -1254,21 +1443,32 @@ impl ControlPlane {
     pub async fn create_pipeline(
         &self,
         user: &User,
-        mut input: CreatePipelineInput,
+        input: CreatePipelineInput,
     ) -> Result<PipelineProjection, ApplicationError> {
         if user.role == Role::Viewer {
             return Err(ApplicationError::Forbidden);
         }
+        self.create_pipeline_as("standalone", &user.id.to_string(), ActorKind::User, input)
+            .await
+    }
+
+    async fn create_pipeline_as(
+        &self,
+        tenant_id: &str,
+        actor_id: &str,
+        actor_kind: ActorKind,
+        mut input: CreatePipelineInput,
+    ) -> Result<PipelineProjection, ApplicationError> {
         populate_jobs_from_workflow(&mut input, &self.workflow_limits)?;
         input
             .validate()
             .map_err(|_| ApplicationError::InvalidPipelineInput)?;
         let context = ExecutionContext::embedded(
             Actor {
-                id: user.id.to_string(),
-                kind: ActorKind::User,
+                id: actor_id.into(),
+                kind: actor_kind,
             },
-            "standalone",
+            tenant_id,
             [Capability::new("pipelines:create")],
             Uuid::new_v4(),
         )
@@ -1279,13 +1479,8 @@ impl ControlPlane {
             None => Uuid::new_v4(),
         };
         let now = Utc::now();
-        let pipeline = build_new_pipeline(
-            input,
-            pipeline_id,
-            &user.id.to_string(),
-            context.correlation_id,
-            now,
-        )?;
+        let pipeline =
+            build_new_pipeline(input, pipeline_id, actor_id, context.correlation_id, now)?;
         self.pipelines
             .create(&context.tenant_id, &pipeline)
             .await

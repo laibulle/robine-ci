@@ -1,5 +1,6 @@
 //! Pure parsing and validation for Robine workflow schema version 1.
 
+use chrono::{DateTime, Datelike, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Value as JsonValue, json};
 use serde_yaml_ng::{Mapping, Value as YamlValue};
@@ -1600,6 +1601,30 @@ fn job_execution(job: &Job) -> JsonValue {
     execution
 }
 
+/// Returns whether a validated five-field cron expression is due at a UTC minute.
+///
+/// Day-of-month and day-of-week use conventional cron OR semantics when both
+/// fields are restricted. Invalid expressions never match.
+#[must_use]
+pub fn cron_matches(raw: &str, minute: DateTime<Utc>) -> bool {
+    if !valid_cron(raw) {
+        return false;
+    }
+    let fields = raw.split_whitespace().collect::<Vec<_>>();
+    let ordinary_fields_match = cron_field_matches(fields[0], minute.minute(), 0, 59)
+        && cron_field_matches(fields[1], minute.hour(), 0, 23)
+        && cron_field_matches(fields[3], minute.month(), 1, 12);
+    let day_of_month = cron_field_matches(fields[2], minute.day(), 1, 31);
+    let weekday = minute.weekday().num_days_from_sunday();
+    let day_of_week = cron_field_matches(fields[4], weekday, 0, 7)
+        || (weekday == 0 && cron_field_matches(fields[4], 7, 0, 7));
+    let day_matches = match (fields[2] == "*", fields[4] == "*") {
+        (false, false) => day_of_month || day_of_week,
+        _ => day_of_month && day_of_week,
+    };
+    ordinary_fields_match && day_matches
+}
+
 fn valid_cron(raw: &str) -> bool {
     if raw.is_empty() || raw.len() > 100 {
         return false;
@@ -1610,6 +1635,38 @@ fn valid_cron(raw: &str) -> bool {
             .iter()
             .zip([(0, 59), (0, 23), (1, 31), (1, 12), (0, 7)])
             .all(|(field, bounds)| valid_cron_field(field, bounds.0, bounds.1))
+}
+
+fn cron_field_matches(field: &str, value: u32, minimum: u32, maximum: u32) -> bool {
+    field.split(',').any(|segment| {
+        let (base, step) = segment
+            .split_once('/')
+            .map_or((segment, 1), |(base, step)| {
+                (base, step.parse::<u32>().unwrap_or(0))
+            });
+        if step == 0 {
+            return false;
+        }
+        let (first, last) = if base == "*" {
+            (minimum, maximum)
+        } else if let Some((first, last)) = base.split_once('-') {
+            (
+                first.parse::<u32>().unwrap_or(maximum.saturating_add(1)),
+                last.parse::<u32>().unwrap_or(minimum.saturating_sub(1)),
+            )
+        } else {
+            let first = base.parse::<u32>().unwrap_or(maximum.saturating_add(1));
+            (
+                first,
+                if segment.contains('/') {
+                    maximum
+                } else {
+                    first
+                },
+            )
+        };
+        (first..=last).contains(&value) && (value - first).is_multiple_of(step)
+    })
 }
 
 fn valid_cron_field(field: &str, minimum: u32, maximum: u32) -> bool {

@@ -3273,6 +3273,7 @@ dependencies = [
 name = "robine-workflows"
 version = "0.3.0"
 dependencies = [
+ "chrono",
  "serde",
  "serde_json",
  "serde_yaml_ng",

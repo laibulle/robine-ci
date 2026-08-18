@@ -108,6 +108,30 @@ pub trait OidcProvider: Send + Sync {
 pub trait PipelineRepository: Send + Sync {
     async fn list_tenants(&self) -> Result<Vec<String>, PortError>;
 
+    async fn schedule_cursor(
+        &self,
+        tenant_id: &str,
+        key: &str,
+        attempted_at: DateTime<Utc>,
+    ) -> Result<Option<DateTime<Utc>>, PortError>;
+
+    async fn advance_schedule_cursor(
+        &self,
+        tenant_id: &str,
+        key: &str,
+        expected: Option<DateTime<Utc>>,
+        cursor: DateTime<Utc>,
+        completed_at: DateTime<Utc>,
+    ) -> Result<bool, PortError>;
+
+    async fn record_schedule_failure(
+        &self,
+        tenant_id: &str,
+        key: &str,
+        failure: &str,
+        failed_at: DateTime<Utc>,
+    ) -> Result<(), PortError>;
+
     async fn create(
         &self,
         tenant_id: &str,
