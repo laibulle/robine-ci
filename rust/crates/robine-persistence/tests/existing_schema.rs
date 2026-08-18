@@ -16,9 +16,7 @@ use robine_core::{
     },
     ports::{IdentityRepository, OidcProvider, PipelineRepository, PortError},
 };
-use robine_persistence::{
-    Database, PersistenceError, Readiness, storage_transition_ack,
-};
+use robine_persistence::{Database, PersistenceError, Readiness, storage_transition_ack};
 use robine_secrets::SecretRepository;
 use robine_source::{Provider, RepositoryStore};
 use robine_storage::{
@@ -302,6 +300,78 @@ async fn retention_rechecks_shared_references_and_deletes_only_staged_orphans() 
         .expect("delete retention candidates");
     cleanup.commit().await.expect("commit retention cleanup");
     std::fs::remove_dir_all(root).expect("remove retention blobs");
+}
+
+#[tokio::test]
+async fn storage_backend_changes_require_the_exact_acknowledgement_with_retained_metadata() {
+    let Ok(database_url) = std::env::var("ROBINE_DATABASE_INTEGRATION_URL") else {
+        return;
+    };
+    let database = Database::connect(&database_url, 2)
+        .await
+        .expect("connect migrated database");
+    let tenant = format!("rust-storage-guard-{}", Uuid::new_v4());
+    let repository_id = Uuid::new_v4();
+    let now = Utc::now();
+    MetadataRepository::save_cache(
+        &database,
+        &tenant,
+        &CacheEntry {
+            id: Uuid::new_v4(),
+            repository_id,
+            key: "guard".into(),
+            object: StoredObject {
+                blob_id: "a".repeat(64),
+                digest: "a".repeat(64),
+                size: 1,
+            },
+            created_at: now,
+            expires_at: now + Duration::days(7),
+        },
+        StorageQuotas {
+            instance_bytes: 100,
+            repository_bytes: 100,
+        },
+    )
+    .await
+    .expect("retained metadata fixture");
+
+    let local_digest = format!("{:x}", Sha256::digest(b"local:/var/lib/robine"));
+    database
+        .verify_storage_backend("local", &local_digest, None)
+        .await
+        .expect("first local namespace is compatible");
+    let s3_digest = format!(
+        "{:x}",
+        Sha256::digest(b"s3:https://s3.example.test/robine/control-plane")
+    );
+    let expected = storage_transition_ack(&local_digest, &s3_digest);
+    assert!(matches!(
+        database
+            .verify_storage_backend("s3", &s3_digest, Some("wrong"))
+            .await,
+        Err(PersistenceError::StorageMigrationAcknowledgementRequired(token)) if token == expected
+    ));
+    database
+        .verify_storage_backend("s3", &s3_digest, Some(&expected))
+        .await
+        .expect("exact migration acknowledgement");
+
+    let mut cleanup = database
+        .tenant_transaction(&tenant)
+        .await
+        .expect("cleanup transaction");
+    sqlx::query("DELETE FROM cache_entries WHERE tenant_id = $1")
+        .bind(&tenant)
+        .execute(&mut *cleanup)
+        .await
+        .expect("delete cache fixture");
+    sqlx::query("DELETE FROM storage_backend_states WHERE tenant_id = $1")
+        .bind(&tenant)
+        .execute(&mut *cleanup)
+        .await
+        .expect("delete backend state");
+    cleanup.commit().await.expect("commit cleanup");
 }
 
 #[tokio::test]

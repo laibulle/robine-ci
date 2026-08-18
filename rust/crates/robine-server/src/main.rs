@@ -253,9 +253,8 @@ fn environment_bool(name: &str, default: bool) -> io::Result<bool> {
     match std::env::var(name) {
         Ok(value) if matches!(value.as_str(), "1" | "true") => Ok(true),
         Ok(value) if matches!(value.as_str(), "0" | "false") => Ok(false),
-        Ok(_) => Err(invalid_environment(name)),
         Err(std::env::VarError::NotPresent) => Ok(default),
-        Err(_) => Err(invalid_environment(name)),
+        Ok(_) | Err(_) => Err(invalid_environment(name)),
     }
 }
 

@@ -2,7 +2,8 @@ use aws_config::{BehaviorVersion, Region};
 use aws_sdk_s3::{Client, config::Builder as ClientConfig, primitives::ByteStream};
 use chrono::{Duration as ChronoDuration, Utc};
 use robine_storage::{BlobStore, S3BlobStore, S3Config, S3Encryption, StorageError};
-use std::{path::PathBuf, time::Duration};
+use sha2::Digest;
+use std::time::Duration;
 use uuid::Uuid;
 
 fn config(endpoint: String, bucket: String, prefix: String) -> S3Config {
@@ -15,7 +16,7 @@ fn config(endpoint: String, bucket: String, prefix: String) -> S3Config {
         allow_http_loopback: true,
         max_object_bytes: 12 * 1_024 * 1_024,
         part_size: 5 * 1_024 * 1_024,
-        request_timeout: Duration::from_secs(60),
+        request_timeout: Duration::from_mins(1),
         attempt_timeout: Duration::from_secs(30),
         connect_timeout: Duration::from_secs(5),
         spool_root: std::env::temp_dir().join(format!("robine-s3-{}", Uuid::new_v4())),
@@ -37,6 +38,7 @@ async fn client(config: &S3Config) -> Client {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn s3_contract_is_digest_verified_paginated_and_multipart_safe() {
     let Ok(endpoint) = std::env::var("ROBINE_S3_INTEGRATION_ENDPOINT") else {
         return;
@@ -59,7 +61,34 @@ async fn s3_contract_is_digest_verified_paginated_and_multipart_safe() {
         .put(&tenant, content.clone())
         .await
         .expect("multipart put");
-    assert_eq!(store.get(&tenant, &object).await.expect("verified get"), content);
+    assert_eq!(
+        store.get(&tenant, &object).await.expect("verified get"),
+        content
+    );
+    let tenant_hash = format!("{:x}", sha2::Sha256::digest(tenant.as_bytes()));
+    let object_key = format!(
+        "{prefix}/tenants/{tenant_hash}/objects/{}/{}",
+        &object.blob_id[..2],
+        object.blob_id
+    );
+    raw.put_object()
+        .bucket(&bucket)
+        .key(&object_key)
+        .body(ByteStream::from_static(b"corrupt"))
+        .send()
+        .await
+        .expect("corrupt object fixture");
+    assert_eq!(
+        store.get(&tenant, &object).await,
+        Err(StorageError::DigestMismatch)
+    );
+    assert_eq!(
+        store
+            .put(&tenant, content.clone())
+            .await
+            .expect("idempotent republication"),
+        object
+    );
     assert_eq!(
         store
             .get(
@@ -73,7 +102,6 @@ async fn s3_contract_is_digest_verified_paginated_and_multipart_safe() {
         Err(StorageError::InvalidInput)
     );
 
-    let tenant_hash = format!("{:x}", sha2::Sha256::digest(tenant.as_bytes()));
     let unsafe_key = format!("{prefix}/tenants/{tenant_hash}/objects/not-content-addressed");
     raw.put_object()
         .bucket(&bucket)
@@ -82,12 +110,23 @@ async fn s3_contract_is_digest_verified_paginated_and_multipart_safe() {
         .send()
         .await
         .expect("unsafe inventory fixture");
+    for index in 0..1_001 {
+        raw.put_object()
+            .bucket(&bucket)
+            .key(format!(
+                "{prefix}/tenants/{tenant_hash}/objects/unsafe-{index:04}"
+            ))
+            .body(ByteStream::from_static(b"unsafe"))
+            .send()
+            .await
+            .expect("paginated unsafe fixture");
+    }
     let inventory = store.inventory(&tenant).await.expect("complete inventory");
     assert_eq!(inventory.objects.len(), 1);
     assert_eq!(inventory.objects[0].blob_id, object.blob_id);
-    assert_eq!(inventory.unsafe_objects, 1);
+    assert_eq!(inventory.unsafe_objects, 1_002);
 
-    let spool = config.spool_root.join("tenants").join(tenant_hash);
+    let spool = config.spool_root.join("tenants").join(&tenant_hash);
     std::fs::create_dir_all(&spool).expect("spool root");
     std::fs::write(spool.join("abandoned"), b"partial").expect("spool fixture");
     assert_eq!(
@@ -105,21 +144,33 @@ async fn s3_contract_is_digest_verified_paginated_and_multipart_safe() {
         .delete(&tenant, &object.blob_id)
         .await
         .expect("idempotent delete");
-    assert_eq!(store.get(&tenant, &object).await, Err(StorageError::NotFound));
+    assert_eq!(
+        store.get(&tenant, &object).await,
+        Err(StorageError::NotFound)
+    );
 
     raw.delete_object()
         .bucket(&bucket)
         .key(format!(
-            "{prefix}/tenants/{}/objects/not-content-addressed",
-            format!("{:x}", sha2::Sha256::digest(tenant.as_bytes()))
+            "{prefix}/tenants/{tenant_hash}/objects/not-content-addressed"
         ))
         .send()
         .await
         .expect("delete unsafe fixture");
+    for index in 0..1_001 {
+        raw.delete_object()
+            .bucket(&bucket)
+            .key(format!(
+                "{prefix}/tenants/{tenant_hash}/objects/unsafe-{index:04}"
+            ))
+            .send()
+            .await
+            .expect("delete paginated unsafe fixture");
+    }
     raw.delete_bucket()
         .bucket(&bucket)
         .send()
         .await
         .expect("delete integration bucket");
-    let _ = std::fs::remove_dir_all(PathBuf::from(config.spool_root));
+    let _ = std::fs::remove_dir_all(config.spool_root);
 }

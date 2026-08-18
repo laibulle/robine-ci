@@ -85,11 +85,10 @@ impl Database {
         let tenants = sqlx::query_scalar::<_, String>("SELECT id FROM ci_tenants ORDER BY id")
             .fetch_all(&self.pool)
             .await?;
-        let tenants = if tenants.is_empty() {
-            vec!["standalone".to_owned()]
-        } else {
-            tenants
-        };
+        let mut tenants = tenants;
+        if !tenants.iter().any(|tenant| tenant == "standalone") {
+            tenants.push("standalone".to_owned());
+        }
         for tenant_id in tenants {
             let mut transaction = self.tenant_transaction(&tenant_id).await?;
             let state = sqlx::query_as::<_, (String, String)>(

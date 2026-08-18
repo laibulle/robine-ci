@@ -1,6 +1,4 @@
-use crate::{
-    BlobInventory, BlobStore, InventoryObject, StorageError, StoredObject, delete_temporary_local,
-};
+use crate::{BlobInventory, BlobStore, InventoryObject, StorageError, StoredObject};
 use async_trait::async_trait;
 use aws_config::{BehaviorVersion, Region, timeout::TimeoutConfig};
 use aws_sdk_s3::{
@@ -15,6 +13,8 @@ use std::{path::PathBuf, time::Duration};
 use url::Url;
 
 const MINIMUM_PART_SIZE: usize = 5 * 1_024 * 1_024;
+const MAXIMUM_PART_SIZE: usize = 5 * 1_024 * 1_024 * 1_024;
+const MAXIMUM_PARTS: usize = 10_000;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum S3Encryption {
@@ -58,6 +58,7 @@ impl S3Config {
             || self.region.is_empty()
             || self.max_object_bytes == 0
             || self.part_size < MINIMUM_PART_SIZE
+            || self.part_size > MAXIMUM_PART_SIZE
             || !self.spool_root.is_absolute()
             || self.request_timeout.is_zero()
             || self.attempt_timeout.is_zero()
@@ -210,6 +211,9 @@ impl S3BlobStore {
         digest: &str,
         content: &[u8],
     ) -> Result<(), StorageError> {
+        if content.len().div_ceil(self.config.part_size) > MAXIMUM_PARTS {
+            return Err(StorageError::ObjectTooLarge);
+        }
         let create = self
             .apply_create_encryption(self.client.create_multipart_upload())
             .bucket(&self.config.bucket)
@@ -342,39 +346,51 @@ impl BlobStore for S3BlobStore {
             return Err(StorageError::InvalidInput);
         }
         let key = self.object_key(tenant_id, &object.blob_id)?;
-        let response = self
-            .client
-            .get_object()
-            .bucket(&self.config.bucket)
-            .key(key)
-            .send()
-            .await
-            .map_err(|error| {
-                if error
-                    .as_service_error()
-                    .is_some_and(|error| error.is_no_such_key())
-                {
-                    StorageError::NotFound
-                } else {
-                    StorageError::Unavailable
-                }
-            })?;
+        let response =
+            self.client
+                .get_object()
+                .bucket(&self.config.bucket)
+                .key(key)
+                .send()
+                .await
+                .map_err(|error| {
+                    if error.as_service_error().is_some_and(
+                        aws_sdk_s3::operation::get_object::GetObjectError::is_no_such_key,
+                    ) {
+                        StorageError::NotFound
+                    } else {
+                        StorageError::Unavailable
+                    }
+                })?;
         if response.content_length().is_some_and(|size| {
             size < 0
                 || usize::try_from(size).map_or(true, |size| size > self.config.max_object_bytes)
         }) {
             return Err(StorageError::ObjectTooLarge);
         }
-        let content = response
-            .body
-            .collect()
+        let mut body = response.body;
+        let capacity = usize::try_from(object.size)
+            .unwrap_or_default()
+            .min(self.config.max_object_bytes);
+        let mut content = Vec::with_capacity(capacity);
+        let mut hash = Sha256::new();
+        while let Some(chunk) = body
+            .try_next()
             .await
             .map_err(|_| StorageError::Unavailable)?
-            .into_bytes()
-            .to_vec();
-        if content.len() > self.config.max_object_bytes
-            || i64::try_from(content.len()).ok() != Some(object.size)
-            || format!("{:x}", Sha256::digest(&content)) != object.digest
+        {
+            if content
+                .len()
+                .checked_add(chunk.len())
+                .is_none_or(|size| size > self.config.max_object_bytes)
+            {
+                return Err(StorageError::ObjectTooLarge);
+            }
+            hash.update(&chunk);
+            content.extend_from_slice(&chunk);
+        }
+        if i64::try_from(content.len()).ok() != Some(object.size)
+            || format!("{:x}", hash.finalize()) != object.digest
         {
             return Err(StorageError::DigestMismatch);
         }
@@ -439,10 +455,36 @@ impl BlobStore for S3BlobStore {
         cutoff: DateTime<Utc>,
     ) -> Result<u64, StorageError> {
         let root = self.spool_root(tenant_id)?;
-        tokio::task::spawn_blocking(move || delete_temporary_local(&root, cutoff))
+        tokio::task::spawn_blocking(move || delete_spool_before(&root, cutoff))
             .await
             .map_err(|_| StorageError::Unavailable)?
     }
+}
+
+fn delete_spool_before(root: &std::path::Path, cutoff: DateTime<Utc>) -> Result<u64, StorageError> {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(_) => return Err(StorageError::Unavailable),
+    };
+    let cutoff = std::time::UNIX_EPOCH
+        .checked_add(Duration::from_secs(
+            u64::try_from(cutoff.timestamp()).map_err(|_| StorageError::InvalidInput)?,
+        ))
+        .ok_or(StorageError::InvalidInput)?;
+    let mut deleted = 0_u64;
+    for entry in entries {
+        let entry = entry.map_err(|_| StorageError::Unavailable)?;
+        let metadata =
+            std::fs::symlink_metadata(entry.path()).map_err(|_| StorageError::Unavailable)?;
+        if metadata.file_type().is_file()
+            && metadata.modified().map_err(|_| StorageError::Unavailable)? <= cutoff
+        {
+            std::fs::remove_file(entry.path()).map_err(|_| StorageError::Unavailable)?;
+            deleted = deleted.saturating_add(1);
+        }
+    }
+    Ok(deleted)
 }
 
 fn validate_digest(digest: &str) -> Result<(), StorageError> {
@@ -514,7 +556,7 @@ mod tests {
             allow_http_loopback: false,
             max_object_bytes: 10 * 1_024 * 1_024,
             part_size: MINIMUM_PART_SIZE,
-            request_timeout: Duration::from_secs(60),
+            request_timeout: Duration::from_mins(1),
             attempt_timeout: Duration::from_secs(20),
             connect_timeout: Duration::from_secs(5),
             spool_root: std::env::temp_dir().join("robine-s3-spool"),
