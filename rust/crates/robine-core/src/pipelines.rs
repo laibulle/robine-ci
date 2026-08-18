@@ -608,6 +608,96 @@ pub struct RunnerAuthenticationMaterial {
     pub credential_digests: Vec<Vec<u8>>,
 }
 
+#[derive(Clone, Debug)]
+pub struct NewRunnerEnrollment {
+    pub id: Uuid,
+    pub token_digest: Vec<u8>,
+    pub expires_at: DateTime<Utc>,
+    pub created_by: Uuid,
+    pub audit_id: Uuid,
+    pub correlation_id: Uuid,
+    pub inserted_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ConsumeRunnerEnrollment {
+    pub token_digest: Vec<u8>,
+    pub runner_id: Uuid,
+    pub runner_name: String,
+    pub credential_id: Uuid,
+    pub credential_digest: Vec<u8>,
+    pub audit_id: Uuid,
+    pub correlation_id: Uuid,
+    pub now: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RotateRunnerCredential {
+    pub runner_id: Uuid,
+    pub credential_id: Uuid,
+    pub credential_digest: Vec<u8>,
+    pub overlap_expires_at: DateTime<Utc>,
+    pub actor_id: Uuid,
+    pub audit_id: Uuid,
+    pub correlation_id: Uuid,
+    pub now: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug)]
+pub struct RevokeRunner {
+    pub runner_id: Uuid,
+    pub actor_id: Uuid,
+    pub audit_id: Uuid,
+    pub correlation_id: Uuid,
+    pub now: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct RunnerFleetEntry {
+    pub id: Uuid,
+    pub name: String,
+    pub admin_state: String,
+    pub connectivity: String,
+    pub labels: Vec<String>,
+    pub capabilities: serde_json::Value,
+    pub protocol_version: Option<i32>,
+    pub software_version: Option<String>,
+    pub last_seen_at: Option<DateTime<Utc>>,
+    pub active_attempts: i64,
+    pub concurrency: i64,
+    pub available_slots: i64,
+}
+
+#[derive(Clone, Debug)]
+pub struct ConfigureRunner {
+    pub runner_id: Uuid,
+    pub name: String,
+    pub labels: Vec<String>,
+    pub admin_state: String,
+    pub actor_id: Uuid,
+    pub audit_id: Uuid,
+    pub correlation_id: Uuid,
+    pub now: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SourceControlDelivery {
+    pub id: String,
+    pub provider: String,
+    pub provider_instance: String,
+    pub provider_delivery_id: String,
+    pub event: String,
+    pub payload: serde_json::Value,
+    pub received_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RunnerCredentialProjection {
+    pub runner_id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential: Option<String>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct RunnerResume {
     pub attempt_id: Uuid,

@@ -1,20 +1,53 @@
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, VecDeque},
+    fmt::Write as _,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
-use actix_web::{HttpRequest, HttpResponse, Responder, web};
+use actix_web::{
+    HttpRequest, HttpResponse, Responder,
+    cookie::{Cookie, SameSite, time::Duration as CookieDuration},
+    http::header,
+    web,
+};
 use futures_util::StreamExt;
+use hmac::{Hmac, Mac};
 use robine_application::{ApplicationError, ControlPlane};
 use robine_core::{
     identity::Role,
-    pipelines::{CreatePipelineInput, RecordAttemptEvent},
+    pipelines::{CreatePipelineInput, RecordAttemptEvent, SourceControlDelivery},
 };
 use robine_persistence::Readiness;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct AppState {
     readiness: Arc<dyn Readiness>,
     control_plane: Arc<ControlPlane>,
+    failure_limiter: Arc<FailureLimiter>,
+    webhooks: Arc<WebhookConfiguration>,
+}
+
+#[derive(Clone, Default)]
+pub struct WebhookConfiguration {
+    github: Option<String>,
+    gitlab: Option<String>,
+    forgejo: Option<String>,
+}
+
+impl WebhookConfiguration {
+    #[must_use]
+    pub fn new(github: Option<String>, gitlab: Option<String>, forgejo: Option<String>) -> Self {
+        Self {
+            github,
+            gitlab,
+            forgejo,
+        }
+    }
 }
 
 impl AppState {
@@ -23,8 +56,59 @@ impl AppState {
         Self {
             readiness,
             control_plane,
+            failure_limiter: Arc::new(FailureLimiter::default()),
+            webhooks: Arc::new(WebhookConfiguration::default()),
         }
     }
+
+    #[must_use]
+    pub fn with_webhooks(mut self, configuration: WebhookConfiguration) -> Self {
+        self.webhooks = Arc::new(configuration);
+        self
+    }
+}
+
+#[derive(Default)]
+struct FailureLimiter {
+    attempts: Mutex<HashMap<String, VecDeque<Instant>>>,
+}
+
+impl FailureLimiter {
+    fn attempt(&self, key: &str) -> bool {
+        let now = Instant::now();
+        let mut attempts = self
+            .attempts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        attempts.retain(|_, entries| {
+            while entries
+                .front()
+                .is_some_and(|at| now.duration_since(*at) >= Duration::from_mins(1))
+            {
+                entries.pop_front();
+            }
+            !entries.is_empty()
+        });
+        let entries = attempts.entry(key.to_owned()).or_default();
+        if entries.len() >= 10 {
+            return false;
+        }
+        entries.push_back(now);
+        true
+    }
+
+    fn clear(&self, key: &str) {
+        self.attempts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(key);
+    }
+}
+
+fn request_source(request: &HttpRequest) -> String {
+    request
+        .peer_addr()
+        .map_or_else(|| "unknown".into(), |address| address.ip().to_string())
 }
 
 #[derive(Serialize)]
@@ -60,6 +144,133 @@ struct RunnerHello {
     active_attempt_ids: Vec<Uuid>,
 }
 
+#[derive(Deserialize)]
+struct RunnerSocketDecision {
+    attempt_id: Uuid,
+    message_id: String,
+}
+
+#[derive(Deserialize)]
+struct RunnerSocketLog {
+    attempt_id: Uuid,
+    sequence: i64,
+    step_position: i32,
+    step_name: String,
+    stream: String,
+    content: String,
+}
+
+async fn runner_state_message(
+    control_plane: &ControlPlane,
+    runner_id: Uuid,
+    credential: &str,
+    event: &str,
+    payload: serde_json::Value,
+) -> serde_json::Value {
+    if event == "log_event" {
+        let Ok(log) = serde_json::from_value::<RunnerSocketLog>(payload) else {
+            return protocol_error("invalid_log_event");
+        };
+        let result = control_plane
+            .record_remote_log(
+                "standalone",
+                runner_id,
+                credential,
+                robine_core::pipelines::ExecutionLogChunk {
+                    id: Uuid::nil(),
+                    attempt_id: log.attempt_id,
+                    sequence: log.sequence,
+                    step_position: log.step_position,
+                    step_name: log.step_name,
+                    stream: log.stream,
+                    content: log.content.into_bytes(),
+                    inserted_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+                },
+            )
+            .await;
+        return match result {
+            Ok(sequence) => protocol_ok(&serde_json::json!({"sequence":sequence})),
+            Err(error) => runner_application_error(&error, "invalid_log_event"),
+        };
+    }
+
+    let remote_event = if event == "attempt_event" {
+        serde_json::from_value::<robine_core::pipelines::RecordRemoteAttemptEvent>(payload).ok()
+    } else if matches!(event, "job_accept" | "job_reject") {
+        let Ok(decision) = serde_json::from_value::<RunnerSocketDecision>(payload) else {
+            return protocol_error(if event == "job_accept" {
+                "invalid_job_accept"
+            } else {
+                "invalid_job_reject"
+            });
+        };
+        if decision.message_id.is_empty() || decision.message_id.len() > 128 {
+            return protocol_error("invalid_offer_decision");
+        }
+        let Ok(offer) = control_plane
+            .remote_job_offer("standalone", runner_id, credential, decision.attempt_id)
+            .await
+        else {
+            return protocol_error("invalid_offer_decision");
+        };
+        offer
+            .get("idempotency_token")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|token| Uuid::parse_str(token).ok())
+            .map(
+                |idempotency_token| robine_core::pipelines::RecordRemoteAttemptEvent {
+                    idempotency_token,
+                    message_id: decision.message_id,
+                    sequence: 1,
+                    status: if event == "job_accept" {
+                        "preparing".into()
+                    } else {
+                        "failed".into()
+                    },
+                    reason: (event == "job_reject").then(|| "system_failure".into()),
+                },
+            )
+    } else {
+        return protocol_error("unsupported_message");
+    };
+    let Some(remote_event) = remote_event else {
+        return protocol_error("invalid_attempt_event");
+    };
+    match control_plane
+        .record_remote_attempt_event("standalone", runner_id, credential, remote_event.clone())
+        .await
+    {
+        Ok(attempt) => protocol_ok(&serde_json::json!({
+            "message_id":remote_event.message_id,
+            "attempt_id":attempt.id,
+            "acknowledged_sequence":attempt.last_sequence
+        })),
+        Err(error) => runner_application_error(&error, "invalid_attempt_event"),
+    }
+}
+
+fn protocol_ok(response: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({"status":"ok","response":response})
+}
+
+fn protocol_error(code: &str) -> serde_json::Value {
+    serde_json::json!({"status":"error","response":{"code":code}})
+}
+
+fn runner_application_error(error: &ApplicationError, fallback: &str) -> serde_json::Value {
+    match error {
+        ApplicationError::EventSequenceGap { expected, actual } => serde_json::json!({
+            "status":"error","response":{"code":"event_gap","expected_sequence":expected,"received_sequence":actual}
+        }),
+        ApplicationError::IdempotencyConflict => protocol_error("message_id_conflict"),
+        ApplicationError::Unauthenticated | ApplicationError::Forbidden => {
+            protocol_error("unauthorized")
+        }
+        _ => protocol_error(fallback),
+    }
+}
+
+#[allow(clippy::too_many_lines)]
 async fn runner_socket(
     request: HttpRequest,
     body: web::Payload,
@@ -75,11 +286,26 @@ async fn runner_socket(
         .get("x-robine-runner-credential")
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned);
+    let rate_key = format!(
+        "runner-auth:{}:{}",
+        request_source(&request),
+        runner_id.map_or_else(|| "invalid".into(), |id| id.to_string())
+    );
+    if !state.failure_limiter.attempt(&rate_key) {
+        return Ok(HttpResponse::TooManyRequests()
+            .insert_header(("retry-after", "60"))
+            .finish());
+    }
     let (Some(runner_id), Some(credential)) = (runner_id, credential) else {
+        let _ = state
+            .control_plane
+            .audit_runner_authentication_failure("standalone", runner_id, chrono::Utc::now())
+            .await;
         return Ok(HttpResponse::Unauthorized().finish());
     };
     let (response, mut session, mut messages) = actix_ws::handle(&request, body)?;
     let control_plane = state.control_plane.clone();
+    let failure_limiter = state.failure_limiter.clone();
     actix_web::rt::spawn(async move {
         let mut joined = false;
         while let Some(Ok(message)) = messages.next().await {
@@ -104,6 +330,11 @@ async fn runner_socket(
                     if !joined && topic == RUNNER_TOPIC && event == "phx_join" {
                         let hello = serde_json::from_value::<RunnerHello>(frame[4].clone());
                         let response_body = match hello {
+                            Ok(hello) if !hello.supported_protocol_versions.contains(&1) => {
+                                serde_json::json!({
+                                    "status":"error","response":{"code":"incompatible_protocol","supported_protocol_versions":[1]}
+                                })
+                            }
                             Ok(hello) => match control_plane
                                 .negotiate_runner_session(
                                     "standalone",
@@ -127,6 +358,7 @@ async fn runner_socket(
                                     {
                                         Ok(reconciliation) => {
                                             joined = true;
+                                            failure_limiter.clear(&rate_key);
                                             serde_json::json!({"status":"ok","response":{
                                                 "protocol_version":protocol_version,
                                                 "heartbeat_interval_seconds":20,
@@ -140,9 +372,9 @@ async fn runner_socket(
                                         }
                                     }
                                 }
-                                Err(ApplicationError::InvalidAttemptEvent) => serde_json::json!({
-                                    "status":"error","response":{"code":"incompatible_protocol","supported_protocol_versions":[1]}
-                                }),
+                                Err(ApplicationError::InvalidAttemptEvent) => {
+                                    serde_json::json!({"status":"error","response":{"code":"invalid_hello"}})
+                                }
                                 Err(ApplicationError::Unauthenticated) => {
                                     serde_json::json!({"status":"error","response":{"code":"unauthorized"}})
                                 }
@@ -216,8 +448,15 @@ async fn runner_socket(
                                 }
                             }
                         }
-                    } else {
-                        let body = serde_json::json!({"status":"error","response":{"code":"unsupported_message"}});
+                    } else if joined && topic == RUNNER_TOPIC {
+                        let body = runner_state_message(
+                            &control_plane,
+                            runner_id,
+                            &credential,
+                            event,
+                            frame[4].clone(),
+                        )
+                        .await;
                         let reply = serde_json::json!([
                             join_ref,
                             message_ref,
@@ -259,6 +498,446 @@ async fn runner_socket(
 struct PipelineQuery {
     repository_id: Option<Uuid>,
     limit: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct RunnerEnrollmentRequest {
+    token: String,
+    name: String,
+}
+
+async fn enroll_runner(
+    request: HttpRequest,
+    input: web::Json<RunnerEnrollmentRequest>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let rate_key = format!("runner-enrollment:{}", request_source(&request));
+    if !state.failure_limiter.attempt(&rate_key) {
+        return HttpResponse::TooManyRequests()
+            .insert_header(("retry-after", "60"))
+            .json(serde_json::json!({"error":"too many enrollment attempts"}));
+    }
+    match state
+        .control_plane
+        .enroll_runner("standalone", &input.token, &input.name)
+        .await
+    {
+        Ok(identity) => {
+            state.failure_limiter.clear(&rate_key);
+            HttpResponse::Created()
+                .insert_header(("cache-control", "no-store"))
+                .json(identity)
+        }
+        Err(ApplicationError::InvalidCredentials) => HttpResponse::Unauthorized()
+            .json(serde_json::json!({"error":"invalid enrollment token"})),
+        Err(ApplicationError::InvalidPipelineInput) => HttpResponse::BadRequest()
+            .json(serde_json::json!({"error":"invalid enrollment request"})),
+        Err(_) => HttpResponse::ServiceUnavailable().finish(),
+    }
+}
+
+async fn create_runner_enrollment(
+    request: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let Ok(actor) = authenticated_user(&request, &state).await else {
+        return HttpResponse::Unauthorized().finish();
+    };
+    match state
+        .control_plane
+        .create_runner_enrollment("standalone", &actor)
+        .await
+    {
+        Ok(enrollment) => HttpResponse::Created()
+            .insert_header(("cache-control", "no-store"))
+            .json(enrollment),
+        Err(ApplicationError::Forbidden) => HttpResponse::Forbidden().finish(),
+        Err(_) => HttpResponse::ServiceUnavailable().finish(),
+    }
+}
+
+async fn rotate_runner_credential(
+    request: HttpRequest,
+    runner_id: web::Path<Uuid>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let Ok(actor) = authenticated_user(&request, &state).await else {
+        return HttpResponse::Unauthorized().finish();
+    };
+    match state
+        .control_plane
+        .rotate_runner_credential("standalone", &actor, runner_id.into_inner())
+        .await
+    {
+        Ok(identity) => HttpResponse::Ok()
+            .insert_header(("cache-control", "no-store"))
+            .json(identity),
+        Err(ApplicationError::Forbidden) => HttpResponse::Forbidden().finish(),
+        Err(ApplicationError::PipelineNotFound) => HttpResponse::NotFound().finish(),
+        Err(_) => HttpResponse::ServiceUnavailable().finish(),
+    }
+}
+
+async fn revoke_runner(
+    request: HttpRequest,
+    runner_id: web::Path<Uuid>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let Ok(actor) = authenticated_user(&request, &state).await else {
+        return HttpResponse::Unauthorized().finish();
+    };
+    match state
+        .control_plane
+        .revoke_runner("standalone", &actor, runner_id.into_inner())
+        .await
+    {
+        Ok(()) => HttpResponse::NoContent().finish(),
+        Err(ApplicationError::Forbidden) => HttpResponse::Forbidden().finish(),
+        Err(ApplicationError::PipelineNotFound) => HttpResponse::NotFound().finish(),
+        Err(_) => HttpResponse::ServiceUnavailable().finish(),
+    }
+}
+
+async fn list_runner_fleet(request: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    let Ok(actor) = authenticated_user(&request, &state).await else {
+        return HttpResponse::Unauthorized().finish();
+    };
+    match state
+        .control_plane
+        .list_runner_fleet("standalone", &actor)
+        .await
+    {
+        Ok(runners) => HttpResponse::Ok().json(serde_json::json!({"runners":runners})),
+        Err(ApplicationError::Forbidden) => HttpResponse::Forbidden().finish(),
+        Err(_) => HttpResponse::ServiceUnavailable().finish(),
+    }
+}
+
+#[derive(Deserialize)]
+struct ConfigureRunnerRequest {
+    name: String,
+    #[serde(default)]
+    labels: Vec<String>,
+    admin_state: String,
+}
+
+async fn configure_runner(
+    request: HttpRequest,
+    runner_id: web::Path<Uuid>,
+    input: web::Json<ConfigureRunnerRequest>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let Ok(actor) = authenticated_user(&request, &state).await else {
+        return HttpResponse::Unauthorized().finish();
+    };
+    let input = input.into_inner();
+    match state
+        .control_plane
+        .configure_runner(
+            "standalone",
+            &actor,
+            runner_id.into_inner(),
+            &input.name,
+            input.labels,
+            &input.admin_state,
+        )
+        .await
+    {
+        Ok(()) => HttpResponse::NoContent().finish(),
+        Err(ApplicationError::Forbidden) => HttpResponse::Forbidden().finish(),
+        Err(ApplicationError::InvalidPipelineInput) => HttpResponse::UnprocessableEntity().finish(),
+        Err(ApplicationError::PipelineNotFound) => HttpResponse::NotFound().finish(),
+        Err(_) => HttpResponse::ServiceUnavailable().finish(),
+    }
+}
+
+#[derive(Deserialize)]
+struct BrowserRunnerForm {
+    csrf_token: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    labels: String,
+    #[serde(default)]
+    admin_state: String,
+}
+
+async fn runner_fleet_page(request: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    let Ok((actor, token)) = browser_administrator(&request, &state).await else {
+        return HttpResponse::Unauthorized().finish();
+    };
+    match state
+        .control_plane
+        .list_runner_fleet("standalone", &actor)
+        .await
+    {
+        Ok(runners) => render_runner_fleet(&runners, &csrf_token(&token), None),
+        Err(_) => HttpResponse::ServiceUnavailable().finish(),
+    }
+}
+
+async fn browser_create_runner_enrollment(
+    request: HttpRequest,
+    input: web::Form<BrowserRunnerForm>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let Ok((actor, token)) = browser_administrator(&request, &state).await else {
+        return HttpResponse::Unauthorized().finish();
+    };
+    if !valid_csrf(&input.csrf_token, &token) {
+        return HttpResponse::Forbidden().finish();
+    }
+    let Ok(enrollment) = state
+        .control_plane
+        .create_runner_enrollment("standalone", &actor)
+        .await
+    else {
+        return HttpResponse::ServiceUnavailable().finish();
+    };
+    let Ok(runners) = state
+        .control_plane
+        .list_runner_fleet("standalone", &actor)
+        .await
+    else {
+        return HttpResponse::ServiceUnavailable().finish();
+    };
+    let notice = format!(
+        "Copy now — expires {}: ROBINE_RUNNER_ENROLLMENT_TOKEN='{}' robine-runner enroll --server SERVER_URL --name RUNNER_NAME --config /etc/robine-runner/config.json",
+        enrollment.expires_at.to_rfc3339(),
+        enrollment.token
+    );
+    render_runner_fleet(&runners, &csrf_token(&token), Some(&notice))
+}
+
+async fn browser_configure_runner(
+    request: HttpRequest,
+    runner_id: web::Path<Uuid>,
+    input: web::Form<BrowserRunnerForm>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let Ok((actor, token)) = browser_administrator(&request, &state).await else {
+        return HttpResponse::Unauthorized().finish();
+    };
+    if !valid_csrf(&input.csrf_token, &token) {
+        return HttpResponse::Forbidden().finish();
+    }
+    let labels = input
+        .labels
+        .split(',')
+        .map(str::trim)
+        .filter(|label| !label.is_empty())
+        .map(str::to_owned)
+        .collect();
+    match state
+        .control_plane
+        .configure_runner(
+            "standalone",
+            &actor,
+            runner_id.into_inner(),
+            &input.name,
+            labels,
+            &input.admin_state,
+        )
+        .await
+    {
+        Ok(()) => HttpResponse::SeeOther()
+            .insert_header((header::LOCATION, "/admin/runners"))
+            .finish(),
+        Err(ApplicationError::InvalidPipelineInput) => HttpResponse::UnprocessableEntity().finish(),
+        Err(ApplicationError::PipelineNotFound) => HttpResponse::NotFound().finish(),
+        Err(_) => HttpResponse::ServiceUnavailable().finish(),
+    }
+}
+
+async fn browser_rotate_runner(
+    request: HttpRequest,
+    runner_id: web::Path<Uuid>,
+    input: web::Form<BrowserRunnerForm>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let Ok((actor, token)) = browser_administrator(&request, &state).await else {
+        return HttpResponse::Unauthorized().finish();
+    };
+    if !valid_csrf(&input.csrf_token, &token) {
+        return HttpResponse::Forbidden().finish();
+    }
+    let rotated = match state
+        .control_plane
+        .rotate_runner_credential("standalone", &actor, runner_id.into_inner())
+        .await
+    {
+        Ok(rotated) => rotated,
+        Err(ApplicationError::PipelineNotFound) => return HttpResponse::NotFound().finish(),
+        Err(_) => return HttpResponse::ServiceUnavailable().finish(),
+    };
+    let Ok(runners) = state
+        .control_plane
+        .list_runner_fleet("standalone", &actor)
+        .await
+    else {
+        return HttpResponse::ServiceUnavailable().finish();
+    };
+    render_runner_fleet(
+        &runners,
+        &csrf_token(&token),
+        Some(&format!(
+            "Copy the replacement credential now: {}",
+            rotated.credential
+        )),
+    )
+}
+
+async fn browser_revoke_runner(
+    request: HttpRequest,
+    runner_id: web::Path<Uuid>,
+    input: web::Form<BrowserRunnerForm>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let Ok((actor, token)) = browser_administrator(&request, &state).await else {
+        return HttpResponse::Unauthorized().finish();
+    };
+    if !valid_csrf(&input.csrf_token, &token) {
+        return HttpResponse::Forbidden().finish();
+    }
+    match state
+        .control_plane
+        .revoke_runner("standalone", &actor, runner_id.into_inner())
+        .await
+    {
+        Ok(()) => HttpResponse::SeeOther()
+            .insert_header((header::LOCATION, "/admin/runners"))
+            .finish(),
+        Err(ApplicationError::PipelineNotFound) => HttpResponse::NotFound().finish(),
+        Err(_) => HttpResponse::ServiceUnavailable().finish(),
+    }
+}
+
+async fn browser_administrator(
+    request: &HttpRequest,
+    state: &web::Data<AppState>,
+) -> Result<(robine_core::identity::User, String), ApplicationError> {
+    let token = session_token(request).ok_or(ApplicationError::Unauthenticated)?;
+    let actor = state.control_plane.authenticate(&token).await?;
+    if actor.role != Role::Administrator || actor.disabled {
+        return Err(ApplicationError::Forbidden);
+    }
+    Ok((actor, token))
+}
+
+fn csrf_token(session_token: &str) -> String {
+    let digest = Sha256::digest(format!("robine:csrf:v1:{session_token}"));
+    digest
+        .iter()
+        .fold(String::with_capacity(64), |mut output, byte| {
+            let _ = write!(output, "{byte:02x}");
+            output
+        })
+}
+
+fn valid_csrf(candidate: &str, session_token: &str) -> bool {
+    let expected = csrf_token(session_token);
+    candidate.len() == expected.len() && bool::from(candidate.as_bytes().ct_eq(expected.as_bytes()))
+}
+
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
+fn render_runner_fleet(
+    runners: &[robine_core::pipelines::RunnerFleetEntry],
+    csrf: &str,
+    notice: Option<&str>,
+) -> HttpResponse {
+    let mut cards = String::new();
+    for runner in runners {
+        let labels = runner
+            .labels
+            .iter()
+            .fold(String::new(), |mut output, label| {
+                let _ = write!(output, "<span class=\"chip\">{}</span>", escape_html(label));
+                output
+            });
+        let last_seen = runner
+            .last_seen_at
+            .map_or_else(|| "never".into(), |seen| seen.to_rfc3339());
+        let disabled = runner.admin_state == "revoked";
+        let next_state = if runner.admin_state == "draining" {
+            "enabled"
+        } else {
+            "draining"
+        };
+        let _ = write!(
+            cards,
+            "<article class=\"runner-card\" id=\"runner-{}\"><header><div><h2>{}</h2><p><span class=\"status {}\">{}</span> <span class=\"status\">{}</span></p></div><strong>{}/{} active</strong></header><p class=\"meta\">{} · last heartbeat {} · {} slots available</p><div class=\"chips\">{}</div>",
+            runner.id,
+            escape_html(&runner.name),
+            escape_html(&runner.connectivity),
+            escape_html(&runner.admin_state),
+            escape_html(&runner.connectivity),
+            runner.active_attempts,
+            runner.concurrency,
+            escape_html(
+                runner
+                    .software_version
+                    .as_deref()
+                    .unwrap_or("version unknown")
+            ),
+            escape_html(&last_seen),
+            runner.available_slots,
+            labels
+        );
+        if !disabled {
+            let _ = write!(
+                cards,
+                "<form method=\"post\" action=\"/admin/runners/{}/configure\" class=\"config-grid\"><input type=\"hidden\" name=\"csrf_token\" value=\"{}\"><label>Name<input name=\"name\" required maxlength=\"80\" value=\"{}\"></label><label>Labels<input name=\"labels\" value=\"{}\"></label><input type=\"hidden\" name=\"admin_state\" value=\"{}\"><button type=\"submit\">Save and {}</button></form><div class=\"danger-zone\"><form method=\"post\" action=\"/admin/runners/{}/rotate\"><input type=\"hidden\" name=\"csrf_token\" value=\"{}\"><button>Rotate credential</button></form><form method=\"post\" action=\"/admin/runners/{}/revoke\"><input type=\"hidden\" name=\"csrf_token\" value=\"{}\"><button class=\"danger\">Revoke immediately</button></form></div>",
+                runner.id,
+                csrf,
+                escape_html(&runner.name),
+                escape_html(&runner.labels.join(", ")),
+                next_state,
+                if next_state == "draining" {
+                    "drain"
+                } else {
+                    "enable"
+                },
+                runner.id,
+                csrf,
+                runner.id,
+                csrf
+            );
+        }
+        cards.push_str("</article>");
+    }
+    if cards.is_empty() {
+        cards.push_str("<p class=\"empty\">No remote runner is enrolled yet.</p>");
+    }
+    let notice = notice.map_or_else(String::new, |value| format!("<aside class=\"secret\" role=\"status\"><strong>One-time secret</strong><code>{}</code></aside>", escape_html(value)));
+    let html = format!(
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Runner fleet · Robine</title><link rel=\"stylesheet\" href=\"/assets/app.css\"></head><body><main><nav><span class=\"brand\">Robine</span><a aria-current=\"page\" href=\"/admin/runners\">Runner fleet</a></nav><section class=\"hero\"><p class=\"eyebrow\">Infrastructure</p><h1>Runner fleet</h1><p>Operate trusted build capacity without exposing permanent storage credentials.</p><form method=\"post\" action=\"/admin/runners/enrollments\"><input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\"><button class=\"primary\">Generate enrollment command</button></form></section>{notice}<section class=\"fleet\">{cards}</section></main></body></html>"
+    );
+    HttpResponse::Ok()
+        .insert_header((header::CACHE_CONTROL, "no-store"))
+        .content_type("text/html; charset=utf-8")
+        .body(html)
+}
+
+async fn application_css() -> HttpResponse {
+    HttpResponse::Ok()
+        .content_type("text/css; charset=utf-8")
+        .body(include_str!("../assets/app.css"))
+}
+
+async fn authenticated_user(
+    request: &HttpRequest,
+    state: &web::Data<AppState>,
+) -> Result<robine_core::identity::User, ApplicationError> {
+    let token = session_token(request).ok_or(ApplicationError::Unauthenticated)?;
+    state.control_plane.authenticate(&token).await
 }
 
 async fn list_pipelines(
@@ -1188,13 +1867,20 @@ struct SignInRequest {
     password: String,
 }
 
-async fn sign_in(input: web::Json<SignInRequest>, state: web::Data<AppState>) -> impl Responder {
+async fn sign_in(
+    request: HttpRequest,
+    input: web::Json<SignInRequest>,
+    state: web::Data<AppState>,
+) -> impl Responder {
     match state
         .control_plane
         .authenticate_local(&input.email, &input.password)
         .await
     {
-        Ok(session) => HttpResponse::Ok().json(session),
+        Ok(session) => {
+            let cookie = session_cookie(&request, &session.token);
+            HttpResponse::Ok().cookie(cookie).json(session)
+        }
         Err(ApplicationError::InvalidCredentials | ApplicationError::Unauthenticated) => {
             HttpResponse::Unauthorized().finish()
         }
@@ -1228,14 +1914,55 @@ async fn sign_in(input: web::Json<SignInRequest>, state: web::Data<AppState>) ->
     }
 }
 
+async fn browser_sign_in_page() -> HttpResponse {
+    HttpResponse::Ok()
+        .insert_header((header::CACHE_CONTROL, "no-store"))
+        .content_type("text/html; charset=utf-8")
+        .body("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Sign in · Robine</title><link rel=\"stylesheet\" href=\"/assets/app.css\"></head><body><main><section class=\"hero auth\"><p class=\"eyebrow\">Robine control plane</p><h1>Welcome back</h1><p>Sign in to operate pipelines and trusted runner capacity.</p><form method=\"post\" action=\"/sign-in\" class=\"auth-form\"><label>Email<input type=\"email\" name=\"email\" autocomplete=\"username\" required></label><label>Password<input type=\"password\" name=\"password\" autocomplete=\"current-password\" required></label><button class=\"primary\" type=\"submit\">Sign in</button></form></section></main></body></html>")
+}
+
+async fn browser_sign_in(
+    request: HttpRequest,
+    input: web::Form<SignInRequest>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    match state
+        .control_plane
+        .authenticate_local(&input.email, &input.password)
+        .await
+    {
+        Ok(session) => HttpResponse::SeeOther()
+            .cookie(session_cookie(&request, &session.token))
+            .insert_header((header::LOCATION, "/admin/runners"))
+            .finish(),
+        Err(ApplicationError::InvalidCredentials | ApplicationError::Unauthenticated) => {
+            HttpResponse::Unauthorized().finish()
+        }
+        Err(ApplicationError::Forbidden) => HttpResponse::Forbidden().finish(),
+        Err(_) => HttpResponse::ServiceUnavailable().finish(),
+    }
+}
+
+fn session_cookie(request: &HttpRequest, token: &str) -> Cookie<'static> {
+    Cookie::build("robine_session", token.to_owned())
+        .path("/")
+        .http_only(true)
+        .secure(request.connection_info().scheme() == "https")
+        .same_site(SameSite::Lax)
+        .max_age(CookieDuration::hours(8))
+        .finish()
+}
+
 async fn sign_out(request: HttpRequest, state: web::Data<AppState>) -> impl Responder {
-    let Some(token) = bearer_token(&request) else {
+    let Some(token) = session_token(&request) else {
         return HttpResponse::NoContent().finish();
     };
 
-    match state.control_plane.revoke_session(token).await {
+    match state.control_plane.revoke_session(&token).await {
         Ok(()) | Err(ApplicationError::Unauthenticated | ApplicationError::InvalidCredentials) => {
-            HttpResponse::NoContent().finish()
+            let mut expired = Cookie::build("robine_session", "").path("/").finish();
+            expired.make_removal();
+            HttpResponse::NoContent().cookie(expired).finish()
         }
         Err(ApplicationError::Forbidden) => HttpResponse::Forbidden().finish(),
         Err(
@@ -1427,14 +2154,218 @@ fn bearer_token(request: &HttpRequest) -> Option<&str> {
         .filter(|token| !token.is_empty())
 }
 
+fn session_token(request: &HttpRequest) -> Option<String> {
+    bearer_token(request).map(str::to_owned).or_else(|| {
+        request
+            .cookie("robine_session")
+            .map(|cookie| cookie.value().to_owned())
+    })
+}
+
+const MAX_WEBHOOK_BYTES: usize = 1_048_576;
+
+#[derive(Clone, Copy)]
+enum WebhookProvider {
+    GitHub,
+    GitLab,
+    Forgejo,
+}
+
+impl WebhookProvider {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::GitHub => "github",
+            Self::GitLab => "gitlab",
+            Self::Forgejo => "forgejo",
+        }
+    }
+}
+
+async fn github_webhook(
+    request: HttpRequest,
+    body: web::Bytes,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    receive_webhook(request, body, state, WebhookProvider::GitHub).await
+}
+
+async fn gitlab_webhook(
+    request: HttpRequest,
+    body: web::Bytes,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    receive_webhook(request, body, state, WebhookProvider::GitLab).await
+}
+
+async fn forgejo_webhook(
+    request: HttpRequest,
+    body: web::Bytes,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    receive_webhook(request, body, state, WebhookProvider::Forgejo).await
+}
+
+async fn receive_webhook(
+    request: HttpRequest,
+    body: web::Bytes,
+    state: web::Data<AppState>,
+    provider: WebhookProvider,
+) -> HttpResponse {
+    let (delivery_header, event_header, authentication_header) = match provider {
+        WebhookProvider::GitHub => ("x-github-delivery", "x-github-event", "x-hub-signature-256"),
+        WebhookProvider::GitLab => ("x-gitlab-event-uuid", "x-gitlab-event", "x-gitlab-token"),
+        WebhookProvider::Forgejo => (
+            "x-forgejo-delivery",
+            "x-forgejo-event",
+            "x-forgejo-signature",
+        ),
+    };
+    let Some(delivery_id) = bounded_header(&request, delivery_header, 255) else {
+        return HttpResponse::BadRequest().json(serde_json::json!({"error": "headers"}));
+    };
+    let Some(event) = bounded_header(&request, event_header, 64) else {
+        return HttpResponse::BadRequest().json(serde_json::json!({"error": "headers"}));
+    };
+    let Some(authentication) = bounded_header(&request, authentication_header, 16_384) else {
+        return HttpResponse::BadRequest().json(serde_json::json!({"error": "headers"}));
+    };
+    if body.len() > MAX_WEBHOOK_BYTES {
+        return HttpResponse::PayloadTooLarge().finish();
+    }
+    let secret = match provider {
+        WebhookProvider::GitHub => state.webhooks.github.as_deref(),
+        WebhookProvider::GitLab => state.webhooks.gitlab.as_deref(),
+        WebhookProvider::Forgejo => state.webhooks.forgejo.as_deref(),
+    };
+    let Some(secret) = secret else {
+        return HttpResponse::ServiceUnavailable()
+            .json(serde_json::json!({"error": "temporarily unavailable"}));
+    };
+    if !valid_webhook_authentication(provider, secret, &body, authentication) {
+        return HttpResponse::Unauthorized()
+            .json(serde_json::json!({"error": "invalid signature"}));
+    }
+    let Ok(payload) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return HttpResponse::BadRequest().json(serde_json::json!({"error": "json"}));
+    };
+    if !payload.is_object() {
+        return HttpResponse::BadRequest().json(serde_json::json!({"error": "payload"}));
+    }
+    let provider_name = provider.name();
+    let id = if matches!(provider, WebhookProvider::GitHub) {
+        delivery_id.to_owned()
+    } else {
+        let mut digest = Sha256::new();
+        digest.update(delivery_id.as_bytes());
+        format!("{provider_name}:default:{:x}", digest.finalize())
+    };
+    let delivery = SourceControlDelivery {
+        id,
+        provider: provider_name.into(),
+        provider_instance: "default".into(),
+        provider_delivery_id: delivery_id.into(),
+        event: event.into(),
+        payload,
+        received_at: chrono::Utc::now(),
+    };
+    match state
+        .control_plane
+        .accept_source_control_delivery("standalone", &delivery)
+        .await
+    {
+        Ok(true) => HttpResponse::Accepted().json(serde_json::json!({"status": "accepted"})),
+        Ok(false) => HttpResponse::Ok().json(serde_json::json!({"status": "duplicate"})),
+        Err(_) => HttpResponse::ServiceUnavailable()
+            .json(serde_json::json!({"error": "temporarily unavailable"})),
+    }
+}
+
+fn bounded_header<'a>(request: &'a HttpRequest, name: &str, max: usize) -> Option<&'a str> {
+    request
+        .headers()
+        .get(name)?
+        .to_str()
+        .ok()
+        .filter(|value| !value.is_empty() && value.len() <= max)
+}
+
+fn valid_webhook_authentication(
+    provider: WebhookProvider,
+    secret: &str,
+    body: &[u8],
+    authentication: &str,
+) -> bool {
+    if matches!(provider, WebhookProvider::GitLab) {
+        return secret.len() == authentication.len()
+            && secret.as_bytes().ct_eq(authentication.as_bytes()).into();
+    }
+    let signature = if matches!(provider, WebhookProvider::GitHub) {
+        authentication.strip_prefix("sha256=")
+    } else {
+        Some(authentication)
+    };
+    let Some(signature) = signature.filter(|value| value.len() == 64) else {
+        return false;
+    };
+    let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(secret.as_bytes()) else {
+        return false;
+    };
+    mac.update(body);
+    let expected = format!("{:x}", mac.finalize().into_bytes());
+    expected.as_bytes().ct_eq(signature.as_bytes()).into()
+}
+
+#[allow(clippy::too_many_lines)]
 pub fn configure(config: &mut web::ServiceConfig) {
     config
+        .app_data(web::PayloadConfig::new(MAX_WEBHOOK_BYTES))
+        .route("/api/github/webhooks", web::post().to(github_webhook))
+        .route("/api/gitlab/webhooks", web::post().to(gitlab_webhook))
+        .route("/api/forgejo/webhooks", web::post().to(forgejo_webhook))
         .route("/runner/socket/websocket", web::get().to(runner_socket))
         .route("/health/live", web::get().to(live))
+        .route("/assets/app.css", web::get().to(application_css))
+        .route("/sign-in", web::get().to(browser_sign_in_page))
+        .route("/sign-in", web::post().to(browser_sign_in))
+        .route("/admin/runners", web::get().to(runner_fleet_page))
+        .route(
+            "/admin/runners/enrollments",
+            web::post().to(browser_create_runner_enrollment),
+        )
+        .route(
+            "/admin/runners/{runner_id}/configure",
+            web::post().to(browser_configure_runner),
+        )
+        .route(
+            "/admin/runners/{runner_id}/rotate",
+            web::post().to(browser_rotate_runner),
+        )
+        .route(
+            "/admin/runners/{runner_id}/revoke",
+            web::post().to(browser_revoke_runner),
+        )
         .route("/health/ready", web::get().to(ready))
         .route("/api/v1/auth/bootstrap", web::post().to(bootstrap))
         .route("/api/v1/auth/sign-in", web::post().to(sign_in))
         .route("/api/v1/auth/sign-out", web::delete().to(sign_out))
+        .route("/api/v1/runners/enroll", web::post().to(enroll_runner))
+        .route(
+            "/api/v1/admin/runners/enrollments",
+            web::post().to(create_runner_enrollment),
+        )
+        .route(
+            "/api/v1/admin/runners/{runner_id}/rotate",
+            web::post().to(rotate_runner_credential),
+        )
+        .route(
+            "/api/v1/admin/runners/{runner_id}",
+            web::delete().to(revoke_runner),
+        )
+        .route("/api/v1/admin/runners", web::get().to(list_runner_fleet))
+        .route(
+            "/api/v1/admin/runners/{runner_id}",
+            web::patch().to(configure_runner),
+        )
         .route("/api/v1/auth/oidc", web::get().to(start_oidc))
         .route("/api/v1/auth/oidc/callback", web::get().to(complete_oidc))
         .route("/auth/oidc", web::get().to(start_oidc))
@@ -1676,6 +2607,98 @@ mod tests {
     impl PipelineRepository for StubBackend {
         async fn list_tenants(&self) -> Result<Vec<String>, PortError> {
             Ok(vec!["standalone".into()])
+        }
+
+        async fn accept_source_control_delivery(
+            &self,
+            _tenant_id: &str,
+            _delivery: &robine_core::pipelines::SourceControlDelivery,
+        ) -> Result<bool, PortError> {
+            Ok(true)
+        }
+
+        async fn record_runner_session(
+            &self,
+            _tenant_id: &str,
+            _runner_id: Uuid,
+            _protocol_version: i32,
+            _software_version: &str,
+            _capabilities: &serde_json::Value,
+            _now: DateTime<Utc>,
+        ) -> Result<(), PortError> {
+            Ok(())
+        }
+
+        async fn create_runner_enrollment(
+            &self,
+            _tenant_id: &str,
+            _enrollment: &robine_core::pipelines::NewRunnerEnrollment,
+        ) -> Result<(), PortError> {
+            Ok(())
+        }
+
+        async fn consume_runner_enrollment(
+            &self,
+            _tenant_id: &str,
+            _enrollment: &robine_core::pipelines::ConsumeRunnerEnrollment,
+        ) -> Result<(), PortError> {
+            Ok(())
+        }
+
+        async fn rotate_runner_credential(
+            &self,
+            _tenant_id: &str,
+            _credential: &robine_core::pipelines::RotateRunnerCredential,
+        ) -> Result<(), PortError> {
+            Ok(())
+        }
+
+        async fn revoke_runner(
+            &self,
+            _tenant_id: &str,
+            _revocation: &robine_core::pipelines::RevokeRunner,
+        ) -> Result<(), PortError> {
+            Ok(())
+        }
+
+        async fn list_runner_fleet(
+            &self,
+            _tenant_id: &str,
+            _now: DateTime<Utc>,
+        ) -> Result<Vec<robine_core::pipelines::RunnerFleetEntry>, PortError> {
+            Ok(vec![robine_core::pipelines::RunnerFleetEntry {
+                id: Uuid::nil(),
+                name: "edge-builder".into(),
+                admin_state: "enabled".into(),
+                connectivity: "online".into(),
+                labels: vec!["linux".into()],
+                capabilities: serde_json::json!({"docker":true,"concurrency":2}),
+                protocol_version: Some(1),
+                software_version: Some("0.3.0".into()),
+                last_seen_at: Some(Utc::now()),
+                active_attempts: 1,
+                concurrency: 2,
+                available_slots: 1,
+            }])
+        }
+
+        async fn configure_runner(
+            &self,
+            _tenant_id: &str,
+            _configuration: &robine_core::pipelines::ConfigureRunner,
+        ) -> Result<(), PortError> {
+            Ok(())
+        }
+
+        async fn audit_runner_authentication_failure(
+            &self,
+            _tenant_id: &str,
+            _claimed_runner_id: Option<Uuid>,
+            _audit_id: Uuid,
+            _correlation_id: Uuid,
+            _now: DateTime<Utc>,
+        ) -> Result<(), PortError> {
+            Ok(())
         }
 
         async fn create(
@@ -2008,6 +3031,27 @@ mod tests {
         web::Data::new(AppState::new(backend, control_plane))
     }
 
+    fn webhook_state() -> web::Data<AppState> {
+        let backend = Arc::new(StubBackend {
+            ready: true,
+            role: Role::Viewer,
+        });
+        let control_plane = Arc::new(ControlPlane::new(backend.clone(), backend.clone()));
+        web::Data::new(AppState::new(backend, control_plane).with_webhooks(
+            WebhookConfiguration::new(
+                Some("github-secret".into()),
+                Some("gitlab-secret".into()),
+                Some("forgejo-secret".into()),
+            ),
+        ))
+    }
+
+    fn signature(secret: &str, body: &[u8]) -> String {
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("valid HMAC key");
+        mac.update(body);
+        format!("{:x}", mac.finalize().into_bytes())
+    }
+
     #[actix_web::test]
     async fn liveness_route_matches_the_existing_contract() {
         let app = test::init_service(App::new().app_data(state(true)).configure(configure)).await;
@@ -2015,6 +3059,63 @@ mod tests {
         let response = test::call_service(&app, request).await;
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[actix_web::test]
+    async fn github_webhook_authenticates_raw_body_before_json_decoding() {
+        let app =
+            test::init_service(App::new().app_data(webhook_state()).configure(configure)).await;
+        let request = test::TestRequest::post()
+            .uri("/api/github/webhooks")
+            .insert_header(("x-github-delivery", "delivery-1"))
+            .insert_header(("x-github-event", "push"))
+            .insert_header(("x-hub-signature-256", format!("sha256={}", "0".repeat(64))))
+            .set_payload("not-json")
+            .to_request();
+        let response = test::call_service(&app, request).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[actix_web::test]
+    async fn configured_provider_webhooks_accept_valid_authentication() {
+        let app =
+            test::init_service(App::new().app_data(webhook_state()).configure(configure)).await;
+        let body = br#"{"repository":{"id":1}}"#;
+        let github_signature = signature("github-secret", body);
+        let cases = [
+            (
+                "/api/github/webhooks",
+                "x-github-delivery",
+                "x-github-event",
+                "x-hub-signature-256",
+                format!("sha256={github_signature}"),
+            ),
+            (
+                "/api/gitlab/webhooks",
+                "x-gitlab-event-uuid",
+                "x-gitlab-event",
+                "x-gitlab-token",
+                "gitlab-secret".into(),
+            ),
+            (
+                "/api/forgejo/webhooks",
+                "x-forgejo-delivery",
+                "x-forgejo-event",
+                "x-forgejo-signature",
+                signature("forgejo-secret", body),
+            ),
+        ];
+        for (uri, delivery_header, event_header, auth_header, authentication) in cases {
+            let request = test::TestRequest::post()
+                .uri(uri)
+                .insert_header((delivery_header, Uuid::new_v4().to_string()))
+                .insert_header((event_header, "push"))
+                .insert_header((auth_header, authentication))
+                .set_payload(body.as_slice())
+                .to_request();
+            let response = test::call_service(&app, request).await;
+            assert_eq!(response.status(), StatusCode::ACCEPTED, "{uri}");
+        }
     }
 
     #[actix_web::test]
@@ -2371,8 +3472,287 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn runner_fleet_browser_is_cookie_authenticated_and_csrf_protected() {
+        let app = test::init_service(
+            App::new()
+                .app_data(state_with_role(true, Role::Administrator))
+                .configure(configure),
+        )
+        .await;
+        let sign_in_page = test::TestRequest::get().uri("/sign-in").to_request();
+        let sign_in_response = test::call_service(&app, sign_in_page).await;
+        assert_eq!(sign_in_response.status(), StatusCode::OK);
+        let sign_in_body = String::from_utf8(test::read_body(sign_in_response).await.to_vec())
+            .expect("sign-in HTML");
+        assert!(sign_in_body.contains("action=\"/sign-in\""));
+        assert!(sign_in_body.contains("autocomplete=\"current-password\""));
+        let unauthenticated = test::TestRequest::get().uri("/admin/runners").to_request();
+        assert_eq!(
+            test::call_service(&app, unauthenticated).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        let page = test::TestRequest::get()
+            .uri("/admin/runners")
+            .cookie(Cookie::new("robine_session", "admin-session"))
+            .to_request();
+        let page_response = test::call_service(&app, page).await;
+        assert_eq!(page_response.status(), StatusCode::OK);
+        assert_eq!(
+            page_response
+                .headers()
+                .get("cache-control")
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+        let page_body =
+            String::from_utf8(test::read_body(page_response).await.to_vec()).expect("HTML");
+        assert!(page_body.contains("<h1>Runner fleet</h1>"));
+        assert!(page_body.contains("id=\"runner-00000000-0000-0000-0000-000000000000\""));
+        assert!(page_body.contains("edge-builder"));
+        assert!(page_body.contains("Rotate credential"));
+
+        let forged = test::TestRequest::post()
+            .uri("/admin/runners/enrollments")
+            .cookie(Cookie::new("robine_session", "admin-session"))
+            .set_form(serde_json::json!({"csrf_token":"forged"}))
+            .to_request();
+        assert_eq!(
+            test::call_service(&app, forged).await.status(),
+            StatusCode::FORBIDDEN
+        );
+
+        let valid = test::TestRequest::post()
+            .uri("/admin/runners/enrollments")
+            .cookie(Cookie::new("robine_session", "admin-session"))
+            .set_form(serde_json::json!({"csrf_token":csrf_token("admin-session")}))
+            .to_request();
+        let valid_response = test::call_service(&app, valid).await;
+        assert_eq!(valid_response.status(), StatusCode::OK);
+        let valid_body =
+            String::from_utf8(test::read_body(valid_response).await.to_vec()).expect("HTML");
+        assert!(valid_body.contains("One-time secret"));
+        assert!(valid_body.contains("ROBINE_RUNNER_ENROLLMENT_TOKEN"));
+
+        let css = test::TestRequest::get().uri("/assets/app.css").to_request();
+        let css_response = test::call_service(&app, css).await;
+        assert_eq!(css_response.status(), StatusCode::OK);
+        assert_eq!(
+            css_response
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
+            Some("text/css; charset=utf-8")
+        );
+    }
+
+    #[actix_web::test]
+    async fn runner_enrollment_failures_are_rate_limited_per_source() {
+        let app = test::init_service(App::new().app_data(state(true)).configure(configure)).await;
+        let peer = "192.0.2.44:41000".parse().expect("peer address");
+        for attempt in 0..11 {
+            let request = test::TestRequest::post()
+                .uri("/api/v1/runners/enroll")
+                .peer_addr(peer)
+                .set_json(serde_json::json!({"token":"invalid","name":"runner"}))
+                .to_request();
+            let response = test::call_service(&app, request).await;
+            if attempt < 10 {
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            } else {
+                assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+                assert_eq!(
+                    response
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|value| value.to_str().ok()),
+                    Some("60")
+                );
+            }
+        }
+    }
+
+    #[actix_web::test]
+    async fn runner_socket_authentication_is_rate_limited_per_source_and_identity() {
+        let app = test::init_service(App::new().app_data(state(true)).configure(configure)).await;
+        let peer = "192.0.2.45:42000".parse().expect("peer address");
+        let runner_id = Uuid::new_v4();
+        for attempt in 0..11 {
+            let request = test::TestRequest::get()
+                .uri("/runner/socket/websocket?vsn=2.0.0")
+                .peer_addr(peer)
+                .insert_header(("x-robine-runner-id", runner_id.to_string()))
+                .to_request();
+            let response = test::call_service(&app, request).await;
+            if attempt < 10 {
+                assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            } else {
+                assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+                assert_eq!(
+                    response
+                        .headers()
+                        .get("retry-after")
+                        .and_then(|value| value.to_str().ok()),
+                    Some("60")
+                );
+            }
+        }
+    }
+
+    #[actix_web::test]
+    async fn runner_identity_routes_enforce_admin_and_return_secrets_once() {
+        let viewer_app =
+            test::init_service(App::new().app_data(state(true)).configure(configure)).await;
+        let forbidden = test::TestRequest::post()
+            .uri("/api/v1/admin/runners/enrollments")
+            .insert_header(("authorization", "Bearer viewer-session"))
+            .to_request();
+        assert_eq!(
+            test::call_service(&viewer_app, forbidden).await.status(),
+            StatusCode::FORBIDDEN
+        );
+
+        let admin_state = state_with_role(true, Role::Administrator);
+        let admin_app =
+            test::init_service(App::new().app_data(admin_state).configure(configure)).await;
+        let create = test::TestRequest::post()
+            .uri("/api/v1/admin/runners/enrollments")
+            .insert_header(("authorization", "Bearer admin-session"))
+            .to_request();
+        let created = test::call_service(&admin_app, create).await;
+        assert_eq!(created.status(), StatusCode::CREATED);
+        assert_eq!(
+            created
+                .headers()
+                .get("cache-control")
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+        let enrollment: serde_json::Value = test::read_body_json(created).await;
+        assert!(
+            enrollment["token"]
+                .as_str()
+                .is_some_and(|token| token.starts_with("rbe_"))
+        );
+
+        let enroll = test::TestRequest::post()
+            .uri("/api/v1/runners/enroll")
+            .set_json(serde_json::json!({"token":format!("rbe_{}", "a".repeat(43)), "name":"edge-builder"}))
+            .to_request();
+        let enrolled = test::call_service(&admin_app, enroll).await;
+        assert_eq!(enrolled.status(), StatusCode::CREATED);
+        let identity: serde_json::Value = test::read_body_json(enrolled).await;
+        let runner_id = identity["runner_id"].as_str().expect("runner id");
+        assert!(
+            identity["credential"]
+                .as_str()
+                .is_some_and(|credential| credential.starts_with("rrc_"))
+        );
+
+        let fleet = test::TestRequest::get()
+            .uri("/api/v1/admin/runners")
+            .insert_header(("authorization", "Bearer admin-session"))
+            .to_request();
+        let fleet_response = test::call_service(&admin_app, fleet).await;
+        assert_eq!(fleet_response.status(), StatusCode::OK);
+        let fleet_body: serde_json::Value = test::read_body_json(fleet_response).await;
+        assert_eq!(fleet_body["runners"][0]["connectivity"], "online");
+        assert_eq!(fleet_body["runners"][0]["available_slots"], 1);
+
+        let configure_runner = test::TestRequest::patch()
+            .uri(&format!("/api/v1/admin/runners/{runner_id}"))
+            .insert_header(("authorization", "Bearer admin-session"))
+            .set_json(serde_json::json!({
+                "name":"edge-builder-renamed",
+                "labels":["linux","arm64"],
+                "admin_state":"draining"
+            }))
+            .to_request();
+        assert_eq!(
+            test::call_service(&admin_app, configure_runner)
+                .await
+                .status(),
+            StatusCode::NO_CONTENT
+        );
+
+        let rotate = test::TestRequest::post()
+            .uri(&format!("/api/v1/admin/runners/{runner_id}/rotate"))
+            .insert_header(("authorization", "Bearer admin-session"))
+            .to_request();
+        assert_eq!(
+            test::call_service(&admin_app, rotate).await.status(),
+            StatusCode::OK
+        );
+        let revoke = test::TestRequest::delete()
+            .uri(&format!("/api/v1/admin/runners/{runner_id}"))
+            .insert_header(("authorization", "Bearer admin-session"))
+            .to_request();
+        assert_eq!(
+            test::call_service(&admin_app, revoke).await.status(),
+            StatusCode::NO_CONTENT
+        );
+    }
+
+    #[actix_web::test]
+    async fn runner_socket_state_messages_return_durable_acknowledgements() {
+        let app_state = state(true);
+        let credential = format!("rrc_{}", "a".repeat(43));
+        let message_id = Uuid::new_v4().to_string();
+        let event = runner_state_message(
+            &app_state.control_plane,
+            Uuid::new_v4(),
+            &credential,
+            "attempt_event",
+            serde_json::json!({
+                "idempotency_token": Uuid::new_v4(),
+                "message_id": message_id,
+                "sequence": 2,
+                "status": "running"
+            }),
+        )
+        .await;
+        assert_eq!(event["status"], "ok");
+        assert_eq!(event["response"]["message_id"], message_id);
+        assert_eq!(event["response"]["acknowledged_sequence"], 2);
+
+        let accepted = runner_state_message(
+            &app_state.control_plane,
+            Uuid::new_v4(),
+            &credential,
+            "job_accept",
+            serde_json::json!({
+                "attempt_id": Uuid::nil(),
+                "message_id": Uuid::new_v4().to_string()
+            }),
+        )
+        .await;
+        assert_eq!(accepted["status"], "ok");
+        assert_eq!(accepted["response"]["acknowledged_sequence"], 1);
+
+        let malformed = runner_state_message(
+            &app_state.control_plane,
+            Uuid::new_v4(),
+            &credential,
+            "attempt_event",
+            serde_json::json!({"sequence": 0}),
+        )
+        .await;
+        assert_eq!(malformed["status"], "error");
+        assert_eq!(malformed["response"]["code"], "invalid_attempt_event");
+    }
+
+    #[actix_web::test]
     async fn runner_heartbeat_requires_machine_credentials_and_returns_owned_leases() {
         let app = test::init_service(App::new().app_data(state(true)).configure(configure)).await;
+        let socket_without_identity = test::TestRequest::get()
+            .uri("/runner/socket/websocket?vsn=2.0.0")
+            .to_request();
+        assert_eq!(
+            test::call_service(&app, socket_without_identity)
+                .await
+                .status(),
+            StatusCode::UNAUTHORIZED
+        );
         let missing = test::TestRequest::post()
             .uri("/api/v1/runners/heartbeat")
             .set_json(serde_json::json!({}))

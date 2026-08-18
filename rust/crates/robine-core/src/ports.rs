@@ -6,10 +6,11 @@ use uuid::Uuid;
 use crate::{
     identity::{LocalIdentity, OidcAuthorization, OidcClaims, Role, User},
     pipelines::{
-        AttemptProjection, DurableJobClaim, ExecutionLogChunk, LocalExecutionWork, NewPipeline,
-        OutboxDelivery, PipelineProjection, RecordAttemptEvent, RecordRemoteAttemptEvent,
-        RetryProjection, RunnerAuthenticationMaterial, RunnerLeaseHeartbeat, RunnerResume,
-        SchedulerClaim,
+        AttemptProjection, ConfigureRunner, ConsumeRunnerEnrollment, DurableJobClaim,
+        ExecutionLogChunk, LocalExecutionWork, NewPipeline, NewRunnerEnrollment, OutboxDelivery,
+        PipelineProjection, RecordAttemptEvent, RecordRemoteAttemptEvent, RetryProjection,
+        RevokeRunner, RotateRunnerCredential, RunnerAuthenticationMaterial, RunnerFleetEntry,
+        RunnerLeaseHeartbeat, RunnerResume, SchedulerClaim, SourceControlDelivery,
     },
 };
 
@@ -177,6 +178,57 @@ pub trait PipelineRepository: Send + Sync {
         runner_id: Uuid,
         now: DateTime<Utc>,
     ) -> Result<RunnerAuthenticationMaterial, PortError>;
+
+    async fn create_runner_enrollment(
+        &self,
+        tenant_id: &str,
+        enrollment: &NewRunnerEnrollment,
+    ) -> Result<(), PortError>;
+
+    async fn consume_runner_enrollment(
+        &self,
+        tenant_id: &str,
+        enrollment: &ConsumeRunnerEnrollment,
+    ) -> Result<(), PortError>;
+
+    async fn rotate_runner_credential(
+        &self,
+        tenant_id: &str,
+        credential: &RotateRunnerCredential,
+    ) -> Result<(), PortError>;
+
+    async fn revoke_runner(
+        &self,
+        tenant_id: &str,
+        revocation: &RevokeRunner,
+    ) -> Result<(), PortError>;
+
+    async fn list_runner_fleet(
+        &self,
+        tenant_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<RunnerFleetEntry>, PortError>;
+
+    async fn configure_runner(
+        &self,
+        tenant_id: &str,
+        configuration: &ConfigureRunner,
+    ) -> Result<(), PortError>;
+
+    async fn audit_runner_authentication_failure(
+        &self,
+        tenant_id: &str,
+        claimed_runner_id: Option<Uuid>,
+        audit_id: Uuid,
+        correlation_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<(), PortError>;
+
+    async fn accept_source_control_delivery(
+        &self,
+        tenant_id: &str,
+        delivery: &SourceControlDelivery,
+    ) -> Result<bool, PortError>;
 
     async fn record_runner_session(
         &self,

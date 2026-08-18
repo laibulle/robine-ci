@@ -16,10 +16,12 @@ use robine_core::{
     execution_context::{Actor, ActorKind, Capability, ExecutionContext},
     identity::{OidcAuthorization, Role, User},
     pipelines::{
-        AttemptProjection, CreatePipelineInput, ExecutionLogChunk, JobState, NewJob, NewPipeline,
-        NewWorkflowRevision, OutboxDelivery, PipelineProjection, RecordAttemptEvent,
-        RecordRemoteAttemptEvent, RetryProjection, RunnerLeaseHeartbeat, RunnerReconciliation,
-        SchedulerClaim, outbox_backoff_seconds, source_digest,
+        AttemptProjection, ConfigureRunner, ConsumeRunnerEnrollment, CreatePipelineInput,
+        ExecutionLogChunk, JobState, NewJob, NewPipeline, NewRunnerEnrollment, NewWorkflowRevision,
+        OutboxDelivery, PipelineProjection, RecordAttemptEvent, RecordRemoteAttemptEvent,
+        RetryProjection, RevokeRunner, RotateRunnerCredential, RunnerFleetEntry,
+        RunnerLeaseHeartbeat, RunnerReconciliation, SchedulerClaim, SourceControlDelivery,
+        outbox_backoff_seconds, source_digest,
     },
     ports::{IdentityRepository, OidcProvider, PipelineRepository, PortError},
 };
@@ -317,6 +319,19 @@ pub enum ApplicationError {
     InvalidAttemptEvent,
     #[error("application dependency is unavailable")]
     Unavailable,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct RunnerEnrollment {
+    pub id: Uuid,
+    pub token: String,
+    pub expires_at: chrono::DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct EnrolledRunner {
+    pub runner_id: Uuid,
+    pub credential: String,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -1087,7 +1102,277 @@ impl ControlPlane {
             .map_err(|_| ApplicationError::Unavailable)
     }
 
+    /// Creates a one-time runner enrollment token for an administrator.
+    ///
+    /// # Errors
+    ///
+    /// Returns forbidden for non-administrators or unavailable on entropy/persistence failure.
+    pub async fn create_runner_enrollment(
+        &self,
+        tenant_id: &str,
+        actor: &User,
+    ) -> Result<RunnerEnrollment, ApplicationError> {
+        if actor.role != Role::Administrator || actor.disabled {
+            return Err(ApplicationError::Forbidden);
+        }
+        let token = generated_runner_secret("rbe")?;
+        let now = Utc::now();
+        let id = Uuid::new_v4();
+        let expires_at = now + chrono::Duration::minutes(15);
+        self.pipelines
+            .create_runner_enrollment(
+                tenant_id,
+                &NewRunnerEnrollment {
+                    id,
+                    token_digest: self.runner_secret_digest(&token)?,
+                    expires_at,
+                    created_by: actor.id,
+                    audit_id: Uuid::new_v4(),
+                    correlation_id: Uuid::new_v4(),
+                    inserted_at: now,
+                },
+            )
+            .await
+            .map_err(|_| ApplicationError::Unavailable)?;
+        Ok(RunnerEnrollment {
+            id,
+            token,
+            expires_at,
+        })
+    }
+
+    /// Atomically consumes one enrollment token and returns the credential once.
+    ///
+    /// # Errors
+    ///
+    /// Returns invalid credentials for malformed, expired, consumed, or unknown tokens; invalid
+    /// input for a bad runner name; or unavailable on entropy/persistence failure.
+    pub async fn enroll_runner(
+        &self,
+        tenant_id: &str,
+        token: &str,
+        name: &str,
+    ) -> Result<EnrolledRunner, ApplicationError> {
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > 80 {
+            return Err(ApplicationError::InvalidPipelineInput);
+        }
+        if token
+            .strip_prefix("rbe_")
+            .is_none_or(|value| value.len() < 43)
+        {
+            return Err(ApplicationError::InvalidCredentials);
+        }
+        let credential = generated_runner_secret("rrc")?;
+        let runner_id = Uuid::new_v4();
+        let request = ConsumeRunnerEnrollment {
+            token_digest: self.runner_secret_digest(token)?,
+            runner_id,
+            runner_name: name.into(),
+            credential_id: Uuid::new_v4(),
+            credential_digest: self.runner_secret_digest(&credential)?,
+            audit_id: Uuid::new_v4(),
+            correlation_id: Uuid::new_v4(),
+            now: Utc::now(),
+        };
+        self.pipelines
+            .consume_runner_enrollment(tenant_id, &request)
+            .await
+            .map_err(|error| match error {
+                PortError::NotFound => ApplicationError::InvalidCredentials,
+                _ => ApplicationError::Unavailable,
+            })?;
+        Ok(EnrolledRunner {
+            runner_id,
+            credential,
+        })
+    }
+
+    /// Rotates a runner credential with a five-minute overlap.
+    ///
+    /// # Errors
+    ///
+    /// Returns forbidden for non-administrators, not-found for an unknown/revoked runner, or
+    /// unavailable on entropy/persistence failure.
+    pub async fn rotate_runner_credential(
+        &self,
+        tenant_id: &str,
+        actor: &User,
+        runner_id: Uuid,
+    ) -> Result<EnrolledRunner, ApplicationError> {
+        if actor.role != Role::Administrator || actor.disabled {
+            return Err(ApplicationError::Forbidden);
+        }
+        let credential = generated_runner_secret("rrc")?;
+        let now = Utc::now();
+        self.pipelines
+            .rotate_runner_credential(
+                tenant_id,
+                &RotateRunnerCredential {
+                    runner_id,
+                    credential_id: Uuid::new_v4(),
+                    credential_digest: self.runner_secret_digest(&credential)?,
+                    overlap_expires_at: now + chrono::Duration::minutes(5),
+                    actor_id: actor.id,
+                    audit_id: Uuid::new_v4(),
+                    correlation_id: Uuid::new_v4(),
+                    now,
+                },
+            )
+            .await
+            .map_err(|error| match error {
+                PortError::NotFound => ApplicationError::PipelineNotFound,
+                _ => ApplicationError::Unavailable,
+            })?;
+        Ok(EnrolledRunner {
+            runner_id,
+            credential,
+        })
+    }
+
+    /// Immediately revokes a runner and every active credential.
+    ///
+    /// # Errors
+    ///
+    /// Returns forbidden for non-administrators, not-found for an unknown runner, or unavailable
+    /// on persistence failure.
+    pub async fn revoke_runner(
+        &self,
+        tenant_id: &str,
+        actor: &User,
+        runner_id: Uuid,
+    ) -> Result<(), ApplicationError> {
+        if actor.role != Role::Administrator || actor.disabled {
+            return Err(ApplicationError::Forbidden);
+        }
+        self.pipelines
+            .revoke_runner(
+                tenant_id,
+                &RevokeRunner {
+                    runner_id,
+                    actor_id: actor.id,
+                    audit_id: Uuid::new_v4(),
+                    correlation_id: Uuid::new_v4(),
+                    now: Utc::now(),
+                },
+            )
+            .await
+            .map_err(|error| match error {
+                PortError::NotFound => ApplicationError::PipelineNotFound,
+                _ => ApplicationError::Unavailable,
+            })
+    }
+
+    /// Lists the tenant runner fleet for an administrator.
+    ///
+    /// # Errors
+    ///
+    /// Returns forbidden for non-administrators or unavailable on persistence failure.
+    pub async fn list_runner_fleet(
+        &self,
+        tenant_id: &str,
+        actor: &User,
+    ) -> Result<Vec<RunnerFleetEntry>, ApplicationError> {
+        if actor.role != Role::Administrator || actor.disabled {
+            return Err(ApplicationError::Forbidden);
+        }
+        self.pipelines
+            .list_runner_fleet(tenant_id, Utc::now())
+            .await
+            .map_err(|_| ApplicationError::Unavailable)
+    }
+
+    /// Durably accepts one authenticated source-control delivery.
+    ///
+    /// Returns `true` for a newly accepted delivery and `false` for a duplicate provider
+    /// identity. Authentication and JSON decoding are adapter responsibilities so invalid
+    /// requests cannot reach persistence.
+    ///
+    /// # Errors
+    ///
+    /// Returns unavailable when the delivery cannot be persisted.
+    pub async fn accept_source_control_delivery(
+        &self,
+        tenant_id: &str,
+        delivery: &SourceControlDelivery,
+    ) -> Result<bool, ApplicationError> {
+        self.pipelines
+            .accept_source_control_delivery(tenant_id, delivery)
+            .await
+            .map_err(|_| ApplicationError::Unavailable)
+    }
+
+    /// Updates an active runner's display name, labels, and enabled/draining state.
+    ///
+    /// # Errors
+    ///
+    /// Returns forbidden for non-administrators, invalid input for malformed configuration,
+    /// not-found for an unknown/revoked runner, or unavailable on persistence failure.
+    pub async fn configure_runner(
+        &self,
+        tenant_id: &str,
+        actor: &User,
+        runner_id: Uuid,
+        name: &str,
+        labels: Vec<String>,
+        admin_state: &str,
+    ) -> Result<(), ApplicationError> {
+        if actor.role != Role::Administrator || actor.disabled {
+            return Err(ApplicationError::Forbidden);
+        }
+        let name = name.trim();
+        let mut normalized_labels = Vec::new();
+        for label in labels {
+            let label = label.trim();
+            let valid_start = label
+                .as_bytes()
+                .first()
+                .is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit());
+            let valid = !label.is_empty() && label.len() <= 63 && valid_start;
+            let valid_tail = label.bytes().all(|byte| {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"._-".contains(&byte)
+            });
+            if !valid || !valid_tail || normalized_labels.len() >= 32 {
+                return Err(ApplicationError::InvalidPipelineInput);
+            }
+            if !normalized_labels.iter().any(|known| known == label) {
+                normalized_labels.push(label.to_owned());
+            }
+        }
+        if name.is_empty()
+            || name.chars().count() > 80
+            || !matches!(admin_state, "enabled" | "draining")
+        {
+            return Err(ApplicationError::InvalidPipelineInput);
+        }
+        self.pipelines
+            .configure_runner(
+                tenant_id,
+                &ConfigureRunner {
+                    runner_id,
+                    name: name.into(),
+                    labels: normalized_labels,
+                    admin_state: admin_state.into(),
+                    actor_id: actor.id,
+                    audit_id: Uuid::new_v4(),
+                    correlation_id: Uuid::new_v4(),
+                    now: Utc::now(),
+                },
+            )
+            .await
+            .map_err(|error| match error {
+                PortError::NotFound => ApplicationError::PipelineNotFound,
+                _ => ApplicationError::Unavailable,
+            })
+    }
+
     /// Authenticates and records a bounded protocol-v1 remote-runner session.
+    ///
+    /// # Errors
+    ///
+    /// Returns invalid-event for an incompatible or malformed hello, unauthenticated for an
+    /// invalid or revoked machine credential, or unavailable when session metadata cannot be
+    /// persisted.
     pub async fn negotiate_runner_session(
         &self,
         tenant_id: &str,
@@ -2319,6 +2604,9 @@ impl ControlPlane {
             .runner_credential_key
             .ok_or(ApplicationError::Unauthenticated)?;
         if !credential.starts_with("rrc_") || credential.len() < 47 {
+            let _ = self
+                .audit_runner_authentication_failure(tenant_id, Some(runner_id), now)
+                .await;
             return Err(ApplicationError::Unauthenticated);
         }
         let material = self
@@ -2347,9 +2635,44 @@ impl ControlPlane {
             matched | equal
         });
         if !known_and_enabled || !authenticated {
+            let _ = self
+                .audit_runner_authentication_failure(tenant_id, Some(runner_id), now)
+                .await;
             return Err(ApplicationError::Unauthenticated);
         }
         Ok(())
+    }
+
+    /// Appends a bounded, secret-free runner authentication anomaly audit event.
+    ///
+    /// # Errors
+    ///
+    /// Returns unavailable when the audit event cannot be persisted.
+    pub async fn audit_runner_authentication_failure(
+        &self,
+        tenant_id: &str,
+        claimed_runner_id: Option<Uuid>,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<(), ApplicationError> {
+        self.pipelines
+            .audit_runner_authentication_failure(
+                tenant_id,
+                claimed_runner_id,
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                now,
+            )
+            .await
+            .map_err(|_| ApplicationError::Unavailable)
+    }
+
+    fn runner_secret_digest(&self, secret: &str) -> Result<Vec<u8>, ApplicationError> {
+        let key = self
+            .runner_credential_key
+            .ok_or(ApplicationError::Unavailable)?;
+        let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("fixed HMAC key is valid");
+        mac.update(secret.as_bytes());
+        Ok(mac.finalize().into_bytes().to_vec())
     }
 
     async fn authorized_remote_offer(
@@ -2370,6 +2693,12 @@ impl ControlPlane {
                 _ => ApplicationError::Unavailable,
             })
     }
+}
+
+fn generated_runner_secret(prefix: &str) -> Result<String, ApplicationError> {
+    let mut bytes = [0_u8; 32];
+    getrandom::fill(&mut bytes).map_err(|_| ApplicationError::Unavailable)?;
+    Ok(format!("{prefix}_{}", URL_SAFE_NO_PAD.encode(bytes)))
 }
 
 fn remote_uuid(raw: &serde_json::Value, name: &str) -> Result<Uuid, ApplicationError> {

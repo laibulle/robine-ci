@@ -1020,6 +1020,43 @@ impl PipelineRepository for Database {
         Ok(tenants)
     }
 
+    async fn accept_source_control_delivery(
+        &self,
+        tenant_id: &str,
+        delivery: &robine_core::pipelines::SourceControlDelivery,
+    ) -> Result<bool, PortError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        let accepted = sqlx::query(
+            "INSERT INTO github_deliveries \
+             (tenant_id, id, provider, provider_instance, provider_delivery_id, event, payload, \
+              status, received_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8) \
+             ON CONFLICT (tenant_id, provider, provider_instance, provider_delivery_id) \
+             DO NOTHING",
+        )
+        .bind(tenant_id)
+        .bind(&delivery.id)
+        .bind(&delivery.provider)
+        .bind(&delivery.provider_instance)
+        .bind(&delivery.provider_delivery_id)
+        .bind(&delivery.event)
+        .bind(&delivery.payload)
+        .bind(delivery.received_at)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| PortError::Unavailable)?
+        .rows_affected()
+            == 1;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        Ok(accepted)
+    }
+
     async fn create(
         &self,
         tenant_id: &str,
@@ -1508,6 +1545,257 @@ impl PipelineRepository for Database {
             admin_state: runner.2,
             credential_digests,
         })
+    }
+
+    async fn create_runner_enrollment(
+        &self,
+        tenant_id: &str,
+        enrollment: &robine_core::pipelines::NewRunnerEnrollment,
+    ) -> Result<(), PortError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        sqlx::query("INSERT INTO runner_enrollment_tokens (id, token_digest, expires_at, created_by, inserted_at, tenant_id) VALUES ($1, $2, $3, $4, $5, $6)")
+            .bind(enrollment.id).bind(&enrollment.token_digest).bind(enrollment.expires_at)
+            .bind(enrollment.created_by.to_string()).bind(enrollment.inserted_at).bind(tenant_id)
+            .execute(&mut *transaction).await.map_err(|error| if unique_violation(&error) { PortError::IdempotencyConflict } else { PortError::Unavailable })?;
+        insert_runner_audit(
+            &mut transaction,
+            tenant_id,
+            enrollment.audit_id,
+            &enrollment.created_by.to_string(),
+            "runner.enrollment_created",
+            "runner_enrollment_token",
+            enrollment.id,
+            enrollment.correlation_id,
+            enrollment.inserted_at,
+            serde_json::json!({"expires_at": enrollment.expires_at}),
+        )
+        .await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PortError::Unavailable)
+    }
+
+    async fn consume_runner_enrollment(
+        &self,
+        tenant_id: &str,
+        enrollment: &robine_core::pipelines::ConsumeRunnerEnrollment,
+    ) -> Result<(), PortError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        let token_id = sqlx::query_scalar::<_, Uuid>("SELECT id FROM runner_enrollment_tokens WHERE token_digest = $1 AND consumed_at IS NULL AND expires_at > $2 AND tenant_id = $3 FOR UPDATE")
+            .bind(&enrollment.token_digest).bind(enrollment.now).bind(tenant_id)
+            .fetch_optional(&mut *transaction).await.map_err(|_| PortError::Unavailable)?
+            .ok_or(PortError::NotFound)?;
+        sqlx::query("INSERT INTO remote_runners (id, name, admin_state, capabilities, labels, inserted_at, updated_at, tenant_id) VALUES ($1, $2, 'enabled', '{}', ARRAY[]::varchar[], $3, $3, $4)")
+            .bind(enrollment.runner_id).bind(&enrollment.runner_name).bind(enrollment.now).bind(tenant_id)
+            .execute(&mut *transaction).await.map_err(|_| PortError::Unavailable)?;
+        sqlx::query("INSERT INTO runner_credentials (id, runner_id, credential_digest, inserted_at, tenant_id) VALUES ($1, $2, $3, $4, $5)")
+            .bind(enrollment.credential_id).bind(enrollment.runner_id).bind(&enrollment.credential_digest).bind(enrollment.now).bind(tenant_id)
+            .execute(&mut *transaction).await.map_err(|_| PortError::Unavailable)?;
+        sqlx::query("UPDATE runner_enrollment_tokens SET consumed_at = $2, runner_id = $3 WHERE id = $1 AND tenant_id = $4")
+            .bind(token_id).bind(enrollment.now).bind(enrollment.runner_id).bind(tenant_id)
+            .execute(&mut *transaction).await.map_err(|_| PortError::Unavailable)?;
+        insert_runner_audit(
+            &mut transaction,
+            tenant_id,
+            enrollment.audit_id,
+            "runner-enrollment",
+            "runner.enrolled",
+            "remote_runner",
+            enrollment.runner_id,
+            enrollment.correlation_id,
+            enrollment.now,
+            serde_json::json!({}),
+        )
+        .await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PortError::Unavailable)
+    }
+
+    async fn rotate_runner_credential(
+        &self,
+        tenant_id: &str,
+        credential: &robine_core::pipelines::RotateRunnerCredential,
+    ) -> Result<(), PortError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        sqlx::query_scalar::<_, Uuid>("SELECT id FROM remote_runners WHERE id = $1 AND tenant_id = $2 AND admin_state <> 'revoked' FOR UPDATE")
+            .bind(credential.runner_id).bind(tenant_id)
+            .fetch_optional(&mut *transaction).await.map_err(|_| PortError::Unavailable)?
+            .ok_or(PortError::NotFound)?;
+        sqlx::query("UPDATE runner_credentials SET expires_at = $2 WHERE runner_id = $1 AND tenant_id = $3 AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > $2)").bind(credential.runner_id).bind(credential.overlap_expires_at).bind(tenant_id).execute(&mut *transaction).await.map_err(|_| PortError::Unavailable)?;
+        sqlx::query("INSERT INTO runner_credentials (id, runner_id, credential_digest, inserted_at, tenant_id) VALUES ($1, $2, $3, $4, $5)").bind(credential.credential_id).bind(credential.runner_id).bind(&credential.credential_digest).bind(credential.now).bind(tenant_id).execute(&mut *transaction).await.map_err(|_| PortError::Unavailable)?;
+        insert_runner_audit(
+            &mut transaction,
+            tenant_id,
+            credential.audit_id,
+            &credential.actor_id.to_string(),
+            "runner.credential_rotated",
+            "remote_runner",
+            credential.runner_id,
+            credential.correlation_id,
+            credential.now,
+            serde_json::json!({"previous_credentials_expire_at": credential.overlap_expires_at}),
+        )
+        .await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PortError::Unavailable)
+    }
+
+    async fn revoke_runner(
+        &self,
+        tenant_id: &str,
+        revocation: &robine_core::pipelines::RevokeRunner,
+    ) -> Result<(), PortError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        let updated = sqlx::query("UPDATE remote_runners SET admin_state = 'revoked', revoked_at = $2, updated_at = $2 WHERE id = $1 AND tenant_id = $3").bind(revocation.runner_id).bind(revocation.now).bind(tenant_id).execute(&mut *transaction).await.map_err(|_| PortError::Unavailable)?;
+        if updated.rows_affected() != 1 {
+            return Err(PortError::NotFound);
+        }
+        sqlx::query("UPDATE runner_credentials SET revoked_at = $2 WHERE runner_id = $1 AND tenant_id = $3 AND revoked_at IS NULL").bind(revocation.runner_id).bind(revocation.now).bind(tenant_id).execute(&mut *transaction).await.map_err(|_| PortError::Unavailable)?;
+        insert_runner_audit(
+            &mut transaction,
+            tenant_id,
+            revocation.audit_id,
+            &revocation.actor_id.to_string(),
+            "runner.revoked",
+            "remote_runner",
+            revocation.runner_id,
+            revocation.correlation_id,
+            revocation.now,
+            serde_json::json!({}),
+        )
+        .await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PortError::Unavailable)
+    }
+
+    async fn list_runner_fleet(
+        &self,
+        tenant_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<robine_core::pipelines::RunnerFleetEntry>, PortError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        let rows = sqlx::query_as::<_, (Uuid, String, String, Vec<String>, serde_json::Value, Option<i32>, Option<String>, Option<NaiveDateTime>, i64)>(
+            "SELECT runner.id, runner.name, runner.admin_state, runner.labels, runner.capabilities, \
+                    runner.protocol_version, runner.software_version, runner.last_seen_at, \
+                    (SELECT COUNT(*) FROM job_attempts AS attempt WHERE attempt.runner_id = runner.id::text \
+                     AND attempt.tenant_id = runner.tenant_id AND attempt.status IN ('queued','preparing','running','cancelling')) \
+             FROM remote_runners AS runner WHERE runner.tenant_id = $1 ORDER BY runner.name, runner.id"
+        ).bind(tenant_id).fetch_all(&mut *transaction).await.map_err(|_| PortError::Unavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let concurrency = row
+                    .4
+                    .get("concurrency")
+                    .and_then(serde_json::Value::as_i64)
+                    .filter(|value| (1..=64).contains(value))
+                    .unwrap_or(1);
+                let connectivity = if row.2 == "revoked" || row.7.is_none() {
+                    "offline"
+                } else if row
+                    .7
+                    .is_some_and(|seen| seen.and_utc() < now - chrono::Duration::seconds(60))
+                {
+                    "stale"
+                } else if row.8 > 0 {
+                    "busy"
+                } else {
+                    "online"
+                };
+                robine_core::pipelines::RunnerFleetEntry {
+                    id: row.0,
+                    name: row.1,
+                    admin_state: row.2,
+                    connectivity: connectivity.into(),
+                    labels: row.3,
+                    capabilities: row.4,
+                    protocol_version: row.5,
+                    software_version: row.6,
+                    last_seen_at: row.7.map(|seen| seen.and_utc()),
+                    active_attempts: row.8,
+                    concurrency,
+                    available_slots: (concurrency - row.8).max(0),
+                }
+            })
+            .collect())
+    }
+
+    async fn configure_runner(
+        &self,
+        tenant_id: &str,
+        configuration: &robine_core::pipelines::ConfigureRunner,
+    ) -> Result<(), PortError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        let before = sqlx::query_as::<_, (String, Vec<String>, String)>("SELECT name, labels, admin_state FROM remote_runners WHERE id = $1 AND tenant_id = $2 AND admin_state <> 'revoked' FOR UPDATE")
+            .bind(configuration.runner_id).bind(tenant_id).fetch_optional(&mut *transaction).await.map_err(|_| PortError::Unavailable)?.ok_or(PortError::NotFound)?;
+        sqlx::query("UPDATE remote_runners SET name = $2, labels = $3, admin_state = $4, updated_at = $5 WHERE id = $1 AND tenant_id = $6")
+            .bind(configuration.runner_id).bind(&configuration.name).bind(&configuration.labels).bind(&configuration.admin_state).bind(configuration.now).bind(tenant_id)
+            .execute(&mut *transaction).await.map_err(|_| PortError::Unavailable)?;
+        insert_runner_audit(&mut transaction, tenant_id, configuration.audit_id, &configuration.actor_id.to_string(), "runner.configuration_updated", "remote_runner", configuration.runner_id, configuration.correlation_id, configuration.now, serde_json::json!({"before":{"name":before.0,"labels":before.1,"admin_state":before.2},"after":{"name":configuration.name,"labels":configuration.labels,"admin_state":configuration.admin_state}})).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PortError::Unavailable)
+    }
+
+    async fn audit_runner_authentication_failure(
+        &self,
+        tenant_id: &str,
+        claimed_runner_id: Option<Uuid>,
+        audit_id: Uuid,
+        correlation_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<(), PortError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        insert_runner_audit(
+            &mut transaction,
+            tenant_id,
+            audit_id,
+            "anonymous:runner-authentication",
+            "runner.authentication_failed",
+            "remote_runner",
+            claimed_runner_id.unwrap_or(Uuid::nil()),
+            correlation_id,
+            now,
+            serde_json::json!({"claimed_runner_id_valid":claimed_runner_id.is_some()}),
+        )
+        .await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PortError::Unavailable)
     }
 
     async fn record_runner_session(
@@ -2531,6 +2819,29 @@ fn unique_violation(error: &sqlx::Error) -> bool {
     error
         .as_database_error()
         .is_some_and(|database| database.code().as_deref() == Some("23505"))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn insert_runner_audit(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    id: Uuid,
+    actor_id: &str,
+    action: &str,
+    target_type: &str,
+    target_id: Uuid,
+    correlation_id: Uuid,
+    occurred_at: DateTime<Utc>,
+    mut metadata: serde_json::Value,
+) -> Result<(), PortError> {
+    if let Some(object) = metadata.as_object_mut() {
+        object.insert("correlation_id".into(), serde_json::json!(correlation_id));
+    }
+    sqlx::query("INSERT INTO audit_events (id, actor_id, action, target_type, target_id, metadata, occurred_at, tenant_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)")
+        .bind(id).bind(actor_id).bind(action).bind(target_type).bind(target_id)
+        .bind(metadata).bind(occurred_at).bind(tenant_id)
+        .execute(&mut **transaction).await.map_err(|_| PortError::Unavailable)?;
+    Ok(())
 }
 
 async fn load_attempt_for_update(

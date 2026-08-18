@@ -7,7 +7,7 @@ use robine_execution::{DockerCli, DockerConfig};
 use robine_oidc::OidcClient;
 use robine_persistence::Database;
 use robine_secrets::AesGcmKeyring;
-use robine_server::AppState;
+use robine_server::{AppState, WebhookConfiguration};
 use robine_source::HttpArchiveFetcher;
 use robine_storage::{
     BlobStore, LocalBlobStore, S3BlobStore, S3Config, S3Encryption, StorageQuotas,
@@ -134,7 +134,14 @@ async fn main() -> io::Result<()> {
         }
     }
     let control_plane = Arc::new(control_plane);
-    let state = web::Data::new(AppState::new(database, control_plane.clone()));
+    let webhook_configuration = WebhookConfiguration::new(
+        std::env::var("GITHUB_WEBHOOK_SECRET").ok(),
+        std::env::var("GITLAB_WEBHOOK_SECRET").ok(),
+        std::env::var("FORGEJO_WEBHOOK_SECRET").ok(),
+    );
+    let state = web::Data::new(
+        AppState::new(database, control_plane.clone()).with_webhooks(webhook_configuration),
+    );
 
     let (shutdown_sender, shutdown_receiver) = watch::channel(false);
     let worker_control_plane = control_plane.clone();

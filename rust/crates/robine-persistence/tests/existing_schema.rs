@@ -12,7 +12,8 @@ use robine_core::{
     identity::{OidcAuthorization, OidcClaims, Role, User},
     pipelines::{
         CreatePipelineInput, JobState, NewJob, NewPipeline, NewWorkflowRevision,
-        RecordAttemptEvent, RecordRemoteAttemptEvent, SchedulerClaim, source_digest,
+        RecordAttemptEvent, RecordRemoteAttemptEvent, SchedulerClaim, SourceControlDelivery,
+        source_digest,
     },
     ports::{IdentityRepository, OidcProvider, PipelineRepository, PortError},
 };
@@ -28,6 +29,60 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 struct FakeOidc(OidcClaims);
+
+#[tokio::test]
+async fn source_control_delivery_acceptance_is_tenant_scoped_and_deduplicated() {
+    let Ok(database_url) = std::env::var("ROBINE_DATABASE_INTEGRATION_URL") else {
+        return;
+    };
+    let database = Database::connect(&database_url, 2)
+        .await
+        .expect("connect migrated database");
+    let tenant = format!("rust-webhook-{}", Uuid::new_v4());
+    let delivery = SourceControlDelivery {
+        id: format!("gitlab:default:{}", Uuid::new_v4()),
+        provider: "gitlab".into(),
+        provider_instance: "default".into(),
+        provider_delivery_id: Uuid::new_v4().to_string(),
+        event: "Push Hook".into(),
+        payload: serde_json::json!({"after": "a".repeat(40)}),
+        received_at: Utc::now(),
+    };
+    assert!(
+        database
+            .accept_source_control_delivery(&tenant, &delivery)
+            .await
+            .expect("accept delivery")
+    );
+    assert!(
+        !database
+            .accept_source_control_delivery(&tenant, &delivery)
+            .await
+            .expect("deduplicate delivery")
+    );
+
+    let mut transaction = database
+        .tenant_transaction(&tenant)
+        .await
+        .expect("delivery verification transaction");
+    let count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM github_deliveries WHERE provider = $1 \
+         AND provider_instance = $2 AND provider_delivery_id = $3",
+    )
+    .bind(&delivery.provider)
+    .bind(&delivery.provider_instance)
+    .bind(&delivery.provider_delivery_id)
+    .fetch_one(&mut *transaction)
+    .await
+    .expect("read accepted delivery");
+    sqlx::query("DELETE FROM github_deliveries WHERE id = $1")
+        .bind(&delivery.id)
+        .execute(&mut *transaction)
+        .await
+        .expect("cleanup delivery");
+    transaction.commit().await.expect("commit cleanup");
+    assert_eq!(count, 1);
+}
 
 #[async_trait]
 impl OidcProvider for FakeOidc {
@@ -1585,11 +1640,144 @@ async fn heartbeat_and_expiry_reconciliation_are_atomic_and_tenant_scoped() {
                 repository_bytes: 500_000_000,
             },
         );
+    let administrator = User {
+        id: Uuid::new_v4(),
+        email: "runner-admin@example.test".into(),
+        role: Role::Administrator,
+        disabled: false,
+        inserted_at: now,
+    };
+    let enrollment = control_plane
+        .create_runner_enrollment(&tenant, &administrator)
+        .await
+        .expect("create runner enrollment");
+    assert!(enrollment.token.starts_with("rbe_"));
+    let identity = control_plane
+        .enroll_runner(&tenant, &enrollment.token, "rust-enrolled-runner")
+        .await
+        .expect("consume runner enrollment");
+    assert!(identity.credential.starts_with("rrc_"));
+    assert!(matches!(
+        control_plane
+            .enroll_runner(&tenant, &enrollment.token, "replay")
+            .await,
+        Err(ApplicationError::InvalidCredentials)
+    ));
+    control_plane
+        .heartbeat_runner_attempts(&tenant, identity.runner_id, &identity.credential, 60)
+        .await
+        .expect("new runner credential authenticates");
+    control_plane
+        .configure_runner(
+            &tenant,
+            &administrator,
+            identity.runner_id,
+            "rust-enrolled-renamed",
+            vec!["linux".into(), "arm64".into()],
+            "draining",
+        )
+        .await
+        .expect("configure runner");
+    let fleet = control_plane
+        .list_runner_fleet(&tenant, &administrator)
+        .await
+        .expect("list runner fleet");
+    let configured = fleet
+        .iter()
+        .find(|runner| runner.id == identity.runner_id)
+        .expect("configured runner in fleet");
+    assert_eq!(configured.name, "rust-enrolled-renamed");
+    assert_eq!(configured.admin_state, "draining");
+    assert_eq!(configured.labels, vec!["linux", "arm64"]);
+    assert_eq!(configured.connectivity, "online");
+    let rotated = control_plane
+        .rotate_runner_credential(&tenant, &administrator, identity.runner_id)
+        .await
+        .expect("rotate runner credential");
+    control_plane
+        .heartbeat_runner_attempts(&tenant, identity.runner_id, &identity.credential, 60)
+        .await
+        .expect("old runner credential overlaps");
+    control_plane
+        .heartbeat_runner_attempts(&tenant, identity.runner_id, &rotated.credential, 60)
+        .await
+        .expect("new runner credential authenticates");
+    control_plane
+        .revoke_runner(&tenant, &administrator, identity.runner_id)
+        .await
+        .expect("revoke runner");
+    assert!(matches!(
+        control_plane
+            .heartbeat_runner_attempts(&tenant, identity.runner_id, &rotated.credential, 60)
+            .await,
+        Err(ApplicationError::Unauthenticated)
+    ));
     assert!(matches!(
         control_plane
             .heartbeat_runner_attempts(&tenant, runner_id, "rrc_invalid", 120)
             .await,
         Err(ApplicationError::Unauthenticated)
+    ));
+    let mut anomaly_read = database
+        .tenant_transaction(&tenant)
+        .await
+        .expect("authentication audit transaction");
+    let anomaly = sqlx::query_as::<_, (String, serde_json::Value)>(
+        "SELECT action, metadata FROM audit_events WHERE action = 'runner.authentication_failed' \
+         AND target_id = $1 AND tenant_id = $2",
+    )
+    .bind(runner_id)
+    .bind(&tenant)
+    .fetch_one(&mut *anomaly_read)
+    .await
+    .expect("authentication anomaly audit");
+    anomaly_read.commit().await.expect("commit anomaly read");
+    assert_eq!(anomaly.0, "runner.authentication_failed");
+    assert_eq!(anomaly.1["claimed_runner_id_valid"], true);
+    assert!(anomaly.1.get("correlation_id").is_some());
+    assert_eq!(
+        control_plane
+            .negotiate_runner_session(
+                &tenant,
+                runner_id,
+                &credential,
+                &[1],
+                "0.3.0-test",
+                &serde_json::json!({"docker": true, "concurrency": 2}),
+            )
+            .await
+            .expect("negotiate runner session"),
+        1
+    );
+    let mut session_read = database
+        .tenant_transaction(&tenant)
+        .await
+        .expect("session metadata transaction");
+    let session_metadata = sqlx::query_as::<_, (Option<i32>, Option<String>, serde_json::Value)>(
+        "SELECT protocol_version, software_version, capabilities FROM remote_runners \
+         WHERE id = $1 AND tenant_id = $2",
+    )
+    .bind(runner_id)
+    .bind(&tenant)
+    .fetch_one(&mut *session_read)
+    .await
+    .expect("load runner session metadata");
+    session_read.commit().await.expect("commit session read");
+    assert_eq!(session_metadata.0, Some(1));
+    assert_eq!(session_metadata.1.as_deref(), Some("0.3.0-test"));
+    assert_eq!(session_metadata.2["docker"], true);
+    assert!(matches!(
+        control_plane
+            .negotiate_runner_session(
+                &tenant,
+                runner_id,
+                &credential,
+                &[99],
+                "0.3.0-test",
+                &serde_json::json!({}),
+            )
+            .await,
+        Err(ApplicationError::InvalidAttemptEvent)
     ));
     let runner_heartbeat = control_plane
         .heartbeat_runner_attempts(&tenant, runner_id, &credential, 120)
