@@ -28,6 +28,13 @@ pub struct User {
     pub id: Uuid,
     pub email: String,
     pub role: Role,
+    pub disabled: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocalIdentity {
+    pub user: User,
+    pub password_hash: String,
 }
 
 #[derive(Debug, Error, Eq, PartialEq)]

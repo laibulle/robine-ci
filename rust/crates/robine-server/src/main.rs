@@ -1,6 +1,7 @@
 use std::{io, sync::Arc};
 
 use actix_web::{App, HttpServer, web};
+use chrono::{Duration, Utc};
 use robine_application::ControlPlane;
 use robine_persistence::Database;
 use robine_server::AppState;
@@ -15,7 +16,12 @@ async fn main() -> io::Result<()> {
             .await
             .map_err(io::Error::other)?,
     );
-    let control_plane = Arc::new(ControlPlane::new(database.clone(), database.clone()));
+    let mut control_plane = ControlPlane::new(database.clone(), database.clone());
+    if let Ok(token) = std::env::var("ROBINE_BOOTSTRAP_TOKEN") {
+        control_plane =
+            control_plane.with_bootstrap_token(&token, Utc::now() + Duration::minutes(15));
+    }
+    let control_plane = Arc::new(control_plane);
     let state = web::Data::new(AppState::new(database, control_plane));
 
     HttpServer::new(move || {

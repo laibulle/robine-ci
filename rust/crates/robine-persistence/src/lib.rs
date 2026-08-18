@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use robine_core::{
-    identity::{Role, User},
+    identity::{LocalIdentity, Role, User},
     pipelines::{PipelineProjection, PipelineState, UnknownPipelineState},
     ports::{IdentityRepository, PipelineRepository, PortError},
 };
@@ -117,13 +117,92 @@ impl Readiness for Database {
 
 #[async_trait]
 impl IdentityRepository for Database {
+    async fn bootstrap_administrator(
+        &self,
+        user_id: Uuid,
+        credential_id: Uuid,
+        email: &str,
+        password_hash: &str,
+        inserted_at: DateTime<Utc>,
+    ) -> Result<User, PortError> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        sqlx::query("LOCK TABLE users IN EXCLUSIVE MODE")
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        let count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users")
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        if count != 0 {
+            return Err(PortError::AlreadyBootstrapped);
+        }
+
+        sqlx::query(
+            "INSERT INTO users (id, email, role, disabled, inserted_at) \
+             VALUES ($1, $2, 'administrator', false, $3)",
+        )
+        .bind(user_id)
+        .bind(email)
+        .bind(inserted_at)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| PortError::Unavailable)?;
+        sqlx::query(
+            "INSERT INTO local_credentials (id, user_id, password_hash, inserted_at) \
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(credential_id)
+        .bind(user_id)
+        .bind(password_hash)
+        .bind(inserted_at)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| PortError::Unavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+
+        Ok(User {
+            id: user_id,
+            email: email.into(),
+            role: Role::Administrator,
+            disabled: false,
+        })
+    }
+
+    async fn get_local_identity(&self, email: &str) -> Result<LocalIdentity, PortError> {
+        let row = sqlx::query_as::<_, LocalIdentityRow>(
+            "SELECT users.id, users.email, users.role, users.disabled, \
+                    local_credentials.password_hash \
+             FROM users \
+             JOIN local_credentials ON local_credentials.user_id = users.id \
+             WHERE users.email = $1",
+        )
+        .bind(email)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|_| PortError::Unavailable)?
+        .ok_or(PortError::NotFound)?;
+
+        Ok(LocalIdentity {
+            user: user_from_parts(row.id, row.email, &row.role, row.disabled)?,
+            password_hash: row.password_hash,
+        })
+    }
+
     async fn resolve_session(
         &self,
         token_digest: &[u8],
         now: DateTime<Utc>,
     ) -> Result<User, PortError> {
         let row = sqlx::query_as::<_, UserRow>(
-            "SELECT users.id, users.email, users.role \
+            "SELECT users.id, users.email, users.role, users.disabled \
              FROM sessions \
              JOIN users ON users.id = sessions.user_id \
              WHERE sessions.token_digest = $1 \
@@ -138,11 +217,53 @@ impl IdentityRepository for Database {
         .map_err(|_| PortError::Unavailable)?
         .ok_or(PortError::NotFound)?;
 
-        Ok(User {
-            id: row.id,
-            email: row.email,
-            role: Role::try_from(row.role.as_str()).map_err(|_| PortError::InvalidData)?,
-        })
+        user_from_parts(row.id, row.email, &row.role, row.disabled)
+    }
+
+    async fn create_session(
+        &self,
+        id: Uuid,
+        user_id: Uuid,
+        token_digest: &[u8],
+        expires_at: DateTime<Utc>,
+        inserted_at: DateTime<Utc>,
+    ) -> Result<(), PortError> {
+        sqlx::query(
+            "INSERT INTO sessions \
+             (id, user_id, token_digest, expires_at, inserted_at) \
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(id)
+        .bind(user_id)
+        .bind(token_digest)
+        .bind(expires_at)
+        .bind(inserted_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|_| PortError::Unavailable)?;
+        Ok(())
+    }
+
+    async fn revoke_session(
+        &self,
+        token_digest: &[u8],
+        revoked_at: DateTime<Utc>,
+    ) -> Result<(), PortError> {
+        let result = sqlx::query(
+            "UPDATE sessions SET revoked_at = $2 \
+             WHERE token_digest = $1 AND revoked_at IS NULL",
+        )
+        .bind(token_digest)
+        .bind(revoked_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|_| PortError::Unavailable)?;
+
+        if result.rows_affected() == 0 {
+            Err(PortError::NotFound)
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -175,6 +296,25 @@ struct UserRow {
     id: Uuid,
     email: String,
     role: String,
+    disabled: bool,
+}
+
+#[derive(sqlx::FromRow)]
+struct LocalIdentityRow {
+    id: Uuid,
+    email: String,
+    role: String,
+    disabled: bool,
+    password_hash: String,
+}
+
+fn user_from_parts(id: Uuid, email: String, role: &str, disabled: bool) -> Result<User, PortError> {
+    Ok(User {
+        id,
+        email,
+        role: Role::try_from(role).map_err(|_| PortError::InvalidData)?,
+        disabled,
+    })
 }
 
 impl TryFrom<PipelineRecordRow> for PipelineProjection {
