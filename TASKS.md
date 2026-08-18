@@ -486,13 +486,13 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 
 - **Spec:** [RUN-003](docs/specs/runners/run-003-macos-native-runner.md)
 - **Depends on:** RUN-203
-- [x] Owner: Codex — native execution and launchd operation verified end to end on Apple Silicon macOS.
-- [x] Add a dedicated host executor with attempt-isolated workspaces and shared step semantics.
-- [x] Normalize Darwin/Apple Silicon capabilities and keep default Docker jobs off native runners.
-- [x] Preserve bounded redacted logs, timeout, cancellation, conditional execution, and cleanup.
-- [x] Publish and restore cache and artifact archives through attempt-scoped transfers.
-- [x] Verify a TLS-connected pipeline on target Mac hardware.
-- [x] Document and verify launchd installation, upgrades, troubleshooting, and removal.
+- [~] Owner: Codex — the Rust port audit found the former native-macOS completion claim was not preserved by the Docker-only runner rewrite.
+- [ ] Add a dedicated Rust host executor with attempt-isolated workspaces and shared step semantics.
+- [ ] Normalize Darwin/Apple Silicon capabilities and keep default Docker jobs off native runners.
+- [ ] Preserve bounded redacted logs, timeout, cancellation, conditional execution, and cleanup.
+- [ ] Publish and restore cache and artifact archives through attempt-scoped transfers.
+- [ ] Verify a TLS-connected pipeline on target Mac hardware.
+- [ ] Document and verify launchd installation, upgrades, troubleshooting, and removal.
 
 These items are intentionally unordered and must receive specifications before implementation:
 

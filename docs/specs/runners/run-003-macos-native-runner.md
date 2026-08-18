@@ -2,7 +2,7 @@
 
 ## Status
 
-- **State:** Shipped
+- **State:** Implementing
 - **Owner:** Execution
 - **Target:** Post-MVP
 - **Last updated:** 2026-08-13
@@ -65,13 +65,13 @@ A self-hosted operator with a dedicated Mac who needs CI evidence from macOS or 
 
 - **OR-1:** Production use MUST dedicate a non-administrator local account and machine to trusted CI workloads.
 - **OR-2:** The runner MUST make only outbound TLS connections to the Robine control plane.
-- **OR-3:** Operators MUST install target-native Erlang/OTP and Elixir versions because native Exile runtime files are not portable across OS or architecture.
+- **OR-3:** Operators MUST install the target-native Rust runner artifact and the Apple build tools required by their workflows; no Elixir, Erlang, ERTS, or Docker runtime is required for native execution.
 
 ## Proposed design
 
-The existing standalone runner detects Darwin at startup and selects `NativeRunner`; Linux remains on `DockerRunner`. The protocol advertises normalized system capabilities, while `runs-on` continues to use the all-labels-match rule. Since jobs without `runs-on` require `docker`, they never land on the native Mac accidentally.
+The standalone Rust runner detects Darwin at startup and selects a native process adapter; Linux remains on `DockerCli`. The protocol advertises normalized system capabilities, while `runs-on` continues to use the all-labels-match rule. Since jobs without `runs-on` require `docker`, they never land on the native Mac accidentally.
 
-The native adapter creates an attempt-namespaced directory under the operating-system temporary directory, validates and copies the source tree, and launches each command through Exile with an explicit working directory and environment. It streams bounded output through the existing stateful secret redactor, polls durable cancellation, terminates the process on cancellation or timeout, and removes the workspace in an `after` block.
+The native adapter creates an attempt-namespaced directory under the operating-system temporary directory, validates and copies the source tree, and launches each command through Tokio's process API with an explicit working directory and environment. It streams bounded output through the existing stateful secret redactor, polls durable cancellation, terminates the process on cancellation or timeout, and removes the workspace through an owned cleanup guard.
 
 ## Failure modes and recovery
 
@@ -92,13 +92,13 @@ The existing runner connection, heartbeat, attempt, log, cancellation, and runne
 
 ## Acceptance criteria
 
-- [x] Darwin and Apple Silicon facts normalize to `macos` and `arm64`, and select native execution.
-- [x] Native capacity can be scheduled without satisfying the default `docker` label.
-- [x] Sequential steps share a fresh workspace and output is redacted across chunk boundaries.
-- [x] Command failure, conditional skip, cancellation, and cleanup are covered by automated tests.
-- [x] Cache and artifact archives publish and restore through the shared transfer contract.
-- [x] A target Mac builds the runner artifact, connects through TLS, and completes a real `runs-on: [macos]` pipeline.
-- [x] launchd installation, upgrade, troubleshooting, and removal are documented and verified on macOS.
+- [ ] Darwin and Apple Silicon facts normalize to `macos` and `arm64`, and select native execution.
+- [ ] Native capacity can be scheduled without satisfying the default `docker` label.
+- [ ] Sequential steps share a fresh workspace and output is redacted across chunk boundaries.
+- [ ] Command failure, conditional skip, cancellation, and cleanup are covered by automated tests.
+- [ ] Cache and artifact archives publish and restore through the shared transfer contract.
+- [ ] A target Mac builds the runner artifact, connects through TLS, and completes a real `runs-on: [macos]` pipeline.
+- [ ] launchd installation, upgrade, troubleshooting, and removal are documented and verified on macOS.
 
 ## Open questions
 
