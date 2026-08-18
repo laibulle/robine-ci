@@ -26,6 +26,13 @@ async fn main() -> io::Result<()> {
             .map_err(io::Error::other)?,
     );
     let mut control_plane = ControlPlane::new(database.clone(), database.clone());
+    control_plane = control_plane.with_workflow_limits(robine_workflows::WorkflowLimits {
+        max_bytes: environment_usize("ROBINE_WORKFLOW_MAX_BYTES", 262_144)?,
+        max_jobs: environment_usize("ROBINE_WORKFLOW_MAX_JOBS", 64)?,
+        max_steps_per_job: environment_usize("ROBINE_WORKFLOW_MAX_STEPS_PER_JOB", 128)?,
+        max_total_steps: environment_usize("ROBINE_WORKFLOW_MAX_TOTAL_STEPS", 512)?,
+        max_graph_depth: environment_usize("ROBINE_WORKFLOW_MAX_GRAPH_DEPTH", 16)?,
+    });
     let source_fetcher = HttpArchiveFetcher::new(
         std::env::var("GITHUB_APP_ID").ok(),
         std::env::var("GITHUB_APP_PRIVATE_KEY")

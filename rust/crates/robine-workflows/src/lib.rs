@@ -5,6 +5,9 @@ use serde_json::{Map as JsonMap, Value as JsonValue, json};
 use serde_yaml_ng::{Mapping, Value as YamlValue};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
+mod composition;
+pub use composition::{ResolvedWorkflow, resolve};
+
 const ROOT_KEYS: &[&str] = &["version", "name", "on", "jobs"];
 const JOB_KEYS: &[&str] = &[
     "image", "needs", "steps", "timeout", "shell", "env", "secrets", "services", "runs-on", "if",
@@ -26,6 +29,23 @@ const BUILD_ENVIRONMENT: &[&str] = &[
     "ROBINE_BUILD_PIPELINE_ID",
     "ROBINE_BUILD_TRIGGER",
 ];
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct InputDefinition {
+    kind: InputKind,
+    required: bool,
+    default: Option<String>,
+    options: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InputKind {
+    String,
+    Choice,
+    Boolean,
+}
+
+type InputDefinitions = BTreeMap<String, InputDefinition>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WorkflowLimits {
@@ -105,11 +125,36 @@ pub struct ValidatedWorkflow {
     pub jobs: BTreeMap<String, PipelineJob>,
     pub order: Vec<String>,
     pub warnings: Vec<Diagnostic>,
-    dispatch_inputs: BTreeSet<String>,
-    call_inputs: BTreeSet<String>,
+    dispatch_inputs: InputDefinitions,
+    call_inputs: InputDefinitions,
 }
 
 impl ValidatedWorkflow {
+    /// Normalizes submitted values for the selected trigger, including defaults.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable diagnostic for an undeclared trigger or invalid submitted value.
+    pub fn normalized_inputs(
+        &self,
+        trigger: &str,
+        inputs: &BTreeMap<String, String>,
+    ) -> Result<BTreeMap<String, String>, Diagnostic> {
+        let definitions = match trigger {
+            "manual" | "workflow_dispatch" => &self.dispatch_inputs,
+            "workflow_call" => &self.call_inputs,
+            _ if inputs.is_empty() => return Ok(BTreeMap::new()),
+            _ => {
+                return Err(unlocated_diagnostic(
+                    "manual_input.trigger",
+                    "inputs are accepted only by an input-bearing trigger",
+                    vec!["on".into()],
+                ));
+            }
+        };
+        normalize_submitted_inputs(definitions, inputs, trigger == "workflow_call")
+    }
+
     /// Produces pipeline job inputs and injects only declared trigger input environments.
     ///
     /// # Errors
@@ -131,25 +176,12 @@ impl ValidatedWorkflow {
                 vec!["on".into()],
             ));
         }
-        let (declared, prefix) = match trigger {
-            "manual" | "workflow_dispatch" => (&self.dispatch_inputs, "ROBINE_INPUT_"),
-            "workflow_call" => (&self.call_inputs, "ROBINE_CALL_INPUT_"),
-            _ if inputs.is_empty() => return Ok(self.jobs.clone()),
-            _ => {
-                return Err(unlocated_diagnostic(
-                    "manual_input.trigger",
-                    "inputs are accepted only by an input-bearing trigger",
-                    vec!["on".into()],
-                ));
-            }
+        let prefix = match trigger {
+            "manual" | "workflow_dispatch" => "ROBINE_INPUT_",
+            "workflow_call" => "ROBINE_CALL_INPUT_",
+            _ => return Ok(self.jobs.clone()),
         };
-        if inputs.keys().any(|name| !declared.contains(name)) {
-            return Err(unlocated_diagnostic(
-                "manual_input.unknown",
-                "input is not declared by the workflow trigger",
-                vec!["on".into()],
-            ));
-        }
+        let normalized = self.normalized_inputs(trigger, inputs)?;
         let mut jobs = self.jobs.clone();
         for job in jobs.values_mut() {
             let Some(execution) = job.execution.as_object_mut() else {
@@ -170,7 +202,7 @@ impl ValidatedWorkflow {
                     vec!["jobs".into()],
                 ));
             };
-            for (name, value) in inputs {
+            for (name, value) in &normalized {
                 environment.insert(
                     format!("{prefix}{}", name.to_ascii_uppercase()),
                     JsonValue::String(value.clone()),
@@ -390,7 +422,7 @@ fn validate_document(
 
 fn validate_triggers(
     triggers: &Mapping,
-) -> Result<(BTreeSet<String>, BTreeSet<String>), Vec<Diagnostic>> {
+) -> Result<(InputDefinitions, InputDefinitions), Vec<Diagnostic>> {
     let supported = [
         "push",
         "pull_request",
@@ -436,9 +468,9 @@ fn validate_triggers(
     Ok((dispatch, call))
 }
 
-fn trigger_inputs(triggers: &Mapping, trigger: &str) -> Result<BTreeSet<String>, Vec<Diagnostic>> {
+fn trigger_inputs(triggers: &Mapping, trigger: &str) -> Result<InputDefinitions, Vec<Diagnostic>> {
     let Some(definition) = yaml_get(triggers, trigger) else {
-        return Ok(BTreeSet::new());
+        return Ok(BTreeMap::new());
     };
     let Some(definition) = definition.as_mapping() else {
         return Err(vec![unlocated_diagnostic(
@@ -447,8 +479,12 @@ fn trigger_inputs(triggers: &Mapping, trigger: &str) -> Result<BTreeSet<String>,
             vec!["on".into(), trigger.into()],
         )]);
     };
+    let unknown = unknown_keys(definition, &["inputs"], &["on".into(), trigger.into()]);
+    if !unknown.is_empty() {
+        return Err(unknown);
+    }
     let Some(inputs) = yaml_get(definition, "inputs") else {
-        return Ok(BTreeSet::new());
+        return Ok(BTreeMap::new());
     };
     let Some(inputs) = inputs.as_mapping().filter(|inputs| inputs.len() <= 16) else {
         return Err(vec![unlocated_diagnostic(
@@ -457,18 +493,213 @@ fn trigger_inputs(triggers: &Mapping, trigger: &str) -> Result<BTreeSet<String>,
             vec!["on".into(), trigger.into(), "inputs".into()],
         )]);
     };
-    let mut names = BTreeSet::new();
+    let mut definitions = BTreeMap::new();
     for (name, definition) in string_entries(inputs) {
-        if !valid_input_id(&name) || definition.as_mapping().is_none() {
+        let path = vec![
+            "on".into(),
+            trigger.into(),
+            "inputs".into(),
+            name.clone().into(),
+        ];
+        definitions.insert(
+            name.clone(),
+            parse_input_definition(&name, definition, &path)?,
+        );
+    }
+    Ok(definitions)
+}
+
+#[allow(clippy::too_many_lines)]
+fn parse_input_definition(
+    name: &str,
+    value: &YamlValue,
+    path: &[PathSegment],
+) -> Result<InputDefinition, Vec<Diagnostic>> {
+    if !valid_input_id(name) {
+        return Err(vec![unlocated_diagnostic(
+            "manual_input.id",
+            "invalid input identifier",
+            path.to_vec(),
+        )]);
+    }
+    let Some(definition) = value.as_mapping() else {
+        return Err(vec![unlocated_diagnostic(
+            "manual_input.type",
+            "input definition must be a map",
+            path.to_vec(),
+        )]);
+    };
+    let unknown = unknown_keys(
+        definition,
+        &["description", "type", "required", "default", "options"],
+        path,
+    );
+    if !unknown.is_empty() {
+        return Err(unknown);
+    }
+    if yaml_get(definition, "description").is_some_and(|description| {
+        description
+            .as_str()
+            .is_none_or(|description| description.len() > 256)
+    }) {
+        return Err(vec![unlocated_diagnostic(
+            "manual_input.description",
+            "description must be a string of at most 256 bytes",
+            append(path, "description"),
+        )]);
+    }
+    let kind = match yaml_string(definition, "type").unwrap_or("string") {
+        "string" => InputKind::String,
+        "choice" => InputKind::Choice,
+        "boolean" => InputKind::Boolean,
+        _ => {
             return Err(vec![unlocated_diagnostic(
-                "manual_input.id",
-                "invalid input definition",
-                vec!["on".into(), trigger.into(), "inputs".into(), name.into()],
+                "manual_input.type",
+                "type must be string, choice, or boolean",
+                append(path, "type"),
             )]);
         }
-        names.insert(name);
+    };
+    let required = match yaml_get(definition, "required") {
+        None => false,
+        Some(YamlValue::Bool(required)) => *required,
+        Some(_) => {
+            return Err(vec![unlocated_diagnostic(
+                "manual_input.required",
+                "required must be boolean",
+                append(path, "required"),
+            )]);
+        }
+    };
+    let options = match (kind, yaml_get(definition, "options")) {
+        (InputKind::Choice, Some(YamlValue::Sequence(options)))
+            if (2..=32).contains(&options.len()) =>
+        {
+            let Some(options) = options
+                .iter()
+                .map(YamlValue::as_str)
+                .map(|value| {
+                    value
+                        .filter(|value| bounded_input_string(value))
+                        .map(str::to_owned)
+                })
+                .collect::<Option<Vec<_>>>()
+            else {
+                return Err(vec![input_options_diagnostic(path)]);
+            };
+            if options.iter().collect::<BTreeSet<_>>().len() != options.len() {
+                return Err(vec![input_options_diagnostic(path)]);
+            }
+            options
+        }
+        (InputKind::Choice, _) | (_, Some(_)) => {
+            return Err(vec![input_options_diagnostic(path)]);
+        }
+        (_, None) => Vec::new(),
+    };
+    let default = match yaml_get(definition, "default") {
+        None => None,
+        Some(YamlValue::Bool(value)) if kind == InputKind::Boolean => Some(value.to_string()),
+        Some(YamlValue::String(value))
+            if kind != InputKind::Boolean
+                && bounded_input_string(value)
+                && (kind != InputKind::Choice || options.contains(value)) =>
+        {
+            Some(value.clone())
+        }
+        Some(_) => {
+            return Err(vec![unlocated_diagnostic(
+                "manual_input.default",
+                "default does not match the declared input type",
+                append(path, "default"),
+            )]);
+        }
+    };
+    Ok(InputDefinition {
+        kind,
+        required,
+        default,
+        options,
+    })
+}
+
+fn input_options_diagnostic(path: &[PathSegment]) -> Diagnostic {
+    unlocated_diagnostic(
+        "manual_input.options",
+        "choice inputs require 2 to 32 unique bounded options and other inputs accept none",
+        append(path, "options"),
+    )
+}
+
+fn normalize_submitted_inputs(
+    definitions: &InputDefinitions,
+    submitted: &BTreeMap<String, String>,
+    call: bool,
+) -> Result<BTreeMap<String, String>, Diagnostic> {
+    if submitted.keys().any(|name| !definitions.contains_key(name)) {
+        return Err(unlocated_diagnostic(
+            if call {
+                "call_input.undeclared"
+            } else {
+                "manual_input.undeclared"
+            },
+            "input is not declared by the workflow trigger",
+            vec!["on".into()],
+        ));
     }
-    Ok(names)
+    definitions
+        .iter()
+        .map(|(name, definition)| {
+            let value = submitted
+                .get(name)
+                .cloned()
+                .or_else(|| definition.default.clone());
+            let value = match value {
+                Some(value) if valid_input_value(definition, &value) => value,
+                Some(_) => return Err(input_value_diagnostic(name, definition, call)),
+                None if definition.required => {
+                    return Err(unlocated_diagnostic(
+                        if call {
+                            "call_input.required"
+                        } else {
+                            "manual_input.required"
+                        },
+                        "required input is missing",
+                        vec!["on".into(), name.clone().into()],
+                    ));
+                }
+                None => String::new(),
+            };
+            Ok((name.clone(), value))
+        })
+        .collect()
+}
+
+fn valid_input_value(definition: &InputDefinition, value: &str) -> bool {
+    match definition.kind {
+        InputKind::String => bounded_input_string(value),
+        InputKind::Choice => {
+            bounded_input_string(value) && definition.options.iter().any(|item| item == value)
+        }
+        InputKind::Boolean => matches!(value, "true" | "false"),
+    }
+}
+
+fn input_value_diagnostic(name: &str, definition: &InputDefinition, call: bool) -> Diagnostic {
+    let reason = match definition.kind {
+        InputKind::Choice => "invalid_choice",
+        InputKind::Boolean => "invalid_boolean",
+        InputKind::String => "invalid_string",
+    };
+    unlocated_diagnostic(
+        &format!("{}_input.{reason}", if call { "call" } else { "manual" }),
+        "input value does not match its declaration",
+        vec!["on".into(), name.to_owned().into()],
+    )
+}
+
+fn bounded_input_string(value: &str) -> bool {
+    value.len() <= 1_024 && !value.contains(['\n', '\r', '\0'])
 }
 
 fn validate_job(
@@ -1032,8 +1263,8 @@ fn validate_step_options(
 
 fn validate_reserved_environments(
     jobs: &BTreeMap<String, Job>,
-    dispatch: &BTreeSet<String>,
-    call: &BTreeSet<String>,
+    dispatch: &InputDefinitions,
+    call: &InputDefinitions,
     errors: &mut Vec<Diagnostic>,
 ) {
     for (id, job) in jobs {
@@ -1055,7 +1286,7 @@ fn validate_reserved_environments(
             (dispatch, "ROBINE_INPUT_", "manual_input.env_collision"),
             (call, "ROBINE_CALL_INPUT_", "call_input.env_collision"),
         ] {
-            for input in inputs {
+            for input in inputs.keys() {
                 let name = format!("{prefix}{}", input.to_ascii_uppercase());
                 if job.env.contains_key(&name) {
                     errors.push(unlocated_diagnostic(

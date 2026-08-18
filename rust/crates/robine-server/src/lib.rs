@@ -82,6 +82,7 @@ async fn list_pipelines(
             | ApplicationError::PipelineNotCancellable
             | ApplicationError::PipelineNotQueueable
             | ApplicationError::InvalidPipelineInput
+            | ApplicationError::InvalidWorkflow(_)
             | ApplicationError::IdempotencyConflict
             | ApplicationError::SchedulerCapacity
             | ApplicationError::NoWork
@@ -119,6 +120,7 @@ async fn list_pipelines(
             | ApplicationError::PipelineNotCancellable
             | ApplicationError::PipelineNotQueueable
             | ApplicationError::InvalidPipelineInput
+            | ApplicationError::InvalidWorkflow(_)
             | ApplicationError::IdempotencyConflict
             | ApplicationError::SchedulerCapacity
             | ApplicationError::NoWork
@@ -157,6 +159,8 @@ async fn create_pipeline(
         Ok(pipeline) => HttpResponse::Created().json(pipeline),
         Err(ApplicationError::Forbidden) => HttpResponse::Forbidden().finish(),
         Err(ApplicationError::InvalidPipelineInput) => HttpResponse::UnprocessableEntity().finish(),
+        Err(ApplicationError::InvalidWorkflow(diagnostics)) => HttpResponse::UnprocessableEntity()
+            .json(serde_json::json!({"diagnostics": diagnostics})),
         Err(ApplicationError::IdempotencyConflict) => HttpResponse::Conflict().finish(),
         Err(_) => HttpResponse::ServiceUnavailable().finish(),
     }
@@ -613,6 +617,7 @@ async fn sign_in(input: web::Json<SignInRequest>, state: web::Data<AppState>) ->
             | ApplicationError::PipelineNotCancellable
             | ApplicationError::PipelineNotQueueable
             | ApplicationError::InvalidPipelineInput
+            | ApplicationError::InvalidWorkflow(_)
             | ApplicationError::IdempotencyConflict
             | ApplicationError::SchedulerCapacity
             | ApplicationError::NoWork
@@ -651,6 +656,7 @@ async fn sign_out(request: HttpRequest, state: web::Data<AppState>) -> impl Resp
             | ApplicationError::PipelineNotCancellable
             | ApplicationError::PipelineNotQueueable
             | ApplicationError::InvalidPipelineInput
+            | ApplicationError::InvalidWorkflow(_)
             | ApplicationError::IdempotencyConflict
             | ApplicationError::SchedulerCapacity
             | ApplicationError::NoWork
@@ -747,6 +753,7 @@ async fn bootstrap(
             | ApplicationError::PipelineNotCancellable
             | ApplicationError::PipelineNotQueueable
             | ApplicationError::InvalidPipelineInput
+            | ApplicationError::InvalidWorkflow(_)
             | ApplicationError::IdempotencyConflict
             | ApplicationError::SchedulerCapacity
             | ApplicationError::NoWork
@@ -1424,6 +1431,49 @@ mod tests {
         assert_eq!(response.status(), StatusCode::CREATED);
         let body: serde_json::Value = test::read_body_json(response).await;
         assert_eq!(body["status"], "created");
+
+        let source_backed = test::TestRequest::post()
+            .uri("/api/v1/pipelines")
+            .insert_header(("authorization", "Bearer maintainer-session"))
+            .set_json(serde_json::json!({
+                "repository_id": Uuid::new_v4(),
+                "commit_sha": "f".repeat(40),
+                "trigger": "push",
+                "workflow_revision": {
+                    "path": ".robine-ci/workflows/ci.yml",
+                    "source": "version: 1\nname: Source CI\non: {push: {}}\njobs:\n  test:\n    image: alpine:3.22\n    steps: [{run: echo ok}]\n"
+                }
+            }))
+            .to_request();
+        assert_eq!(
+            test::call_service(&maintainer_app, source_backed)
+                .await
+                .status(),
+            StatusCode::CREATED
+        );
+
+        let invalid_workflow = test::TestRequest::post()
+            .uri("/api/v1/pipelines")
+            .insert_header(("authorization", "Bearer maintainer-session"))
+            .set_json(serde_json::json!({
+                "repository_id": Uuid::new_v4(),
+                "commit_sha": "a".repeat(40),
+                "trigger": "push",
+                "workflow_revision": {
+                    "path": ".robine-ci/workflows/broken.yml",
+                    "source": "version: 1\nname: Broken\non: ["
+                }
+            }))
+            .to_request();
+        let response = test::call_service(&maintainer_app, invalid_workflow).await;
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body: serde_json::Value = test::read_body_json(response).await;
+        assert_eq!(body["diagnostics"][0]["code"], "workflow.yaml");
+        assert_eq!(
+            body["diagnostics"][0]["source_path"],
+            ".robine-ci/workflows/broken.yml"
+        );
+        assert!(body["diagnostics"][0]["line"].as_u64().is_some_and(|line| line > 0));
     }
 
     #[actix_web::test]

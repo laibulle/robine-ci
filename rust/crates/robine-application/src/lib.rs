@@ -66,6 +66,7 @@ pub struct ControlPlane {
     blob_store: Option<Arc<dyn BlobStore>>,
     storage_quotas: StorageQuotas,
     retention: RetentionConfig,
+    workflow_limits: robine_workflows::WorkflowLimits,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -302,6 +303,8 @@ pub enum ApplicationError {
     RetryInputsUnavailable(Vec<String>),
     #[error("pipeline creation input is invalid")]
     InvalidPipelineInput,
+    #[error("workflow revision is invalid")]
+    InvalidWorkflow(Vec<robine_workflows::Diagnostic>),
     #[error("idempotency key conflicts with an existing pipeline")]
     IdempotencyConflict,
     #[error("scheduler capacity is exhausted")]
@@ -373,6 +376,7 @@ impl ControlPlane {
                 repository_bytes: 10_737_418_240,
             },
             retention: RetentionConfig::default(),
+            workflow_limits: robine_workflows::WorkflowLimits::default(),
         }
     }
 
@@ -425,6 +429,12 @@ impl ControlPlane {
     ) -> Self {
         self.retention_repository = Some(repository);
         self.retention = config;
+        self
+    }
+
+    #[must_use]
+    pub fn with_workflow_limits(mut self, limits: robine_workflows::WorkflowLimits) -> Self {
+        self.workflow_limits = limits;
         self
     }
 
@@ -763,7 +773,7 @@ impl ControlPlane {
         if user.role == Role::Viewer {
             return Err(ApplicationError::Forbidden);
         }
-        populate_jobs_from_workflow(&mut input)?;
+        populate_jobs_from_workflow(&mut input, &self.workflow_limits)?;
         input
             .validate()
             .map_err(|_| ApplicationError::InvalidPipelineInput)?;
@@ -1827,26 +1837,42 @@ impl ControlPlane {
     }
 }
 
-fn populate_jobs_from_workflow(input: &mut CreatePipelineInput) -> Result<(), ApplicationError> {
+fn populate_jobs_from_workflow(
+    input: &mut CreatePipelineInput,
+    limits: &robine_workflows::WorkflowLimits,
+) -> Result<(), ApplicationError> {
     if !input.jobs.is_empty() {
         return Ok(());
     }
     let Some(revision) = input.workflow_revision.as_ref() else {
         return Ok(());
     };
-    if !robine_workflows::valid_workflow_path(&revision.path) {
-        return Err(ApplicationError::InvalidPipelineInput);
-    }
-    let workflow = robine_workflows::parse(
-        &revision.source,
-        &revision.path,
-        &robine_workflows::WorkflowLimits::default(),
-    )
-    .map_err(|_| ApplicationError::InvalidPipelineInput)?;
+    let mut source_set = revision.sources.clone();
+    source_set.insert(revision.path.clone(), revision.source.clone());
+    let resolved = robine_workflows::resolve(&revision.path, &source_set, limits)
+        .map_err(ApplicationError::InvalidWorkflow)?;
+    let workflow = resolved.workflow;
+    let normalized_inputs = workflow
+        .normalized_inputs(&input.trigger, &input.inputs)
+        .map_err(|diagnostic| {
+            ApplicationError::InvalidWorkflow(vec![locate_application_diagnostic(
+                diagnostic,
+                &revision.path,
+            )])
+        })?;
     let jobs = workflow
-        .pipeline_jobs(&input.trigger, &input.inputs)
-        .map_err(|_| ApplicationError::InvalidPipelineInput)?;
+        .pipeline_jobs(&input.trigger, &normalized_inputs)
+        .map_err(|diagnostic| {
+            ApplicationError::InvalidWorkflow(vec![locate_application_diagnostic(
+                diagnostic,
+                &revision.path,
+            )])
+        })?;
     input.workflow_name = workflow.name;
+    input.inputs = normalized_inputs;
+    if let Some(revision) = input.workflow_revision.as_mut() {
+        revision.sources = resolved.included_sources;
+    }
     input.jobs = jobs
         .into_iter()
         .map(|(key, job)| {
@@ -1860,6 +1886,18 @@ fn populate_jobs_from_workflow(input: &mut CreatePipelineInput) -> Result<(), Ap
         })
         .collect();
     Ok(())
+}
+
+fn locate_application_diagnostic(
+    mut diagnostic: robine_workflows::Diagnostic,
+    source_path: &str,
+) -> robine_workflows::Diagnostic {
+    if diagnostic.source_path.is_empty() {
+        diagnostic.source_path = source_path.into();
+    }
+    diagnostic.line = diagnostic.line.max(1);
+    diagnostic.column = diagnostic.column.max(1);
+    diagnostic
 }
 
 fn source_error(subject: &'static str) -> serde_json::Error {
@@ -2285,7 +2323,8 @@ mod tests {
         }))
         .expect("source-backed pipeline input");
 
-        populate_jobs_from_workflow(&mut input).expect("valid workflow revision");
+        populate_jobs_from_workflow(&mut input, &robine_workflows::WorkflowLimits::default())
+            .expect("valid workflow revision");
 
         assert_eq!(input.workflow_name, "CI");
         assert_eq!(input.jobs.len(), 1);
@@ -2304,17 +2343,50 @@ mod tests {
         }))
         .expect("pipeline input");
         assert!(matches!(
-            populate_jobs_from_workflow(&mut input),
-            Err(ApplicationError::InvalidPipelineInput)
+            populate_jobs_from_workflow(&mut input, &robine_workflows::WorkflowLimits::default()),
+            Err(ApplicationError::InvalidWorkflow(_))
         ));
 
         input.workflow_revision.as_mut().expect("revision").path =
             ".robine-ci/workflows/ci.yml".into();
         input.trigger = "pull_request".into();
         assert!(matches!(
-            populate_jobs_from_workflow(&mut input),
-            Err(ApplicationError::InvalidPipelineInput)
+            populate_jobs_from_workflow(&mut input, &robine_workflows::WorkflowLimits::default()),
+            Err(ApplicationError::InvalidWorkflow(_))
         ));
+    }
+
+    #[test]
+    fn workflow_revision_composes_only_reachable_exact_sources() {
+        let reusable_path = ".robine-ci/workflows/quality.yml";
+        let mut input: CreatePipelineInput = serde_json::from_value(serde_json::json!({
+            "repository_id": Uuid::nil(),
+            "commit_sha": "a".repeat(40),
+            "trigger": "push",
+            "workflow_revision": {
+                "path": ".robine-ci/workflows/ci.yml",
+                "source": format!("version: 1\nname: CI\non: {{push: {{}}}}\nincludes:\n  quality:\n    path: {reusable_path}\n    inputs:\n      runtime: '3.22'\njobs:\n  package:\n    image: alpine:3.22\n    needs: quality--test\n    steps: [{{run: echo package}}]\n"),
+                "sources": {
+                    (reusable_path): "version: 1\nname: Quality\non:\n  workflow_call:\n    inputs:\n      runtime:\n        type: choice\n        required: true\n        options: ['3.21', '3.22']\njobs:\n  test:\n    image: alpine:3.22\n    steps: [{run: echo test}]\n",
+                    ".robine-ci/workflows/unreachable.yml": "not: decoded"
+                }
+            }
+        }))
+        .expect("multi-source pipeline input");
+
+        populate_jobs_from_workflow(&mut input, &robine_workflows::WorkflowLimits::default())
+            .expect("valid reusable workflow");
+
+        assert_eq!(input.jobs["package"].needs, ["quality--test"]);
+        assert_eq!(
+            input.jobs["quality--test"].execution["env"]["ROBINE_CALL_INPUT_RUNTIME"],
+            "3.22"
+        );
+        let sources = &input.workflow_revision.expect("revision").sources;
+        assert_eq!(
+            sources.keys().map(String::as_str).collect::<Vec<_>>(),
+            [reusable_path]
+        );
     }
 
     #[async_trait::async_trait]

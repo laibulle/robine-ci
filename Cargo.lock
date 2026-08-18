@@ -3279,6 +3279,7 @@ dependencies = [
  "robine-secrets",
  "robine-source",
  "robine-storage",
+ "robine-workflows",
  "serde",
  "serde_json",
  "sha2 0.10.9",
