@@ -6,8 +6,8 @@ use uuid::Uuid;
 use crate::{
     identity::{LocalIdentity, OidcAuthorization, OidcClaims, Role, User},
     pipelines::{
-        AttemptProjection, DurableJobClaim, NewPipeline, OutboxDelivery, PipelineProjection,
-        RecordAttemptEvent, RecordRemoteAttemptEvent, RetryProjection,
+        AttemptProjection, DurableJobClaim, LocalExecutionWork, NewPipeline, OutboxDelivery,
+        PipelineProjection, RecordAttemptEvent, RecordRemoteAttemptEvent, RetryProjection,
         RunnerAuthenticationMaterial, RunnerLeaseHeartbeat, RunnerResume, SchedulerClaim,
     },
 };
@@ -222,6 +222,20 @@ pub trait PipelineRepository: Send + Sync {
         now: DateTime<Utc>,
         stale_before: DateTime<Utc>,
     ) -> Result<Option<DurableJobClaim>, PortError>;
+
+    async fn claim_next_execution_job(
+        &self,
+        tenant_id: &str,
+        claim_token: Uuid,
+        now: DateTime<Utc>,
+        stale_before: DateTime<Utc>,
+    ) -> Result<Option<DurableJobClaim>, PortError>;
+
+    async fn local_execution_work(
+        &self,
+        tenant_id: &str,
+        attempt_id: Uuid,
+    ) -> Result<LocalExecutionWork, PortError>;
 
     async fn complete_durable_job(
         &self,

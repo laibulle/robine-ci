@@ -2,6 +2,7 @@
 members = [
   "rust/crates/robine-application",
   "rust/crates/robine-core",
+  "rust/crates/robine-execution",
   "rust/crates/robine-oidc",
   "rust/crates/robine-persistence",
   "rust/crates/robine-server",
@@ -29,7 +30,7 @@ thiserror = "2.0"
 getrandom = "0.3"
 hmac = "0.12"
 openidconnect = { version = "4.0", features = ["reqwest"] }
-tokio = { version = "1.47", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1.47", features = ["io-util", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
 uuid = { version = "1.18", features = ["serde", "v4"] }
 url = "2.5"
 
