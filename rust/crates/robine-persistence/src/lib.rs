@@ -1533,8 +1533,9 @@ impl PipelineRepository for Database {
         if state == "revoked" {
             return Err(PortError::NotFound);
         }
-        let attempts = sqlx::query_as::<_, (Uuid, String)>(
-            "SELECT attempt.id, pipeline.status FROM job_attempts AS attempt \
+        let attempts = sqlx::query_as::<_, (Uuid, String, i32, String)>(
+            "SELECT attempt.id, attempt.status, attempt.last_sequence, pipeline.status \
+             FROM job_attempts AS attempt \
              JOIN pipeline_jobs AS job ON job.id = attempt.job_id \
                AND job.tenant_id = attempt.tenant_id \
              JOIN pipelines AS pipeline ON pipeline.id = job.pipeline_id \
@@ -1549,7 +1550,7 @@ impl PipelineRepository for Database {
         .await
         .map_err(|_| PortError::Unavailable)?;
         let renewed_lease = now + chrono::Duration::seconds(lease_seconds);
-        for (attempt_id, _) in &attempts {
+        for (attempt_id, _, _, _) in &attempts {
             sqlx::query(
                 "UPDATE job_attempts SET lease_expires_at = GREATEST(lease_expires_at, $2), \
                  updated_at = $3 WHERE id = $1 AND tenant_id = $4",
@@ -1578,10 +1579,16 @@ impl PipelineRepository for Database {
             .map_err(|_| PortError::Unavailable)?;
         Ok(RunnerLeaseHeartbeat {
             renewed_attempts: u64::try_from(attempts.len()).map_err(|_| PortError::Unavailable)?,
+            pending_offer_attempt_ids: attempts
+                .iter()
+                .filter_map(|(id, status, sequence, _)| {
+                    (status == "queued" && *sequence == 0).then_some(*id)
+                })
+                .collect(),
             cancellation_requested_attempt_ids: attempts
                 .into_iter()
-                .filter_map(|(id, status)| {
-                    matches!(status.as_str(), "cancelling" | "cancelled").then_some(id)
+                .filter_map(|(id, _, _, pipeline_status)| {
+                    matches!(pipeline_status.as_str(), "cancelling" | "cancelled").then_some(id)
                 })
                 .collect(),
         })

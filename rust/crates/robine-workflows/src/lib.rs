@@ -14,6 +14,15 @@ const JOB_KEYS: &[&str] = &[
     "strategy",
 ];
 const STEP_KEYS: &[&str] = &["name", "run", "uses", "with", "if"];
+const SERVICE_KEYS: &[&str] = &[
+    "image",
+    "user",
+    "env",
+    "secret-env",
+    "command",
+    "readiness",
+    "privileged",
+];
 const BUILTINS: &[&str] = &[
     "checkout",
     "cache/restore",
@@ -384,6 +393,7 @@ fn validate_document(
             }
         }
     }
+    validate_artifact_dependencies(&jobs, &mut errors);
     validate_reserved_environments(&jobs, &dispatch_inputs, &call_inputs, &mut errors);
     if !errors.is_empty() {
         return Err(locate_all(index, source_path, errors));
@@ -1013,6 +1023,10 @@ fn parse_services(
                 path,
             )]);
         };
+        let unknown = unknown_keys(service, SERVICE_KEYS, &path);
+        if !unknown.is_empty() {
+            return Err(unknown);
+        }
         let Some(image) = yaml_string(service, "image").filter(|image| !image.is_empty()) else {
             return Err(vec![unlocated_diagnostic(
                 "service.image",
@@ -1214,6 +1228,23 @@ fn validate_step_options(
         };
     }
     let string = |key: &str| options.get(key).and_then(JsonValue::as_str);
+    let allowed: &[&str] = match value {
+        "cache/restore" | "cache/save" => &["key", "paths"],
+        "artifacts/upload" => &["name", "paths", "retention-days"],
+        "artifacts/download" => &["name", "from", "path"],
+        _ => &[][..],
+    };
+    if options.keys().any(|key| !allowed.contains(&key.as_str())) {
+        return Err(vec![unlocated_diagnostic(
+            if value.starts_with("cache/") {
+                "step.cache_inputs"
+            } else {
+                "step.artifact_inputs"
+            },
+            "built-in contains an unknown input",
+            append(path, "with"),
+        )]);
+    }
     let paths = || {
         options
             .get("paths")
@@ -1258,6 +1289,46 @@ fn validate_step_options(
             "built-in inputs are invalid",
             append(path, "with"),
         )])
+    }
+}
+
+fn validate_artifact_dependencies(jobs: &BTreeMap<String, Job>, errors: &mut Vec<Diagnostic>) {
+    for (id, job) in jobs {
+        for (position, step) in job.steps.iter().enumerate() {
+            if step.get("kind").and_then(JsonValue::as_str) != Some("builtin")
+                || step.get("value").and_then(JsonValue::as_str) != Some("artifacts/download")
+            {
+                continue;
+            }
+            let source = step
+                .get("with")
+                .and_then(|options| options.get("from"))
+                .and_then(JsonValue::as_str)
+                .unwrap_or_default();
+            let path = vec![
+                "jobs".into(),
+                id.clone().into(),
+                "steps".into(),
+                position.into(),
+                "with".into(),
+                "from".into(),
+            ];
+            if !job.needs.iter().any(|dependency| dependency == source) {
+                errors.push(unlocated_diagnostic(
+                    "step.artifact_dependency",
+                    "artifact source must be declared in job needs",
+                    path,
+                ));
+            } else if jobs.get(source).is_some_and(|producer| {
+                producer.matrix.values().map(Vec::len).product::<usize>() > 1
+            }) {
+                errors.push(unlocated_diagnostic(
+                    "matrix.artifact_ambiguous",
+                    "artifact source expands to multiple variants",
+                    path,
+                ));
+            }
+        }
     }
 }
 
@@ -1308,6 +1379,17 @@ fn expand_matrices(
         .iter()
         .map(|(id, job)| (id.clone(), matrix_variants(job)))
         .collect::<BTreeMap<_, _>>();
+    if variants
+        .values()
+        .flatten()
+        .any(|variant| variant.id.len() > 255)
+    {
+        return Err(vec![unlocated_diagnostic(
+            "matrix.generated_id",
+            "generated matrix job key exceeds 255 bytes",
+            vec!["jobs".into()],
+        )]);
+    }
     if variants.values().map(Vec::len).sum::<usize>() > limits.max_jobs {
         return Err(vec![unlocated_diagnostic(
             "workflow.limit_jobs",
@@ -1329,6 +1411,21 @@ fn expand_matrices(
                         .map(|variant| variant.id.clone())
                 })
                 .collect();
+            for step in &mut job.steps {
+                if step.get("value").and_then(JsonValue::as_str) != Some("artifacts/download") {
+                    continue;
+                }
+                let Some(source) = step
+                    .get("with")
+                    .and_then(|options| options.get("from"))
+                    .and_then(JsonValue::as_str)
+                else {
+                    continue;
+                };
+                if let Some([variant]) = variants.get(source).map(Vec::as_slice) {
+                    step["with"]["from"] = JsonValue::String(variant.id.clone());
+                }
+            }
             job.image = interpolate_matrix(&job.image, &job.matrix_values).ok_or_else(|| {
                 vec![unlocated_diagnostic(
                     "matrix.interpolation",

@@ -1,7 +1,7 @@
 //! Bounded, provider-neutral source archive extraction.
 
 use async_trait::async_trait;
-use flate2::read::GzDecoder;
+use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use reqwest::{Client, redirect::Policy};
@@ -484,6 +484,76 @@ pub fn extract_tar_gz(
     Ok(files)
 }
 
+/// Creates a deterministic bounded source archive rooted at `source/` for remote transfer.
+///
+/// # Errors
+///
+/// Rejects unsafe paths, excessive file counts or sizes, archive creation failures, and
+/// compressed output above the configured limit.
+pub fn create_source_tar_gz(
+    files: &[SourceFile],
+    limits: ArchiveLimits,
+) -> Result<Vec<u8>, SourceError> {
+    if files.len() > limits.max_entries {
+        return Err(SourceError::EntryLimit);
+    }
+    let expanded = files.iter().try_fold(0_usize, |total, file| {
+        validate_source_file_path(&file.path, limits.max_path_bytes)?;
+        total
+            .checked_add(file.contents.len())
+            .filter(|total| *total <= limits.max_expanded_bytes)
+            .ok_or(SourceError::ExpandedLimit)
+    })?;
+    let mut ordered = files.iter().collect::<Vec<_>>();
+    ordered.sort_by(|left, right| left.path.cmp(&right.path));
+    let encoder = GzEncoder::new(Vec::new(), Compression::default());
+    let mut archive = tar::Builder::new(encoder);
+    for file in ordered {
+        let mut header = tar::Header::new_gnu();
+        header
+            .set_size(u64::try_from(file.contents.len()).map_err(|_| SourceError::ExpandedLimit)?);
+        header.set_mode(0o644);
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_mtime(0);
+        header.set_cksum();
+        archive
+            .append_data(
+                &mut header,
+                Path::new("source").join(&file.path),
+                file.contents.as_slice(),
+            )
+            .map_err(|_| SourceError::Malformed)?;
+    }
+    archive.finish().map_err(|_| SourceError::Malformed)?;
+    let encoder = archive.into_inner().map_err(|_| SourceError::Malformed)?;
+    let compressed = encoder.finish().map_err(|_| SourceError::Malformed)?;
+    if compressed.len() > limits.max_compressed_bytes
+        || (expanded > 0
+            && compressed
+                .len()
+                .checked_mul(limits.max_expansion_ratio)
+                .is_none_or(|maximum| expanded > maximum))
+    {
+        return Err(SourceError::CompressedLimit);
+    }
+    Ok(compressed)
+}
+
+fn validate_source_file_path(path: &Path, max_path_bytes: usize) -> Result<(), SourceError> {
+    let raw = path.as_os_str().as_encoded_bytes();
+    if raw.is_empty()
+        || raw.len().saturating_add("source/".len()) > max_path_bytes
+        || raw.contains(&0)
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(SourceError::UnsafePath);
+    }
+    Ok(())
+}
+
 /// Validates a workspace archive whose paths are already relative to the workspace root.
 ///
 /// # Errors
@@ -662,6 +732,27 @@ mod tests {
                 path: PathBuf::from("src/lib.rs"),
                 contents: b"fn main() {}".to_vec(),
             }]
+        );
+    }
+
+    #[test]
+    fn creates_deterministic_remote_source_archives() {
+        let files = vec![
+            SourceFile {
+                path: PathBuf::from("src/main.rs"),
+                contents: b"fn main() {}\n".to_vec(),
+            },
+            SourceFile {
+                path: PathBuf::from("Cargo.toml"),
+                contents: b"[package]\nname = \"demo\"\n".to_vec(),
+            },
+        ];
+        let first = create_source_tar_gz(&files, ArchiveLimits::default()).expect("archive");
+        let second = create_source_tar_gz(&files, ArchiveLimits::default()).expect("archive");
+        assert_eq!(first, second);
+        assert_eq!(
+            extract_tar_gz(&first, ArchiveLimits::default()).expect("round trip"),
+            vec![files[1].clone(), files[0].clone()]
         );
     }
 

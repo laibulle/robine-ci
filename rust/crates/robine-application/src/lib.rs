@@ -351,6 +351,19 @@ pub struct ExecutionBatch {
     pub recovered_terminal: u64,
 }
 
+pub struct RemoteTransferDownload {
+    pub content: Vec<u8>,
+    pub digest: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct RemoteTransferUpload {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<Uuid>,
+    pub digest: String,
+    pub size: i64,
+}
+
 impl ControlPlane {
     #[must_use]
     pub fn new(
@@ -1194,6 +1207,433 @@ impl ControlPlane {
             })
     }
 
+    /// Returns a bounded source archive only to the authenticated runner owning the attempt.
+    ///
+    /// # Errors
+    ///
+    /// Returns unauthenticated for invalid machine credentials, forbidden for another runner's
+    /// attempt, not-found when checkout is not declared, or unavailable for source failures.
+    ///
+    /// # Panics
+    ///
+    /// HMAC-SHA256 accepts the fixed 32-byte derived key, so construction cannot panic.
+    pub async fn remote_attempt_source(
+        &self,
+        tenant_id: &str,
+        runner_id: Uuid,
+        credential: &str,
+        attempt_id: Uuid,
+    ) -> Result<Vec<u8>, ApplicationError> {
+        self.authenticate_runner(tenant_id, runner_id, credential, Utc::now())
+            .await?;
+        let raw = self
+            .pipelines
+            .remote_job_offer(tenant_id, runner_id, attempt_id)
+            .await
+            .map_err(|error| match error {
+                PortError::NotFound => ApplicationError::PipelineNotFound,
+                PortError::AttemptNotAssigned => ApplicationError::Forbidden,
+                _ => ApplicationError::Unavailable,
+            })?;
+        let checkout = raw
+            .get("steps")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|steps| {
+                steps.iter().any(|step| {
+                    step.get("kind").and_then(serde_json::Value::as_str) == Some("builtin")
+                        && step.get("value").and_then(serde_json::Value::as_str) == Some("checkout")
+                })
+            });
+        if !checkout {
+            return Err(ApplicationError::PipelineNotFound);
+        }
+        let repository_id = raw
+            .get("repository_id")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|value| Uuid::parse_str(value).ok())
+            .ok_or(ApplicationError::Unavailable)?;
+        let commit_sha = raw
+            .get("commit_sha")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| valid_commit_sha(value))
+            .ok_or(ApplicationError::Unavailable)?;
+        let repositories = self
+            .source_repositories
+            .as_ref()
+            .ok_or(ApplicationError::Unavailable)?;
+        let fetcher = self
+            .source_fetcher
+            .as_ref()
+            .ok_or(ApplicationError::Unavailable)?;
+        let repository = repositories
+            .find_trusted(tenant_id, repository_id)
+            .await
+            .map_err(|_| ApplicationError::Unavailable)?;
+        let provider_archive = fetcher
+            .fetch_archive(&repository, commit_sha)
+            .await
+            .map_err(|_| ApplicationError::Unavailable)?;
+        let files = robine_source::extract_tar_gz(
+            &provider_archive,
+            robine_source::ArchiveLimits::default(),
+        )
+        .map_err(|_| ApplicationError::Unavailable)?;
+        robine_source::create_source_tar_gz(&files, robine_source::ArchiveLimits::default())
+            .map_err(|_| ApplicationError::Unavailable)
+    }
+
+    /// Returns declared secret values only to the authenticated runner owning the attempt.
+    ///
+    /// # Errors
+    ///
+    /// Returns unauthenticated for invalid machine credentials, forbidden for another runner's
+    /// attempt, or unavailable when declarations cannot be resolved and decrypted completely.
+    ///
+    /// # Panics
+    ///
+    /// HMAC-SHA256 accepts the fixed 32-byte derived key, so construction cannot panic.
+    pub async fn remote_attempt_secrets(
+        &self,
+        tenant_id: &str,
+        runner_id: Uuid,
+        credential: &str,
+        attempt_id: Uuid,
+    ) -> Result<Vec<u8>, ApplicationError> {
+        self.authenticate_runner(tenant_id, runner_id, credential, Utc::now())
+            .await?;
+        let raw = self
+            .pipelines
+            .remote_job_offer(tenant_id, runner_id, attempt_id)
+            .await
+            .map_err(|error| match error {
+                PortError::NotFound => ApplicationError::PipelineNotFound,
+                PortError::AttemptNotAssigned => ApplicationError::Forbidden,
+                _ => ApplicationError::Unavailable,
+            })?;
+        let names = match raw
+            .get("secret_names")
+            .and_then(serde_json::Value::as_array)
+        {
+            None => Vec::new(),
+            Some(names) => names
+                .iter()
+                .map(serde_json::Value::as_str)
+                .map(|name| name.map(str::to_owned))
+                .collect::<Option<Vec<_>>>()
+                .ok_or(ApplicationError::Unavailable)?,
+        };
+        if names.is_empty() {
+            return serde_json::to_vec(&serde_json::json!({"secrets": {}}))
+                .map_err(|_| ApplicationError::Unavailable);
+        }
+        let repository_id = raw
+            .get("repository_id")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|value| Uuid::parse_str(value).ok())
+            .ok_or(ApplicationError::Unavailable)?;
+        let repository = self
+            .secret_repository
+            .as_ref()
+            .ok_or(ApplicationError::Unavailable)?;
+        let decryptor = self
+            .secret_decryptor
+            .as_ref()
+            .ok_or(ApplicationError::Unavailable)?;
+        let encrypted = repository
+            .find_authorized(tenant_id, repository_id, &names)
+            .await
+            .map_err(|_| ApplicationError::Unavailable)?;
+        let mut resolved = std::collections::BTreeMap::new();
+        for secret in encrypted {
+            let plaintext = decryptor
+                .decrypt(&secret)
+                .map_err(|_| ApplicationError::Unavailable)?;
+            let plaintext =
+                String::from_utf8(plaintext.to_vec()).map_err(|_| ApplicationError::Unavailable)?;
+            if resolved.insert(secret.name, plaintext).is_some() {
+                return Err(ApplicationError::Unavailable);
+            }
+        }
+        if names.iter().any(|name| !resolved.contains_key(name)) {
+            return Err(ApplicationError::Unavailable);
+        }
+        serde_json::to_vec(&serde_json::json!({"secrets": resolved}))
+            .map_err(|_| ApplicationError::Unavailable)
+    }
+
+    /// Persists one bounded idempotent log chunk from the authenticated owning runner.
+    ///
+    /// # Errors
+    ///
+    /// Returns unauthenticated for invalid credentials, forbidden for another runner's attempt,
+    /// invalid-event for malformed metadata, or unavailable when persistence fails.
+    ///
+    /// # Panics
+    ///
+    /// HMAC-SHA256 accepts the fixed 32-byte derived key, so construction cannot panic.
+    pub async fn record_remote_log(
+        &self,
+        tenant_id: &str,
+        runner_id: Uuid,
+        credential: &str,
+        mut chunk: ExecutionLogChunk,
+    ) -> Result<i64, ApplicationError> {
+        self.authenticate_runner(tenant_id, runner_id, credential, Utc::now())
+            .await?;
+        self.pipelines
+            .remote_job_offer(tenant_id, runner_id, chunk.attempt_id)
+            .await
+            .map_err(|error| match error {
+                PortError::NotFound => ApplicationError::PipelineNotFound,
+                PortError::AttemptNotAssigned => ApplicationError::Forbidden,
+                _ => ApplicationError::Unavailable,
+            })?;
+        if chunk.sequence <= 0
+            || chunk.step_position < 0
+            || chunk.step_name.len() > 255
+            || chunk.content.len() > 64_000
+            || !matches!(chunk.stream.as_str(), "stdout" | "stderr" | "system")
+        {
+            return Err(ApplicationError::InvalidAttemptEvent);
+        }
+        chunk.id = Uuid::new_v4();
+        chunk.inserted_at = Utc::now();
+        let sequence = chunk.sequence;
+        self.pipelines
+            .append_execution_log(tenant_id, &chunk)
+            .await
+            .map_err(|_| ApplicationError::Unavailable)?;
+        Ok(sequence)
+    }
+
+    /// Restores a repository cache through an owning runner's attempt scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns authentication/ownership errors, invalid-event for an invalid key, or unavailable
+    /// when storage metadata or content cannot be read safely.
+    pub async fn remote_restore_cache(
+        &self,
+        tenant_id: &str,
+        runner_id: Uuid,
+        credential: &str,
+        attempt_id: Uuid,
+        key: &str,
+    ) -> Result<Option<RemoteTransferDownload>, ApplicationError> {
+        let raw = self
+            .authorized_remote_offer(tenant_id, runner_id, credential, attempt_id)
+            .await?;
+        if key.is_empty() || key.len() > 512 {
+            return Err(ApplicationError::InvalidAttemptEvent);
+        }
+        let repository_id = remote_uuid(&raw, "repository_id")?;
+        let repository = self
+            .storage_repository
+            .as_ref()
+            .ok_or(ApplicationError::Unavailable)?;
+        let Some(cache) = repository
+            .restore_cache(tenant_id, repository_id, key, Utc::now())
+            .await
+            .map_err(|_| ApplicationError::Unavailable)?
+        else {
+            return Ok(None);
+        };
+        let content = self
+            .blob_store
+            .as_ref()
+            .ok_or(ApplicationError::Unavailable)?
+            .get(tenant_id, &cache.object)
+            .await
+            .map_err(|_| ApplicationError::Unavailable)?;
+        Ok(Some(RemoteTransferDownload {
+            content,
+            digest: cache.object.digest,
+        }))
+    }
+
+    /// Publishes a bounded validated repository cache through an owning attempt scope.
+    ///
+    /// # Errors
+    ///
+    /// Returns authentication/ownership errors, invalid-event for invalid input, or unavailable
+    /// when content-addressed publication or quota-locked metadata persistence fails.
+    pub async fn remote_save_cache(
+        &self,
+        tenant_id: &str,
+        runner_id: Uuid,
+        credential: &str,
+        attempt_id: Uuid,
+        key: &str,
+        content: Vec<u8>,
+    ) -> Result<RemoteTransferUpload, ApplicationError> {
+        let raw = self
+            .authorized_remote_offer(tenant_id, runner_id, credential, attempt_id)
+            .await?;
+        if key.is_empty()
+            || key.len() > 512
+            || robine_source::validate_workspace_tar_gz(
+                &content,
+                robine_source::ArchiveLimits::default(),
+            )
+            .is_err()
+        {
+            return Err(ApplicationError::InvalidAttemptEvent);
+        }
+        let repository_id = remote_uuid(&raw, "repository_id")?;
+        let blobs = self
+            .blob_store
+            .as_ref()
+            .ok_or(ApplicationError::Unavailable)?;
+        let object = blobs
+            .put(tenant_id, content)
+            .await
+            .map_err(|_| ApplicationError::Unavailable)?;
+        let now = Utc::now();
+        let cache = CacheEntry {
+            id: Uuid::new_v4(),
+            repository_id,
+            key: key.into(),
+            object: object.clone(),
+            created_at: now,
+            expires_at: now + chrono::Duration::days(7),
+        };
+        if self
+            .storage_repository
+            .as_ref()
+            .ok_or(ApplicationError::Unavailable)?
+            .save_cache(tenant_id, &cache, self.storage_quotas)
+            .await
+            .is_err()
+        {
+            let _ = blobs.delete(tenant_id, &object.blob_id).await;
+            return Err(ApplicationError::Unavailable);
+        }
+        Ok(RemoteTransferUpload {
+            id: None,
+            digest: object.digest,
+            size: object.size,
+        })
+    }
+
+    /// Downloads one retained artifact from a declared successful dependency.
+    ///
+    /// # Errors
+    ///
+    /// Returns authentication/ownership errors, not-found for undeclared or unavailable content,
+    /// or unavailable when storage cannot be read safely.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn remote_download_artifact(
+        &self,
+        tenant_id: &str,
+        runner_id: Uuid,
+        credential: &str,
+        attempt_id: Uuid,
+        from_job: &str,
+        name: &str,
+    ) -> Result<RemoteTransferDownload, ApplicationError> {
+        let raw = self
+            .authorized_remote_offer(tenant_id, runner_id, credential, attempt_id)
+            .await?;
+        let declared = raw
+            .get("needs")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|needs| needs.iter().any(|need| need.as_str() == Some(from_job)));
+        if !declared || name.is_empty() || name.len() > 128 {
+            return Err(ApplicationError::PipelineNotFound);
+        }
+        let artifact = self
+            .storage_repository
+            .as_ref()
+            .ok_or(ApplicationError::Unavailable)?
+            .dependency_artifact(
+                tenant_id,
+                remote_uuid(&raw, "pipeline_id")?,
+                from_job,
+                name,
+                Utc::now(),
+            )
+            .await
+            .map_err(|_| ApplicationError::PipelineNotFound)?;
+        let content = self
+            .blob_store
+            .as_ref()
+            .ok_or(ApplicationError::Unavailable)?
+            .get(tenant_id, &artifact.object)
+            .await
+            .map_err(|_| ApplicationError::Unavailable)?;
+        Ok(RemoteTransferDownload {
+            content,
+            digest: artifact.object.digest,
+        })
+    }
+
+    /// Publishes one immutable attempt-owned artifact after validating its archive.
+    ///
+    /// # Errors
+    ///
+    /// Returns authentication/ownership errors, invalid-event for invalid input, or unavailable
+    /// when content-addressed publication or quota-locked metadata persistence fails.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn remote_upload_artifact(
+        &self,
+        tenant_id: &str,
+        runner_id: Uuid,
+        credential: &str,
+        attempt_id: Uuid,
+        name: &str,
+        retention_days: i64,
+        content: Vec<u8>,
+    ) -> Result<RemoteTransferUpload, ApplicationError> {
+        let raw = self
+            .authorized_remote_offer(tenant_id, runner_id, credential, attempt_id)
+            .await?;
+        if name.is_empty()
+            || name.len() > 128
+            || !(1..=90).contains(&retention_days)
+            || robine_source::validate_workspace_tar_gz(
+                &content,
+                robine_source::ArchiveLimits::default(),
+            )
+            .is_err()
+        {
+            return Err(ApplicationError::InvalidAttemptEvent);
+        }
+        let blobs = self
+            .blob_store
+            .as_ref()
+            .ok_or(ApplicationError::Unavailable)?;
+        let object = blobs
+            .put(tenant_id, content)
+            .await
+            .map_err(|_| ApplicationError::Unavailable)?;
+        let now = Utc::now();
+        let artifact = Artifact {
+            id: Uuid::new_v4(),
+            repository_id: remote_uuid(&raw, "repository_id")?,
+            attempt_id,
+            name: name.into(),
+            object: object.clone(),
+            created_at: now,
+            expires_at: now + chrono::Duration::days(retention_days),
+        };
+        if self
+            .storage_repository
+            .as_ref()
+            .ok_or(ApplicationError::Unavailable)?
+            .upload_artifact(tenant_id, &artifact, self.storage_quotas)
+            .await
+            .is_err()
+        {
+            let _ = blobs.delete(tenant_id, &object.blob_id).await;
+            return Err(ApplicationError::Unavailable);
+        }
+        Ok(RemoteTransferUpload {
+            id: Some(artifact.id),
+            digest: object.digest,
+            size: object.size,
+        })
+    }
+
     /// Processes a bounded batch of pending durable outbox events.
     ///
     /// # Errors
@@ -1835,6 +2275,32 @@ impl ControlPlane {
         }
         Ok(())
     }
+
+    async fn authorized_remote_offer(
+        &self,
+        tenant_id: &str,
+        runner_id: Uuid,
+        credential: &str,
+        attempt_id: Uuid,
+    ) -> Result<serde_json::Value, ApplicationError> {
+        self.authenticate_runner(tenant_id, runner_id, credential, Utc::now())
+            .await?;
+        self.pipelines
+            .remote_job_offer(tenant_id, runner_id, attempt_id)
+            .await
+            .map_err(|error| match error {
+                PortError::NotFound => ApplicationError::PipelineNotFound,
+                PortError::AttemptNotAssigned => ApplicationError::Forbidden,
+                _ => ApplicationError::Unavailable,
+            })
+    }
+}
+
+fn remote_uuid(raw: &serde_json::Value, name: &str) -> Result<Uuid, ApplicationError> {
+    raw.get(name)
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .ok_or(ApplicationError::Unavailable)
 }
 
 fn populate_jobs_from_workflow(

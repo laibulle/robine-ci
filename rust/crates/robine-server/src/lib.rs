@@ -554,6 +554,394 @@ async fn remote_job_offer(
     }
 }
 
+async fn remote_attempt_source(
+    request: HttpRequest,
+    attempt_id: web::Path<Uuid>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let runner_id = request
+        .headers()
+        .get("x-robine-runner-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| Uuid::parse_str(value).ok());
+    let credential = request
+        .headers()
+        .get("x-robine-runner-credential")
+        .and_then(|value| value.to_str().ok());
+    let (Some(runner_id), Some(credential)) = (runner_id, credential) else {
+        return HttpResponse::Unauthorized().finish();
+    };
+    match state
+        .control_plane
+        .remote_attempt_source("standalone", runner_id, credential, attempt_id.into_inner())
+        .await
+    {
+        Ok(archive) => HttpResponse::Ok()
+            .insert_header(("cache-control", "no-store"))
+            .content_type("application/gzip")
+            .body(archive),
+        Err(ApplicationError::Unauthenticated) => HttpResponse::Unauthorized().finish(),
+        Err(ApplicationError::Forbidden) => HttpResponse::Forbidden().finish(),
+        Err(ApplicationError::PipelineNotFound) => HttpResponse::NotFound().finish(),
+        Err(_) => HttpResponse::ServiceUnavailable().finish(),
+    }
+}
+
+async fn remote_attempt_secrets(
+    request: HttpRequest,
+    attempt_id: web::Path<Uuid>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let runner_id = request
+        .headers()
+        .get("x-robine-runner-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| Uuid::parse_str(value).ok());
+    let credential = request
+        .headers()
+        .get("x-robine-runner-credential")
+        .and_then(|value| value.to_str().ok());
+    let (Some(runner_id), Some(credential)) = (runner_id, credential) else {
+        return HttpResponse::Unauthorized().finish();
+    };
+    match state
+        .control_plane
+        .remote_attempt_secrets("standalone", runner_id, credential, attempt_id.into_inner())
+        .await
+    {
+        Ok(body) => HttpResponse::Ok()
+            .insert_header(("cache-control", "no-store"))
+            .content_type("application/json")
+            .body(body),
+        Err(ApplicationError::Unauthenticated) => HttpResponse::Unauthorized().finish(),
+        Err(ApplicationError::Forbidden) => HttpResponse::Forbidden().finish(),
+        Err(ApplicationError::PipelineNotFound) => HttpResponse::NotFound().finish(),
+        Err(_) => HttpResponse::ServiceUnavailable().finish(),
+    }
+}
+
+#[derive(Deserialize)]
+struct RemoteLogRequest {
+    sequence: i64,
+    step_position: i32,
+    step_name: String,
+    stream: String,
+    content: String,
+}
+
+async fn record_remote_log(
+    request: HttpRequest,
+    attempt_id: web::Path<Uuid>,
+    input: web::Json<RemoteLogRequest>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let runner_id = request
+        .headers()
+        .get("x-robine-runner-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| Uuid::parse_str(value).ok());
+    let credential = request
+        .headers()
+        .get("x-robine-runner-credential")
+        .and_then(|value| value.to_str().ok());
+    let (Some(runner_id), Some(credential)) = (runner_id, credential) else {
+        return HttpResponse::Unauthorized().finish();
+    };
+    let input = input.into_inner();
+    match state
+        .control_plane
+        .record_remote_log(
+            "standalone",
+            runner_id,
+            credential,
+            robine_core::pipelines::ExecutionLogChunk {
+                id: Uuid::nil(),
+                attempt_id: attempt_id.into_inner(),
+                sequence: input.sequence,
+                step_position: input.step_position,
+                step_name: input.step_name,
+                stream: input.stream,
+                content: input.content.into_bytes(),
+                inserted_at: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+            },
+        )
+        .await
+    {
+        Ok(sequence) => HttpResponse::Ok().json(serde_json::json!({"sequence": sequence})),
+        Err(ApplicationError::Unauthenticated) => HttpResponse::Unauthorized().finish(),
+        Err(ApplicationError::Forbidden) => HttpResponse::Forbidden().finish(),
+        Err(ApplicationError::PipelineNotFound) => HttpResponse::NotFound().finish(),
+        Err(ApplicationError::InvalidAttemptEvent) => HttpResponse::UnprocessableEntity().finish(),
+        Err(_) => HttpResponse::ServiceUnavailable().finish(),
+    }
+}
+
+#[derive(Deserialize)]
+struct RemoteCacheQuery {
+    key: String,
+}
+
+async fn restore_remote_cache(
+    request: HttpRequest,
+    attempt_id: web::Path<Uuid>,
+    query: web::Query<RemoteCacheQuery>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let Some((runner_id, credential)) = runner_headers(&request) else {
+        return HttpResponse::Unauthorized().finish();
+    };
+    match state
+        .control_plane
+        .remote_restore_cache(
+            "standalone",
+            runner_id,
+            credential,
+            attempt_id.into_inner(),
+            &query.key,
+        )
+        .await
+    {
+        Ok(Some(download)) => transfer_download(download),
+        Ok(None) => HttpResponse::NoContent().finish(),
+        Err(error) => remote_transfer_error(error),
+    }
+}
+
+async fn save_remote_cache(
+    request: HttpRequest,
+    attempt_id: web::Path<Uuid>,
+    query: web::Query<RemoteCacheQuery>,
+    body: web::Bytes,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let Some((runner_id, credential)) = runner_headers(&request) else {
+        return HttpResponse::Unauthorized().finish();
+    };
+    match state
+        .control_plane
+        .remote_save_cache(
+            "standalone",
+            runner_id,
+            credential,
+            attempt_id.into_inner(),
+            &query.key,
+            body.to_vec(),
+        )
+        .await
+    {
+        Ok(upload) => HttpResponse::Created().json(upload),
+        Err(error) => remote_transfer_error(error),
+    }
+}
+
+#[derive(Deserialize)]
+struct RemoteArtifactQuery {
+    name: String,
+    from: Option<String>,
+    retention_days: Option<i64>,
+}
+
+async fn download_remote_artifact(
+    request: HttpRequest,
+    attempt_id: web::Path<Uuid>,
+    query: web::Query<RemoteArtifactQuery>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let Some((runner_id, credential)) = runner_headers(&request) else {
+        return HttpResponse::Unauthorized().finish();
+    };
+    let Some(from_job) = query.from.as_deref() else {
+        return HttpResponse::UnprocessableEntity().finish();
+    };
+    match state
+        .control_plane
+        .remote_download_artifact(
+            "standalone",
+            runner_id,
+            credential,
+            attempt_id.into_inner(),
+            from_job,
+            &query.name,
+        )
+        .await
+    {
+        Ok(download) => transfer_download(download),
+        Err(error) => remote_transfer_error(error),
+    }
+}
+
+async fn upload_remote_artifact(
+    request: HttpRequest,
+    attempt_id: web::Path<Uuid>,
+    query: web::Query<RemoteArtifactQuery>,
+    body: web::Bytes,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let Some((runner_id, credential)) = runner_headers(&request) else {
+        return HttpResponse::Unauthorized().finish();
+    };
+    match state
+        .control_plane
+        .remote_upload_artifact(
+            "standalone",
+            runner_id,
+            credential,
+            attempt_id.into_inner(),
+            &query.name,
+            query.retention_days.unwrap_or(7),
+            body.to_vec(),
+        )
+        .await
+    {
+        Ok(upload) => HttpResponse::Created().json(upload),
+        Err(error) => remote_transfer_error(error),
+    }
+}
+
+fn runner_headers(request: &HttpRequest) -> Option<(Uuid, &str)> {
+    let runner_id = request
+        .headers()
+        .get("x-robine-runner-id")?
+        .to_str()
+        .ok()
+        .and_then(|value| Uuid::parse_str(value).ok())?;
+    let credential = request
+        .headers()
+        .get("x-robine-runner-credential")?
+        .to_str()
+        .ok()?;
+    Some((runner_id, credential))
+}
+
+fn transfer_download(download: robine_application::RemoteTransferDownload) -> HttpResponse {
+    HttpResponse::Ok()
+        .insert_header(("cache-control", "no-store"))
+        .insert_header(("x-content-sha256", download.digest))
+        .content_type("application/gzip")
+        .body(download.content)
+}
+
+fn remote_transfer_error(error: ApplicationError) -> HttpResponse {
+    match error {
+        ApplicationError::Unauthenticated => HttpResponse::Unauthorized().finish(),
+        ApplicationError::Forbidden => HttpResponse::Forbidden().finish(),
+        ApplicationError::PipelineNotFound => HttpResponse::NotFound().finish(),
+        ApplicationError::InvalidAttemptEvent => HttpResponse::UnprocessableEntity().finish(),
+        _ => HttpResponse::ServiceUnavailable().finish(),
+    }
+}
+
+#[derive(Deserialize)]
+struct RunnerOfferDecision {
+    message_id: String,
+}
+
+async fn accept_remote_job(
+    request: HttpRequest,
+    attempt_id: web::Path<Uuid>,
+    input: web::Json<RunnerOfferDecision>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    decide_remote_job(
+        &request,
+        attempt_id.into_inner(),
+        input.into_inner(),
+        "preparing",
+        None,
+        &state,
+    )
+    .await
+}
+
+async fn reject_remote_job(
+    request: HttpRequest,
+    attempt_id: web::Path<Uuid>,
+    input: web::Json<RunnerOfferDecision>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    decide_remote_job(
+        &request,
+        attempt_id.into_inner(),
+        input.into_inner(),
+        "failed",
+        Some("system_failure".into()),
+        &state,
+    )
+    .await
+}
+
+async fn decide_remote_job(
+    request: &HttpRequest,
+    attempt_id: Uuid,
+    input: RunnerOfferDecision,
+    status: &str,
+    reason: Option<String>,
+    state: &web::Data<AppState>,
+) -> HttpResponse {
+    let runner_id = request
+        .headers()
+        .get("x-robine-runner-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| Uuid::parse_str(value).ok());
+    let credential = request
+        .headers()
+        .get("x-robine-runner-credential")
+        .and_then(|value| value.to_str().ok());
+    let (Some(runner_id), Some(credential)) = (runner_id, credential) else {
+        return HttpResponse::Unauthorized().finish();
+    };
+    if input.message_id.is_empty() || input.message_id.len() > 128 {
+        return HttpResponse::UnprocessableEntity().finish();
+    }
+    let offer = match state
+        .control_plane
+        .remote_job_offer("standalone", runner_id, credential, attempt_id)
+        .await
+    {
+        Ok(offer) => offer,
+        Err(ApplicationError::Unauthenticated) => return HttpResponse::Unauthorized().finish(),
+        Err(ApplicationError::Forbidden) => return HttpResponse::Forbidden().finish(),
+        Err(ApplicationError::PipelineNotFound) => return HttpResponse::NotFound().finish(),
+        Err(_) => return HttpResponse::ServiceUnavailable().finish(),
+    };
+    let Some(idempotency_token) = offer
+        .get("idempotency_token")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())
+    else {
+        return HttpResponse::ServiceUnavailable().finish();
+    };
+    match state
+        .control_plane
+        .record_remote_attempt_event(
+            "standalone",
+            runner_id,
+            credential,
+            robine_core::pipelines::RecordRemoteAttemptEvent {
+                idempotency_token,
+                message_id: input.message_id.clone(),
+                sequence: 1,
+                status: status.into(),
+                reason,
+            },
+        )
+        .await
+    {
+        Ok(attempt) => HttpResponse::Ok().json(serde_json::json!({
+            "message_id": input.message_id,
+            "attempt_id": attempt_id,
+            "acknowledged_sequence": attempt.last_sequence,
+        })),
+        Err(ApplicationError::Unauthenticated) => HttpResponse::Unauthorized().finish(),
+        Err(ApplicationError::Forbidden) => HttpResponse::Forbidden().finish(),
+        Err(ApplicationError::IdempotencyConflict | ApplicationError::EventSequenceGap { .. }) => {
+            HttpResponse::Conflict().finish()
+        }
+        Err(ApplicationError::InvalidAttemptEvent) => HttpResponse::UnprocessableEntity().finish(),
+        Err(_) => HttpResponse::ServiceUnavailable().finish(),
+    }
+}
+
 #[derive(Deserialize)]
 struct OutboxProcessRequest {
     limit: Option<usize>,
@@ -887,6 +1275,38 @@ pub fn configure(config: &mut web::ServiceConfig) {
             web::get().to(remote_job_offer),
         )
         .route(
+            "/api/v1/runners/attempts/{attempt_id}/source",
+            web::get().to(remote_attempt_source),
+        )
+        .route(
+            "/api/v1/runners/attempts/{attempt_id}/secrets",
+            web::get().to(remote_attempt_secrets),
+        )
+        .route(
+            "/api/v1/runners/attempts/{attempt_id}/logs",
+            web::post().to(record_remote_log),
+        )
+        .service(
+            web::resource("/api/v1/runners/attempts/{attempt_id}/cache")
+                .app_data(web::PayloadConfig::new(100_000_000))
+                .route(web::get().to(restore_remote_cache))
+                .route(web::put().to(save_remote_cache)),
+        )
+        .service(
+            web::resource("/api/v1/runners/attempts/{attempt_id}/artifacts")
+                .app_data(web::PayloadConfig::new(100_000_000))
+                .route(web::get().to(download_remote_artifact))
+                .route(web::put().to(upload_remote_artifact)),
+        )
+        .route(
+            "/api/v1/runners/attempts/{attempt_id}/accept",
+            web::post().to(accept_remote_job),
+        )
+        .route(
+            "/api/v1/runners/attempts/{attempt_id}/reject",
+            web::post().to(reject_remote_job),
+        )
+        .route(
             "/api/v1/internal/outbox/process",
             web::post().to(process_outbox),
         )
@@ -910,13 +1330,55 @@ mod tests {
         ports::{IdentityRepository, PipelineRepository, PortError},
     };
     use robine_persistence::PersistenceError;
+    use robine_source::{
+        ArchiveFetcher, Provider, Repository, RepositoryStore, SourceError, SourceFile,
+    };
     use sha2::Sha256;
+    use std::path::PathBuf;
 
     use super::*;
 
     struct StubBackend {
         ready: bool,
         role: Role,
+    }
+
+    struct StubSource;
+
+    #[async_trait]
+    impl RepositoryStore for StubSource {
+        async fn find_trusted(
+            &self,
+            _tenant_id: &str,
+            repository_id: Uuid,
+        ) -> Result<Repository, SourceError> {
+            Ok(Repository {
+                id: repository_id,
+                provider: Provider::GitHub,
+                provider_instance: "https://github.com".into(),
+                installation_id: 1,
+                owner: "robine".into(),
+                name: "fixture".into(),
+                full_name: "robine/fixture".into(),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl ArchiveFetcher for StubSource {
+        async fn fetch_archive(
+            &self,
+            _repository: &Repository,
+            _commit_sha: &str,
+        ) -> Result<Vec<u8>, SourceError> {
+            robine_source::create_source_tar_gz(
+                &[SourceFile {
+                    path: PathBuf::from("README.md"),
+                    contents: b"remote source\n".to_vec(),
+                }],
+                robine_source::ArchiveLimits::default(),
+            )
+        }
     }
 
     #[async_trait]
@@ -1261,6 +1723,7 @@ mod tests {
         ) -> Result<robine_core::pipelines::RunnerLeaseHeartbeat, PortError> {
             Ok(robine_core::pipelines::RunnerLeaseHeartbeat {
                 renewed_attempts: 1,
+                pending_offer_attempt_ids: vec![Uuid::nil()],
                 cancellation_requested_attempt_ids: Vec::new(),
             })
         }
@@ -1307,7 +1770,10 @@ mod tests {
             Ok(serde_json::json!({
                 "attempt_id": attempt_id,
                 "job_key": "test",
-                "idempotency_token": Uuid::new_v4()
+                "idempotency_token": Uuid::new_v4(),
+                "repository_id": Uuid::nil(),
+                "commit_sha": "a".repeat(40),
+                "steps": [{"kind": "builtin", "value": "checkout"}]
             }))
         }
 
@@ -1328,7 +1794,8 @@ mod tests {
         let backend = Arc::new(StubBackend { ready, role });
         let control_plane = Arc::new(
             ControlPlane::new(backend.clone(), backend.clone())
-                .with_runner_secret_key_base("runner-test-secret"),
+                .with_runner_secret_key_base("runner-test-secret")
+                .with_source_runtime(Arc::new(StubSource), Arc::new(StubSource)),
         );
         web::Data::new(AppState::new(backend, control_plane))
     }
@@ -1473,7 +1940,11 @@ mod tests {
             body["diagnostics"][0]["source_path"],
             ".robine-ci/workflows/broken.yml"
         );
-        assert!(body["diagnostics"][0]["line"].as_u64().is_some_and(|line| line > 0));
+        assert!(
+            body["diagnostics"][0]["line"]
+                .as_u64()
+                .is_some_and(|line| line > 0)
+        );
     }
 
     #[actix_web::test]
@@ -1717,6 +2188,10 @@ mod tests {
         let body: serde_json::Value = test::read_body_json(response).await;
         assert_eq!(body["renewed_attempts"], 1);
         assert_eq!(
+            body["pending_offer_attempt_ids"],
+            serde_json::json!([Uuid::nil()])
+        );
+        assert_eq!(
             body["cancellation_requested_attempt_ids"],
             serde_json::json!([])
         );
@@ -1779,6 +2254,99 @@ mod tests {
         let offer: serde_json::Value = test::read_body_json(offer_response).await;
         assert_eq!(offer["attempt_id"], offer_attempt_id.to_string());
         assert_eq!(offer["job_key"], "test");
+
+        let source_request = test::TestRequest::get()
+            .uri(&format!(
+                "/api/v1/runners/attempts/{offer_attempt_id}/source"
+            ))
+            .insert_header(("x-robine-runner-id", Uuid::new_v4().to_string()))
+            .insert_header((
+                "x-robine-runner-credential",
+                format!("rrc_{}", "a".repeat(43)),
+            ))
+            .to_request();
+        let source_response = test::call_service(&app, source_request).await;
+        assert_eq!(source_response.status(), StatusCode::OK);
+        assert_eq!(
+            source_response
+                .headers()
+                .get("cache-control")
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+        let source_body = test::read_body(source_response).await;
+        let source_files =
+            robine_source::extract_tar_gz(&source_body, robine_source::ArchiveLimits::default())
+                .expect("safe transferred source");
+        assert_eq!(source_files[0].path, PathBuf::from("README.md"));
+        assert_eq!(source_files[0].contents, b"remote source\n");
+
+        let secrets_request = test::TestRequest::get()
+            .uri(&format!(
+                "/api/v1/runners/attempts/{offer_attempt_id}/secrets"
+            ))
+            .insert_header(("x-robine-runner-id", Uuid::new_v4().to_string()))
+            .insert_header((
+                "x-robine-runner-credential",
+                format!("rrc_{}", "a".repeat(43)),
+            ))
+            .to_request();
+        let secrets_response = test::call_service(&app, secrets_request).await;
+        assert_eq!(secrets_response.status(), StatusCode::OK);
+        assert_eq!(
+            secrets_response
+                .headers()
+                .get("cache-control")
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
+        );
+        let secrets: serde_json::Value = test::read_body_json(secrets_response).await;
+        assert_eq!(secrets, serde_json::json!({"secrets": {}}));
+
+        let log_request = test::TestRequest::post()
+            .uri(&format!("/api/v1/runners/attempts/{offer_attempt_id}/logs"))
+            .insert_header(("x-robine-runner-id", Uuid::new_v4().to_string()))
+            .insert_header((
+                "x-robine-runner-credential",
+                format!("rrc_{}", "a".repeat(43)),
+            ))
+            .set_json(serde_json::json!({
+                "sequence": 7,
+                "step_position": 1,
+                "step_name": "Test",
+                "stream": "stdout",
+                "content": "remote output\n"
+            }))
+            .to_request();
+        let log_response = test::call_service(&app, log_request).await;
+        assert_eq!(log_response.status(), StatusCode::OK);
+        let acknowledgement: serde_json::Value = test::read_body_json(log_response).await;
+        assert_eq!(acknowledgement["sequence"], 7);
+
+        for (decision, expected_sequence) in [("accept", 1), ("reject", 1)] {
+            let decision_attempt_id = Uuid::new_v4();
+            let message_id = Uuid::new_v4();
+            let decision_request = test::TestRequest::post()
+                .uri(&format!(
+                    "/api/v1/runners/attempts/{decision_attempt_id}/{decision}"
+                ))
+                .insert_header(("x-robine-runner-id", Uuid::new_v4().to_string()))
+                .insert_header((
+                    "x-robine-runner-credential",
+                    format!("rrc_{}", "a".repeat(43)),
+                ))
+                .set_json(serde_json::json!({"message_id": message_id}))
+                .to_request();
+            let response = test::call_service(&app, decision_request).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let acknowledgement: serde_json::Value = test::read_body_json(response).await;
+            assert_eq!(acknowledgement["message_id"], message_id.to_string());
+            assert_eq!(
+                acknowledgement["attempt_id"],
+                decision_attempt_id.to_string()
+            );
+            assert_eq!(acknowledgement["acknowledged_sequence"], expected_sequence);
+        }
     }
 
     #[actix_web::test]

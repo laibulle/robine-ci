@@ -596,6 +596,7 @@ pub struct AttemptHeartbeatError;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct RunnerLeaseHeartbeat {
     pub renewed_attempts: u64,
+    pub pending_offer_attempt_ids: Vec<Uuid>,
     pub cancellation_requested_attempt_ids: Vec<Uuid>,
 }
 

@@ -1584,6 +1584,7 @@ async fn heartbeat_and_expiry_reconciliation_are_atomic_and_tenant_scoped() {
         .await
         .expect("authenticated runner heartbeat");
     assert_eq!(runner_heartbeat.renewed_attempts, 1);
+    assert_eq!(runner_heartbeat.pending_offer_attempt_ids, vec![attempt.id]);
     assert!(
         runner_heartbeat
             .cancellation_requested_attempt_ids
@@ -1752,6 +1753,14 @@ async fn heartbeat_and_expiry_reconciliation_are_atomic_and_tenant_scoped() {
     assert_eq!(
         offer["build_env"]["ROBINE_BUILD_COMMIT_SHA"],
         "3".repeat(40)
+    );
+    let offer_heartbeat = control_plane
+        .heartbeat_runner_attempts(&tenant, runner_id, &credential, 120)
+        .await
+        .expect("heartbeat discovers newly reserved offers");
+    assert_eq!(
+        offer_heartbeat.pending_offer_attempt_ids,
+        vec![remote_attempt.id]
     );
     assert!(matches!(
         database
