@@ -92,11 +92,11 @@ The existing runner connection, heartbeat, attempt, log, cancellation, and runne
 
 ## Acceptance criteria
 
-- [ ] Darwin and Apple Silicon facts normalize to `macos` and `arm64`, and select native execution.
-- [ ] Native capacity can be scheduled without satisfying the default `docker` label.
-- [ ] Sequential steps share a fresh workspace and output is redacted across chunk boundaries.
-- [ ] Command failure, conditional skip, cancellation, and cleanup are covered by automated tests.
-- [ ] Cache and artifact archives publish and restore through the shared transfer contract.
+- [x] Darwin and Apple Silicon facts normalize to `macos` and `arm64`, and select native execution.
+- [x] Native capacity can be scheduled without satisfying the default `docker` label.
+- [x] Sequential steps share a fresh workspace and output is redacted across chunk boundaries.
+- [x] Command failure, conditional skip, cancellation, and cleanup are covered by automated tests.
+- [x] Cache and artifact archives publish and restore through the shared transfer contract.
 - [ ] A target Mac builds the runner artifact, connects through TLS, and completes a real `runs-on: [macos]` pipeline.
 - [ ] launchd installation, upgrade, troubleshooting, and removal are documented and verified on macOS.
 

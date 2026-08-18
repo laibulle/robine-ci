@@ -182,6 +182,7 @@ fn create_safe_parents(root: &Path, destination: &Path) -> Result<(), ExecutionE
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
 async fn run_step(
     specification: &ExecutionSpecification,
     workspace: &Path,
@@ -714,10 +715,10 @@ mod tests {
 
     #[tokio::test]
     async fn native_timeout_cancellation_services_and_cleanup_fail_closed() {
-        let before = native_workspaces();
         let harness = Arc::new(Harness::default());
         let mut timed = specification(vec![run_step("slow", "sleep 2", StepCondition::Success)]);
         timed.timeout_ms = 100;
+        let timed_id = timed.attempt_id.to_string();
         let result = NativeProcessRunner
             .run(
                 &timed,
@@ -731,8 +732,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.status, ExecutionStatus::TimedOut);
+        assert!(
+            native_workspaces()
+                .iter()
+                .all(|path| !path.to_string_lossy().contains(&timed_id))
+        );
         harness.cancelled.store(true, Ordering::SeqCst);
         let cancelled = specification(vec![run_step("slow", "sleep 2", StepCondition::Success)]);
+        let cancelled_id = cancelled.attempt_id.to_string();
         let result = NativeProcessRunner
             .run(
                 &cancelled,
@@ -746,6 +753,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.status, ExecutionStatus::Cancelled);
+        assert!(
+            native_workspaces()
+                .iter()
+                .all(|path| !path.to_string_lossy().contains(&cancelled_id))
+        );
         let mut services = specification(vec![run_step("test", "true", StepCondition::Success)]);
         services.services.push(ServiceSpecification {
             id: "redis".into(),
@@ -772,7 +784,6 @@ mod tests {
                 .await,
             Err(ExecutionError::Unsupported("native service containers"))
         ));
-        assert_eq!(native_workspaces(), before);
     }
 
     #[tokio::test]
@@ -785,6 +796,9 @@ mod tests {
             condition: StepCondition::Success,
             with: BTreeMap::new(),
         };
+        upload
+            .with
+            .insert("name".into(), serde_json::json!("result"));
         upload
             .with
             .insert("paths".into(), serde_json::json!(["result.txt"]));
@@ -817,6 +831,12 @@ mod tests {
             condition: StepCondition::Success,
             with: BTreeMap::new(),
         };
+        download
+            .with
+            .insert("name".into(), serde_json::json!("result"));
+        download
+            .with
+            .insert("from".into(), serde_json::json!("build"));
         download
             .with
             .insert("path".into(), serde_json::json!("restored"));

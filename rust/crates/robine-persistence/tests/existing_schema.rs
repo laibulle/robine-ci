@@ -47,6 +47,104 @@ struct WorkflowArchive(Vec<u8>);
 struct RecordingStatusProjector(AtomicI64);
 
 #[tokio::test]
+async fn native_macos_capacity_claims_only_explicit_native_jobs() {
+    let Ok(database_url) = std::env::var("ROBINE_DATABASE_INTEGRATION_URL") else {
+        return;
+    };
+    let database = Database::connect(&database_url, 2).await.expect("database");
+    let tenant = format!("native-scheduler-{}", Uuid::new_v4());
+    let now = Utc::now();
+    let native_job = Uuid::new_v4();
+    let docker_job = Uuid::new_v4();
+    let pipeline = NewPipeline {
+        id: Uuid::new_v4(),
+        repository_id: Uuid::new_v4(),
+        workflow_name: "Native".into(),
+        commit_sha: "d".repeat(40),
+        source_ref: None,
+        trigger: "manual".into(),
+        actor: "system".into(),
+        correlation_id: Uuid::new_v4(),
+        inserted_at: now,
+        scheduled_for: None,
+        inputs: std::collections::BTreeMap::new(),
+        revision: NewWorkflowRevision {
+            id: Uuid::new_v4(),
+            path: "generated://native".into(),
+            source: "{}".into(),
+            digest: source_digest("{}"),
+            normalized_graph: serde_json::json!({"jobs":{}}),
+            included_sources: serde_json::json!({}),
+        },
+        jobs: vec![
+            NewJob {
+                id: native_job,
+                key: "mac".into(),
+                status: JobState::Queued,
+                needs: Vec::new(),
+                position: 0,
+                execution: serde_json::json!({"runs_on":["macos","arm64","native"],"condition":"success"}),
+            },
+            NewJob {
+                id: docker_job,
+                key: "default".into(),
+                status: JobState::Queued,
+                needs: Vec::new(),
+                position: 1,
+                execution: serde_json::json!({"condition":"success"}),
+            },
+        ],
+        event_id: Uuid::new_v4(),
+    };
+    database
+        .create(&tenant, &pipeline)
+        .await
+        .expect("create pipeline");
+    database
+        .queue(&tenant, pipeline.id)
+        .await
+        .expect("queue pipeline");
+    let runner_id = Uuid::new_v4();
+    let mut fixture = database
+        .tenant_transaction(&tenant)
+        .await
+        .expect("runner fixture");
+    sqlx::query("INSERT INTO remote_runners (id, name, admin_state, protocol_version, capabilities, labels, last_seen_at, inserted_at, updated_at, tenant_id) VALUES ($1, 'native-mac', 'enabled', 1, '{\"native\":true,\"docker\":false,\"os\":\"macos\",\"architecture\":\"arm64\",\"concurrency\":1}', ARRAY[]::varchar[], $2, $2, $2, $3)")
+        .bind(runner_id).bind(now).bind(&tenant).execute(&mut *fixture).await.expect("native runner");
+    fixture.commit().await.expect("commit runner");
+    let claim = database
+        .claim_next_job(
+            &tenant,
+            &SchedulerClaim {
+                global_limit: 2,
+                repository_limit: 2,
+                lease_seconds: 60,
+                attempt_id: Uuid::new_v4(),
+                idempotency_token: Uuid::new_v4(),
+                event_id: Uuid::new_v4(),
+                now,
+                runner_id: Some(runner_id),
+            },
+        )
+        .await
+        .expect("native claim");
+    assert_eq!(claim.job_id, native_job);
+    assert_ne!(claim.job_id, docker_job);
+    let mut cleanup = database.tenant_transaction(&tenant).await.expect("cleanup");
+    sqlx::query("DELETE FROM pipelines WHERE id = $1")
+        .bind(pipeline.id)
+        .execute(&mut *cleanup)
+        .await
+        .expect("delete pipeline");
+    sqlx::query("DELETE FROM remote_runners WHERE id = $1")
+        .bind(runner_id)
+        .execute(&mut *cleanup)
+        .await
+        .expect("delete runner");
+    cleanup.commit().await.expect("commit cleanup");
+}
+
+#[tokio::test]
 async fn embedded_application_boundary_derives_pipeline_scope_from_context() {
     let Ok(database_url) = std::env::var("ROBINE_DATABASE_INTEGRATION_URL") else {
         return;

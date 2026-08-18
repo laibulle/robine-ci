@@ -2,8 +2,8 @@ use async_trait::async_trait;
 use reqwest::Client;
 use robine_execution::{
     BuiltinHandler, BuiltinRestore, CancellationSignal, DockerCli, DockerConfig, ExecutionControl,
-    ExecutionError, ExecutionSpecification, ExecutionStatus, ExecutionStep, OutputChannel,
-    OutputChunk, OutputSink,
+    ExecutionError, ExecutionRunner, ExecutionSpecification, ExecutionStatus, ExecutionStep,
+    NativeProcessRunner, OutputChannel, OutputChunk, OutputSink,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -162,7 +162,7 @@ async fn start(arguments: &[String]) -> Result<String, (u8, String)> {
 }
 
 async fn register_session(client: &Client, config: &Config) -> Result<(), (u8, String)> {
-    machine(client.post(url(config, "/api/v1/runners/session")), config).json(&serde_json::json!({"supported_protocol_versions":[1],"software_version":env!("CARGO_PKG_VERSION"),"capabilities":{"docker":true,"concurrency":1,"labels":["docker","linux"]}})).send().await.map_err(network)?.error_for_status().map_err(network)?;
+    machine(client.post(url(config, "/api/v1/runners/session")), config).json(&serde_json::json!({"supported_protocol_versions":[1],"software_version":env!("CARGO_PKG_VERSION"),"capabilities":runtime_capabilities()})).send().await.map_err(network)?.error_for_status().map_err(network)?;
     Ok(())
 }
 
@@ -270,19 +270,60 @@ async fn execute_offer(
         config: config.clone(),
         attempt_id,
     };
-    let result = DockerCli::new(DockerConfig::default())
-        .run_controlled(
-            &specification,
-            ExecutionControl {
-                output: &output,
-                cancellation: &cancellation,
-                builtins: Some(&builtins),
-                last_sequence: 0,
-            },
-        )
-        .await;
+    let control = ExecutionControl {
+        output: &output,
+        cancellation: &cancellation,
+        builtins: Some(&builtins),
+        last_sequence: 0,
+    };
+    let result = if cfg!(target_os = "macos") {
+        NativeProcessRunner.run(&specification, control).await
+    } else {
+        DockerCli::new(DockerConfig::default())
+            .run_controlled(
+                &specification,
+                ExecutionControl {
+                    output: &output,
+                    cancellation: &cancellation,
+                    builtins: Some(&builtins),
+                    last_sequence: 0,
+                },
+            )
+            .await
+    };
     let (status, reason) = remote_outcome(result.as_ref().map(|result| result.status));
     event(client, config, &token, 3, status, reason.as_deref()).await
+}
+
+fn runtime_capabilities() -> serde_json::Value {
+    runner_capabilities(std::env::consts::OS, std::env::consts::ARCH)
+}
+
+fn runner_capabilities(os: &str, architecture: &str) -> serde_json::Value {
+    let architecture = match architecture {
+        "aarch64" => "arm64",
+        "x86_64" => "amd64",
+        other => other,
+    };
+    if os == "macos" {
+        serde_json::json!({
+            "docker": false,
+            "native": true,
+            "os": "macos",
+            "architecture": architecture,
+            "concurrency": 1,
+            "labels": ["native", "macos", architecture]
+        })
+    } else {
+        serde_json::json!({
+            "docker": true,
+            "native": false,
+            "os": os,
+            "architecture": architecture,
+            "concurrency": 1,
+            "labels": ["docker", os, architecture]
+        })
+    }
 }
 
 fn remote_outcome(
@@ -623,6 +664,29 @@ mod tests {
     fn refuses_cleartext_remote_server() {
         assert!(ensure_secure_server("http://example.com").is_err());
         assert!(ensure_secure_server("http://localhost:4000").is_ok());
+    }
+
+    #[test]
+    fn native_macos_capabilities_are_normalized_and_do_not_claim_docker() {
+        let apple = runner_capabilities("macos", "aarch64");
+        assert_eq!(apple["os"], "macos");
+        assert_eq!(apple["architecture"], "arm64");
+        assert_eq!(apple["native"], true);
+        assert_eq!(apple["docker"], false);
+        assert!(
+            apple["labels"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("macos"))
+        );
+
+        let intel = runner_capabilities("macos", "x86_64");
+        assert_eq!(intel["architecture"], "amd64");
+        assert_eq!(intel["docker"], false);
+
+        let linux = runner_capabilities("linux", "x86_64");
+        assert_eq!(linux["docker"], true);
+        assert_eq!(linux["native"], false);
     }
 
     #[test]

@@ -44,7 +44,31 @@ The runner writes the credential atomically to a mode-`0600` file. Enrollment re
 robine-runner start --config /etc/robine-runner/config.json
 ```
 
-The current native runner opens an authenticated HTTPS session, heartbeats every ten seconds, polls durable offers and cancellation notifications, and accepts attempt-scoped work. It downloads bounded exact-revision source and selected secrets, executes Docker jobs, streams ordered redacted output, and reports the terminal result. Configure a service manager to restart it after transient network or host failures.
+The runner opens an authenticated HTTPS session, heartbeats every ten seconds, polls durable offers and cancellation notifications, and accepts attempt-scoped work. It downloads bounded exact-revision source and selected secrets, executes Docker jobs on Linux or trusted native processes on macOS, streams ordered redacted output, and reports the terminal result. Configure a service manager to restart it after transient network or host failures.
+
+## Dedicated macOS native runner
+
+Build `robine-runner` on the target Mac with the supported Rust toolchain and verify its checksum before installation. The Darwin binary automatically advertises `os=macos`, normalized `arm64` or `amd64`, `native=true`, and `docker=false`; only workflows explicitly requesting matching native labels can be scheduled there. It executes trusted commands directly and therefore requires a dedicated non-administrator account with no personal keychain, unrelated credentials, or interactive administrator access.
+
+```sh
+install -d -m 0700 "$HOME/bin" "$HOME/.config/robine-runner" "$HOME/Library/Logs/RobineRunner" "$HOME/Library/LaunchAgents"
+install -m 0755 robine-runner "$HOME/bin/robine-runner"
+sed "s|__ROBINE_RUNNER_HOME__|$HOME|g" docs/launchd/com.robine.runner.plist > "$HOME/Library/LaunchAgents/com.robine.runner.plist"
+plutil -lint "$HOME/Library/LaunchAgents/com.robine.runner.plist"
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.robine.runner.plist"
+launchctl kickstart -k "gui/$(id -u)/com.robine.runner"
+```
+
+Enroll before starting launchd, using `$HOME/.config/robine-runner/config.json`. Native attempts receive a fresh private temporary workspace and a cleared environment containing only the bounded system path, attempt-local `HOME`/`TMPDIR`, workflow variables, build provenance, and declared secrets. Service containers fail preparation explicitly. Cache and artifact transfers retain the same authenticated attempt scope and safe-archive validation as Docker execution.
+
+Inspect and troubleshoot without printing the credential file:
+
+```sh
+launchctl print "gui/$(id -u)/com.robine.runner"
+tail -n 200 "$HOME/Library/Logs/RobineRunner/stderr.log"
+```
+
+To upgrade, verify the new target-native manifest, stop the job with `launchctl bootout`, atomically replace `$HOME/bin/robine-runner`, verify `--version`, then bootstrap it again. To remove it permanently, boot it out, revoke the runner in Robine, and delete only its plist, executable, private configuration, and dedicated logs.
 
 Production server URLs must use HTTPS. Plain HTTP is accepted only on an explicit loopback address for development. The reverse proxy must preserve ordinary `Authorization` headers and allow the runner API under `/api/v1/runners`; no WebSocket upgrade is required by this runner version.
 

@@ -6,9 +6,6 @@
     <string>com.robine.runner</string>
     <key>ProgramArguments</key>
     <array>
-      <string>__ROBINE_RUNNER_HOME__/.local/bin/mise</string>
-      <string>exec</string>
-      <string>--</string>
       <string>__ROBINE_RUNNER_HOME__/bin/robine-runner</string>
       <string>start</string>
       <string>--config</string>
