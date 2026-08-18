@@ -3160,9 +3160,11 @@ name = "robine-execution"
 version = "0.3.0"
 dependencies = [
  "async-trait",
+ "flate2",
  "robine-source",
  "serde",
  "serde_json",
+ "tar",
  "thiserror 2.0.20",
  "tokio",
  "uuid",

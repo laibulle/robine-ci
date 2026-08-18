@@ -1,9 +1,11 @@
 //! Framework-independent execution contracts and runner adapters.
 
 mod docker;
+mod native;
 
 use async_trait::async_trait;
 pub use docker::{DockerCli, DockerConfig};
+pub use native::NativeProcessRunner;
 pub use robine_source::SourceFile;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};

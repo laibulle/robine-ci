@@ -1111,14 +1111,14 @@ impl CancellationSignal for NeverCancel {
     }
 }
 
-struct StreamingRedactor {
+pub(crate) struct StreamingRedactor {
     secrets: Vec<Vec<u8>>,
     pending: Vec<u8>,
     retain: usize,
 }
 
 impl StreamingRedactor {
-    fn new(secrets: &[Vec<u8>]) -> Self {
+    pub(crate) fn new(secrets: &[Vec<u8>]) -> Self {
         let mut secrets = secrets
             .iter()
             .filter(|secret| !secret.is_empty())
@@ -1133,7 +1133,7 @@ impl StreamingRedactor {
         }
     }
 
-    fn push(&mut self, bytes: &[u8], finish: bool) -> Vec<u8> {
+    pub(crate) fn push(&mut self, bytes: &[u8], finish: bool) -> Vec<u8> {
         self.pending.extend_from_slice(bytes);
         let mut output = Vec::new();
         let mut consumed = 0;
