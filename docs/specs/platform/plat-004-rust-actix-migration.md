@@ -111,6 +111,7 @@ The Rust runtime publishes compatible health and Prometheus endpoints, structure
 - [x] Rust authenticates remote attempt events, requires durable runner ownership, enforces positive ordered sequences and result reasons, persists unique runner/message receipts in the same transaction as state and graph reconciliation, accepts exact replay, and rejects conflicting message reuse, stale delivery, gaps, and cross-runner mutation.
 - [x] Rust places jobs on remote runners only while enabled, protocol-compatible, fresh, executable, below declared concurrency, and label-compatible; persists attempt ownership under the scheduler lock; and returns a provenance-rich normalized execution offer only to the authenticated owning runner.
 - [x] Rust owns SQL outbox polling with concurrent `SKIP LOCKED` claims, idempotent pipeline-created/projection handling, atomic unique durable dispatch-job insertion, stable capped exponential retry, ten-attempt dead-lettering, tenant isolation, and a shutdown-aware runtime loop.
+- [x] Rust concurrently claims durable dispatch jobs, atomically creates a leased local attempt and its unique execution handoff before completing dispatch, retries bounded failures, reclaims stale claims, and reconciles active local attempts whose execution handoff is missing.
 - [ ] Every accepted domain contract has Rust unit and integration coverage.
 - [ ] Existing PostgreSQL migrations and records pass compatibility tests.
 - [ ] Every HTTP and runner route passes request/response parity tests.

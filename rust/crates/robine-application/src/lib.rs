@@ -18,7 +18,8 @@ use robine_core::{
     pipelines::{
         AttemptProjection, CreatePipelineInput, JobState, NewJob, NewPipeline, NewWorkflowRevision,
         OutboxDelivery, PipelineProjection, RecordAttemptEvent, RecordRemoteAttemptEvent,
-        RetryProjection, RunnerLeaseHeartbeat, RunnerReconciliation, SchedulerClaim, source_digest,
+        RetryProjection, RunnerLeaseHeartbeat, RunnerReconciliation, SchedulerClaim,
+        outbox_backoff_seconds, source_digest,
     },
     ports::{IdentityRepository, OidcProvider, PipelineRepository, PortError},
 };
@@ -117,6 +118,16 @@ pub struct OutboxBatch {
     pub processed: u64,
     pub delivered: u64,
     pub dispatch_enqueued: u64,
+}
+
+#[derive(Debug, Default, serde::Serialize)]
+pub struct DispatchBatch {
+    pub processed: u64,
+    pub attempts_created: u64,
+    pub no_work: u64,
+    pub retried: u64,
+    pub discarded: u64,
+    pub reconciled: u64,
 }
 
 impl ControlPlane {
@@ -936,6 +947,109 @@ impl ControlPlane {
             total.dispatch_enqueued += batch.dispatch_enqueued;
         }
         Ok(total)
+    }
+
+    /// Reconciles local execution handoffs and consumes bounded durable scheduler work.
+    ///
+    /// # Errors
+    ///
+    /// Returns unavailable when tenant discovery, claiming, or retry persistence fails.
+    pub async fn process_all_tenant_dispatches(
+        &self,
+        per_tenant_limit: usize,
+    ) -> Result<DispatchBatch, ApplicationError> {
+        let tenants = self
+            .pipelines
+            .list_tenants()
+            .await
+            .map_err(|_| ApplicationError::Unavailable)?;
+        let mut total = DispatchBatch::default();
+        for tenant in tenants {
+            let batch = self
+                .process_dispatch_batch(&tenant, per_tenant_limit)
+                .await?;
+            total.processed += batch.processed;
+            total.attempts_created += batch.attempts_created;
+            total.no_work += batch.no_work;
+            total.retried += batch.retried;
+            total.discarded += batch.discarded;
+            total.reconciled += batch.reconciled;
+        }
+        Ok(total)
+    }
+
+    async fn process_dispatch_batch(
+        &self,
+        tenant_id: &str,
+        limit: usize,
+    ) -> Result<DispatchBatch, ApplicationError> {
+        let now = Utc::now();
+        let mut batch = DispatchBatch {
+            reconciled: self
+                .pipelines
+                .reconcile_local_execution_jobs(tenant_id, 100, now)
+                .await
+                .map_err(|_| ApplicationError::Unavailable)?,
+            ..DispatchBatch::default()
+        };
+        for _ in 0..limit.clamp(1, 100) {
+            let claim_token = Uuid::new_v4();
+            let Some(job) = self
+                .pipelines
+                .claim_next_dispatch_job(
+                    tenant_id,
+                    claim_token,
+                    Utc::now(),
+                    Utc::now() - chrono::Duration::minutes(5),
+                )
+                .await
+                .map_err(|_| ApplicationError::Unavailable)?
+            else {
+                break;
+            };
+            batch.processed += 1;
+            let claim = SchedulerClaim {
+                global_limit: 4,
+                repository_limit: 2,
+                lease_seconds: 60,
+                attempt_id: Uuid::new_v4(),
+                idempotency_token: Uuid::new_v4(),
+                event_id: Uuid::new_v4(),
+                now: Utc::now(),
+                runner_id: None,
+            };
+            match self
+                .pipelines
+                .consume_dispatch_job(tenant_id, job.id, job.claim_token, &claim)
+                .await
+            {
+                Ok(Some(_)) => batch.attempts_created += 1,
+                Ok(None) => batch.no_work += 1,
+                Err(error) => {
+                    let discard = job.attempt >= 10;
+                    let available_at = Utc::now()
+                        + chrono::Duration::seconds(outbox_backoff_seconds(job.attempt, job.id));
+                    self.pipelines
+                        .retry_durable_job(
+                            tenant_id,
+                            job.id,
+                            job.claim_token,
+                            available_at,
+                            &error.to_string(),
+                            discard,
+                            Utc::now(),
+                        )
+                        .await
+                        .map_err(|_| ApplicationError::Unavailable)?;
+                    if discard {
+                        batch.discarded += 1;
+                    } else {
+                        batch.retried += 1;
+                    }
+                }
+            }
+        }
+        Ok(batch)
     }
 
     async fn authenticate_runner(

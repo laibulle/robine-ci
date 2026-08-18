@@ -5,8 +5,8 @@ use chrono::{DateTime, NaiveDateTime, SecondsFormat, Utc};
 use robine_core::{
     identity::{LocalIdentity, OidcClaims, Role, User},
     pipelines::{
-        AttemptEventError, AttemptProjection, AttemptState, JobState, NewPipeline, OutboxDelivery,
-        PipelineEvent, PipelineProjection, PipelineState, RecordAttemptEvent,
+        AttemptEventError, AttemptProjection, AttemptState, DurableJobClaim, JobState, NewPipeline,
+        OutboxDelivery, PipelineEvent, PipelineProjection, PipelineState, RecordAttemptEvent,
         RecordRemoteAttemptEvent, RetryProjection, RunnerAuthenticationMaterial,
         RunnerLeaseHeartbeat, RunnerResume, SchedulerClaim, UnknownPipelineState,
         outbox_backoff_seconds,
@@ -697,72 +697,12 @@ impl PipelineRepository for Database {
             .tenant_transaction(tenant_id)
             .await
             .map_err(|_| PortError::Unavailable)?;
-        sqlx::query("SELECT pg_advisory_xact_lock(90464863604293)")
-            .execute(&mut *transaction)
-            .await
-            .map_err(|_| PortError::Unavailable)?;
-        let active = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM job_attempts WHERE tenant_id = $1 \
-             AND status IN ('queued', 'preparing', 'running', 'cancelling')",
-        )
-        .bind(tenant_id)
-        .fetch_one(&mut *transaction)
-        .await
-        .map_err(|_| PortError::Unavailable)?;
-        if active >= claim.global_limit {
-            return Err(PortError::Capacity);
-        }
-        let labels = if let Some(runner_id) = claim.runner_id {
-            runner_capacity_labels(&mut transaction, tenant_id, runner_id, claim.now).await?
-        } else {
-            vec!["docker".into()]
-        };
-        let candidate =
-            select_claim_candidate(&mut transaction, tenant_id, claim.repository_limit, &labels)
-                .await?
-                .ok_or(PortError::NoWork)?;
-        let pipeline_state = PipelineState::try_from(candidate.pipeline_status.as_str())
-            .map_err(|_| PortError::InvalidData)?;
-        if pipeline_state == PipelineState::Queued {
-            pipeline_state
-                .transition(PipelineEvent::Start)
-                .map_err(|_| PortError::InvalidTransition)?;
-        } else if pipeline_state != PipelineState::Running {
-            return Err(PortError::InvalidTransition);
-        }
-        let number = sqlx::query_scalar::<_, i32>(
-            "SELECT COALESCE(MAX(number), 0)::integer + 1 FROM job_attempts \
-             WHERE job_id = $1 AND tenant_id = $2",
-        )
-        .bind(candidate.job_id)
-        .bind(tenant_id)
-        .fetch_one(&mut *transaction)
-        .await
-        .map_err(|_| PortError::Unavailable)?;
-        let lease_expires_at = claim.now + chrono::Duration::seconds(claim.lease_seconds);
-        persist_claim(
-            &mut transaction,
-            tenant_id,
-            &candidate,
-            claim,
-            number,
-            lease_expires_at,
-        )
-        .await?;
+        let attempt = claim_job_in_transaction(&mut transaction, tenant_id, claim).await?;
         transaction
             .commit()
             .await
             .map_err(|_| PortError::Unavailable)?;
-        Ok(AttemptProjection {
-            id: claim.attempt_id,
-            job_id: candidate.job_id,
-            number,
-            idempotency_token: claim.idempotency_token,
-            status: "queued".into(),
-            lease_expires_at,
-            last_sequence: 0,
-            result_reason: None,
-        })
+        Ok(attempt)
     }
 
     async fn record_attempt_event(
@@ -1436,6 +1376,264 @@ impl PipelineRepository for Database {
             attempt,
         }))
     }
+
+    async fn claim_next_dispatch_job(
+        &self,
+        tenant_id: &str,
+        claim_token: Uuid,
+        now: DateTime<Utc>,
+        stale_before: DateTime<Utc>,
+    ) -> Result<Option<DurableJobClaim>, PortError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        let claimed = sqlx::query_as::<_, DurableJobRow>(
+            "WITH candidate AS ( \
+               SELECT id FROM durable_jobs WHERE tenant_id = $1 AND kind = 'run_next_job' \
+                 AND ((status IN ('available', 'retry') AND available_at <= $2) \
+                   OR (status = 'executing' AND claimed_at < $3)) \
+               ORDER BY available_at, inserted_at, id LIMIT 1 FOR UPDATE SKIP LOCKED \
+             ) UPDATE durable_jobs AS job SET status = 'executing', attempts = attempts + 1, \
+                 claimed_at = $2, claim_token = $4, updated_at = $2 \
+             FROM candidate WHERE job.id = candidate.id AND job.tenant_id = $1 \
+             RETURNING job.id, job.source_event_id, job.kind, job.payload, \
+                       job.claim_token, job.attempts",
+        )
+        .bind(tenant_id)
+        .bind(now)
+        .bind(stale_before)
+        .bind(claim_token)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| PortError::Unavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        Ok(claimed.map(|job| DurableJobClaim {
+            id: job.id,
+            source_event_id: job.source_event_id,
+            kind: job.kind,
+            payload: job.payload,
+            claim_token: job.claim_token,
+            attempt: job.attempts,
+        }))
+    }
+
+    async fn complete_durable_job(
+        &self,
+        tenant_id: &str,
+        job_id: Uuid,
+        claim_token: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<(), PortError> {
+        update_durable_job(
+            self,
+            tenant_id,
+            job_id,
+            claim_token,
+            "completed",
+            now,
+            None,
+            now,
+        )
+        .await
+    }
+
+    async fn retry_durable_job(
+        &self,
+        tenant_id: &str,
+        job_id: Uuid,
+        claim_token: Uuid,
+        available_at: DateTime<Utc>,
+        error: &str,
+        discard: bool,
+        now: DateTime<Utc>,
+    ) -> Result<(), PortError> {
+        update_durable_job(
+            self,
+            tenant_id,
+            job_id,
+            claim_token,
+            if discard { "discarded" } else { "retry" },
+            available_at,
+            Some(error),
+            now,
+        )
+        .await
+    }
+
+    async fn enqueue_local_execution(
+        &self,
+        tenant_id: &str,
+        attempt_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<(), PortError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        insert_local_execution_job(&mut transaction, tenant_id, attempt_id, now).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PortError::Unavailable)
+    }
+
+    async fn reconcile_local_execution_jobs(
+        &self,
+        tenant_id: &str,
+        limit: i64,
+        now: DateTime<Utc>,
+    ) -> Result<u64, PortError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        let attempts = sqlx::query_scalar::<_, Uuid>(
+            "SELECT attempt.id FROM job_attempts AS attempt \
+             WHERE attempt.tenant_id = $1 AND attempt.runner_id IS NULL \
+               AND attempt.status IN ('queued', 'preparing', 'running', 'cancelling') \
+               AND NOT EXISTS (SELECT 1 FROM durable_jobs AS job \
+                 WHERE job.tenant_id = attempt.tenant_id \
+                   AND job.source_event_id = attempt.id AND job.kind = 'execute_local_attempt') \
+             ORDER BY attempt.inserted_at, attempt.id LIMIT $2 FOR UPDATE SKIP LOCKED",
+        )
+        .bind(tenant_id)
+        .bind(limit.clamp(1, 1_000))
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(|_| PortError::Unavailable)?;
+        for attempt_id in &attempts {
+            insert_local_execution_job(&mut transaction, tenant_id, *attempt_id, now).await?;
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        u64::try_from(attempts.len()).map_err(|_| PortError::Unavailable)
+    }
+
+    async fn consume_dispatch_job(
+        &self,
+        tenant_id: &str,
+        durable_job_id: Uuid,
+        claim_token: Uuid,
+        claim: &SchedulerClaim,
+    ) -> Result<Option<AttemptProjection>, PortError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        let claimed = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM durable_jobs \
+             WHERE id = $1 AND tenant_id = $2 AND kind = 'run_next_job' \
+               AND status = 'executing' AND claim_token = $3 FOR UPDATE)",
+        )
+        .bind(durable_job_id)
+        .bind(tenant_id)
+        .bind(claim_token)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| PortError::Unavailable)?;
+        if !claimed {
+            return Err(PortError::NotFound);
+        }
+
+        let attempt = match claim_job_in_transaction(&mut transaction, tenant_id, claim).await {
+            Ok(attempt) => {
+                insert_local_execution_job(&mut transaction, tenant_id, attempt.id, claim.now)
+                    .await?;
+                Some(attempt)
+            }
+            Err(PortError::NoWork) => None,
+            Err(error) => return Err(error),
+        };
+        let completed = sqlx::query(
+            "UPDATE durable_jobs SET status = 'completed', claimed_at = NULL, \
+             claim_token = NULL, last_error = NULL, updated_at = $4 \
+             WHERE id = $1 AND tenant_id = $2 AND status = 'executing' AND claim_token = $3",
+        )
+        .bind(durable_job_id)
+        .bind(tenant_id)
+        .bind(claim_token)
+        .bind(claim.now)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| PortError::Unavailable)?;
+        if completed.rows_affected() != 1 {
+            return Err(PortError::NotFound);
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        Ok(attempt)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn update_durable_job(
+    database: &Database,
+    tenant_id: &str,
+    job_id: Uuid,
+    claim_token: Uuid,
+    status: &str,
+    available_at: DateTime<Utc>,
+    error: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<(), PortError> {
+    let mut transaction = database
+        .tenant_transaction(tenant_id)
+        .await
+        .map_err(|_| PortError::Unavailable)?;
+    let result = sqlx::query(
+        "UPDATE durable_jobs SET status = $4, available_at = $5, claimed_at = NULL, \
+         claim_token = NULL, last_error = $6, updated_at = $7 \
+         WHERE id = $1 AND tenant_id = $2 AND status = 'executing' AND claim_token = $3",
+    )
+    .bind(job_id)
+    .bind(tenant_id)
+    .bind(claim_token)
+    .bind(status)
+    .bind(available_at)
+    .bind(error)
+    .bind(now)
+    .execute(&mut *transaction)
+    .await
+    .map_err(|_| PortError::Unavailable)?;
+    if result.rows_affected() != 1 {
+        return Err(PortError::NotFound);
+    }
+    transaction
+        .commit()
+        .await
+        .map_err(|_| PortError::Unavailable)
+}
+
+async fn insert_local_execution_job(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    attempt_id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<(), PortError> {
+    sqlx::query(
+        "INSERT INTO durable_jobs \
+         (id, source_event_id, kind, payload, status, attempts, available_at, \
+          inserted_at, updated_at, tenant_id) \
+         VALUES ($1, $2, 'execute_local_attempt', $3, 'available', 0, $4, $4, $4, $5) \
+         ON CONFLICT (tenant_id, source_event_id, kind) DO NOTHING",
+    )
+    .bind(Uuid::new_v4())
+    .bind(attempt_id)
+    .bind(serde_json::json!({"attempt_id": attempt_id}))
+    .bind(now)
+    .bind(tenant_id)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|_| PortError::Unavailable)?;
+    Ok(())
 }
 
 async fn prepare_outbox_delivery(
@@ -1807,6 +2005,74 @@ async fn validate_retry_dependencies(
     }
 }
 
+async fn claim_job_in_transaction(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    claim: &SchedulerClaim,
+) -> Result<AttemptProjection, PortError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(90464863604293)")
+        .execute(&mut **transaction)
+        .await
+        .map_err(|_| PortError::Unavailable)?;
+    let active = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM job_attempts WHERE tenant_id = $1 \
+         AND status IN ('queued', 'preparing', 'running', 'cancelling')",
+    )
+    .bind(tenant_id)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(|_| PortError::Unavailable)?;
+    if active >= claim.global_limit {
+        return Err(PortError::Capacity);
+    }
+    let labels = if let Some(runner_id) = claim.runner_id {
+        runner_capacity_labels(transaction, tenant_id, runner_id, claim.now).await?
+    } else {
+        vec!["docker".into()]
+    };
+    let candidate = select_claim_candidate(transaction, tenant_id, claim.repository_limit, &labels)
+        .await?
+        .ok_or(PortError::NoWork)?;
+    let pipeline_state = PipelineState::try_from(candidate.pipeline_status.as_str())
+        .map_err(|_| PortError::InvalidData)?;
+    if pipeline_state == PipelineState::Queued {
+        pipeline_state
+            .transition(PipelineEvent::Start)
+            .map_err(|_| PortError::InvalidTransition)?;
+    } else if pipeline_state != PipelineState::Running {
+        return Err(PortError::InvalidTransition);
+    }
+    let number = sqlx::query_scalar::<_, i32>(
+        "SELECT COALESCE(MAX(number), 0)::integer + 1 FROM job_attempts \
+         WHERE job_id = $1 AND tenant_id = $2",
+    )
+    .bind(candidate.job_id)
+    .bind(tenant_id)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(|_| PortError::Unavailable)?;
+    let lease_expires_at = claim.now + chrono::Duration::seconds(claim.lease_seconds);
+    persist_claim(
+        transaction,
+        tenant_id,
+        &candidate,
+        claim,
+        number,
+        lease_expires_at,
+    )
+    .await?;
+    Ok(AttemptProjection {
+        id: claim.attempt_id,
+        job_id: candidate.job_id,
+        number,
+        idempotency_token: claim.idempotency_token,
+        status: "queued".into(),
+        lease_expires_at,
+        last_sequence: 0,
+        result_reason: None,
+    })
+}
+
 async fn select_claim_candidate(
     transaction: &mut Transaction<'_, Postgres>,
     tenant_id: &str,
@@ -2131,6 +2397,16 @@ struct PendingOutboxRow {
     aggregate_id: Uuid,
     payload: serde_json::Value,
     delivery_attempts: i32,
+}
+
+#[derive(sqlx::FromRow)]
+struct DurableJobRow {
+    id: Uuid,
+    source_event_id: Uuid,
+    kind: String,
+    payload: serde_json::Value,
+    claim_token: Uuid,
+    attempts: i32,
 }
 
 impl AttemptEventRow {

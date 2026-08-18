@@ -69,6 +69,7 @@ async fn run_outbox_worker(control_plane: Arc<ControlPlane>, mut shutdown: watch
         tokio::select! {
             _ = interval.tick() => {
                 let _ = control_plane.process_all_tenant_outboxes(25).await;
+                let _ = control_plane.process_all_tenant_dispatches(25).await;
             }
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {

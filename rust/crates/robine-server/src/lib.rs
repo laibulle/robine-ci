@@ -1082,6 +1082,67 @@ mod tests {
             })
         }
 
+        async fn claim_next_dispatch_job(
+            &self,
+            _tenant_id: &str,
+            _claim_token: Uuid,
+            _now: DateTime<Utc>,
+            _stale_before: DateTime<Utc>,
+        ) -> Result<Option<robine_core::pipelines::DurableJobClaim>, PortError> {
+            Ok(None)
+        }
+
+        async fn complete_durable_job(
+            &self,
+            _tenant_id: &str,
+            _job_id: Uuid,
+            _claim_token: Uuid,
+            _now: DateTime<Utc>,
+        ) -> Result<(), PortError> {
+            Ok(())
+        }
+
+        async fn retry_durable_job(
+            &self,
+            _tenant_id: &str,
+            _job_id: Uuid,
+            _claim_token: Uuid,
+            _available_at: DateTime<Utc>,
+            _error: &str,
+            _discard: bool,
+            _now: DateTime<Utc>,
+        ) -> Result<(), PortError> {
+            Ok(())
+        }
+
+        async fn enqueue_local_execution(
+            &self,
+            _tenant_id: &str,
+            _attempt_id: Uuid,
+            _now: DateTime<Utc>,
+        ) -> Result<(), PortError> {
+            Ok(())
+        }
+
+        async fn reconcile_local_execution_jobs(
+            &self,
+            _tenant_id: &str,
+            _limit: i64,
+            _now: DateTime<Utc>,
+        ) -> Result<u64, PortError> {
+            Ok(0)
+        }
+
+        async fn consume_dispatch_job(
+            &self,
+            _tenant_id: &str,
+            _durable_job_id: Uuid,
+            _claim_token: Uuid,
+            _claim: &robine_core::pipelines::SchedulerClaim,
+        ) -> Result<Option<robine_core::pipelines::AttemptProjection>, PortError> {
+            Ok(None)
+        }
+
         async fn record_attempt_event(
             &self,
             _tenant_id: &str,

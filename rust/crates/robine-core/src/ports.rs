@@ -6,9 +6,9 @@ use uuid::Uuid;
 use crate::{
     identity::{LocalIdentity, OidcAuthorization, OidcClaims, Role, User},
     pipelines::{
-        AttemptProjection, NewPipeline, OutboxDelivery, PipelineProjection, RecordAttemptEvent,
-        RecordRemoteAttemptEvent, RetryProjection, RunnerAuthenticationMaterial,
-        RunnerLeaseHeartbeat, RunnerResume, SchedulerClaim,
+        AttemptProjection, DurableJobClaim, NewPipeline, OutboxDelivery, PipelineProjection,
+        RecordAttemptEvent, RecordRemoteAttemptEvent, RetryProjection,
+        RunnerAuthenticationMaterial, RunnerLeaseHeartbeat, RunnerResume, SchedulerClaim,
     },
 };
 
@@ -214,4 +214,54 @@ pub trait PipelineRepository: Send + Sync {
         tenant_id: &str,
         now: DateTime<Utc>,
     ) -> Result<Option<OutboxDelivery>, PortError>;
+
+    async fn claim_next_dispatch_job(
+        &self,
+        tenant_id: &str,
+        claim_token: Uuid,
+        now: DateTime<Utc>,
+        stale_before: DateTime<Utc>,
+    ) -> Result<Option<DurableJobClaim>, PortError>;
+
+    async fn complete_durable_job(
+        &self,
+        tenant_id: &str,
+        job_id: Uuid,
+        claim_token: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<(), PortError>;
+
+    #[allow(clippy::too_many_arguments)]
+    async fn retry_durable_job(
+        &self,
+        tenant_id: &str,
+        job_id: Uuid,
+        claim_token: Uuid,
+        available_at: DateTime<Utc>,
+        error: &str,
+        discard: bool,
+        now: DateTime<Utc>,
+    ) -> Result<(), PortError>;
+
+    async fn enqueue_local_execution(
+        &self,
+        tenant_id: &str,
+        attempt_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<(), PortError>;
+
+    async fn reconcile_local_execution_jobs(
+        &self,
+        tenant_id: &str,
+        limit: i64,
+        now: DateTime<Utc>,
+    ) -> Result<u64, PortError>;
+
+    async fn consume_dispatch_job(
+        &self,
+        tenant_id: &str,
+        durable_job_id: Uuid,
+        claim_token: Uuid,
+        claim: &SchedulerClaim,
+    ) -> Result<Option<AttemptProjection>, PortError>;
 }

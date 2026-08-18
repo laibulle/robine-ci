@@ -1634,6 +1634,98 @@ async fn sql_outbox_claims_once_enqueues_dispatch_and_dead_letters_bounded_failu
             .is_none()
     );
 
+    let first_token = Uuid::new_v4();
+    let second_token = Uuid::new_v4();
+    let first_database = database.clone();
+    let second_database = database.clone();
+    let first_tenant = tenant.clone();
+    let second_tenant = tenant.clone();
+    let (first, second) = tokio::join!(
+        async move {
+            first_database
+                .claim_next_dispatch_job(
+                    &first_tenant,
+                    first_token,
+                    process_at,
+                    process_at - Duration::minutes(5),
+                )
+                .await
+        },
+        async move {
+            second_database
+                .claim_next_dispatch_job(
+                    &second_tenant,
+                    second_token,
+                    process_at,
+                    process_at - Duration::minutes(5),
+                )
+                .await
+        }
+    );
+    let dispatches = [
+        first.expect("first dispatch worker"),
+        second.expect("second dispatch worker"),
+    ];
+    assert_eq!(dispatches.iter().flatten().count(), 1);
+    let dispatch = dispatches
+        .into_iter()
+        .flatten()
+        .next()
+        .expect("one durable dispatch claim");
+    let scheduler_claim = SchedulerClaim {
+        global_limit: 4,
+        repository_limit: 2,
+        lease_seconds: 60,
+        attempt_id: Uuid::new_v4(),
+        idempotency_token: Uuid::new_v4(),
+        event_id: Uuid::new_v4(),
+        now: process_at,
+        runner_id: None,
+    };
+    let attempt = database
+        .consume_dispatch_job(&tenant, dispatch.id, dispatch.claim_token, &scheduler_claim)
+        .await
+        .expect("consume dispatch atomically")
+        .expect("ready job creates an attempt");
+    let mut break_handoff = database
+        .tenant_transaction(&tenant)
+        .await
+        .expect("handoff fixture transaction");
+    let initial_execution_jobs = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM durable_jobs WHERE source_event_id = $1 \
+         AND kind = 'execute_local_attempt'",
+    )
+    .bind(attempt.id)
+    .fetch_one(&mut *break_handoff)
+    .await
+    .expect("read atomic execution handoff");
+    sqlx::query(
+        "DELETE FROM durable_jobs WHERE source_event_id = $1 AND kind = 'execute_local_attempt'",
+    )
+    .bind(attempt.id)
+    .execute(&mut *break_handoff)
+    .await
+    .expect("simulate missing execution handoff");
+    break_handoff
+        .commit()
+        .await
+        .expect("commit missing handoff");
+    assert_eq!(initial_execution_jobs, 1);
+    assert_eq!(
+        database
+            .reconcile_local_execution_jobs(&tenant, 100, process_at)
+            .await
+            .expect("repair missing handoff"),
+        1
+    );
+    assert_eq!(
+        database
+            .reconcile_local_execution_jobs(&tenant, 100, process_at)
+            .await
+            .expect("idempotent handoff repair"),
+        0
+    );
+
     let unsupported_id = Uuid::new_v4();
     let mut fixture = database
         .tenant_transaction(&tenant)
@@ -1695,6 +1787,21 @@ async fn sql_outbox_claims_once_enqueues_dispatch_and_dead_letters_bounded_failu
     .fetch_one(&mut *verification)
     .await
     .expect("read durable dispatch");
+    let dispatch_status = sqlx::query_scalar::<_, String>(
+        "SELECT status FROM durable_jobs WHERE source_event_id = $1 AND kind = 'run_next_job'",
+    )
+    .bind(pipeline.event_id)
+    .fetch_one(&mut *verification)
+    .await
+    .expect("read completed durable dispatch");
+    let execution_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM durable_jobs WHERE source_event_id = $1 \
+         AND kind = 'execute_local_attempt'",
+    )
+    .bind(attempt.id)
+    .fetch_one(&mut *verification)
+    .await
+    .expect("read repaired execution handoff");
     let dead_lettered = sqlx::query_scalar::<_, bool>(
         "SELECT dead_lettered_at IS NOT NULL FROM outbox_events WHERE id = $1",
     )
@@ -1719,7 +1826,9 @@ async fn sql_outbox_claims_once_enqueues_dispatch_and_dead_letters_bounded_failu
         .expect("cleanup pipeline");
     verification.commit().await.expect("commit cleanup");
 
-    assert_eq!(pipeline_status, "queued");
+    assert_eq!(pipeline_status, "running");
     assert_eq!(durable_count, 1);
+    assert_eq!(dispatch_status, "completed");
+    assert_eq!(execution_count, 1);
     assert!(dead_lettered);
 }

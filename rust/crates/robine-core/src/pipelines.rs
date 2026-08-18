@@ -594,6 +594,16 @@ pub struct OutboxDelivery {
     pub attempt: i32,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DurableJobClaim {
+    pub id: Uuid,
+    pub source_event_id: Uuid,
+    pub kind: String,
+    pub payload: serde_json::Value,
+    pub claim_token: Uuid,
+    pub attempt: i32,
+}
+
 #[must_use]
 pub fn outbox_backoff_seconds(attempt: i32, event_id: Uuid) -> i64 {
     let exponent = u32::try_from((attempt - 1).clamp(0, 30)).unwrap_or(0);
