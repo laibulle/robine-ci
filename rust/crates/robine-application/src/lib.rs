@@ -1951,6 +1951,9 @@ fn execution_outcome(
             status: ExecutionStatus::ServiceUnavailable,
             ..
         }) => ("failed", Some("service_unavailable"), false),
+        Err(robine_execution::ExecutionError::ServiceUnavailable { .. }) => {
+            ("failed", Some("service_unavailable"), false)
+        }
         Err(_) => ("failed", Some("system_failure"), false),
     }
 }
@@ -2385,6 +2388,19 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .starts_with("release-linux-")
+        );
+    }
+
+    #[test]
+    fn preparation_service_failures_keep_the_service_unavailable_terminal_reason() {
+        let result = Err(robine_execution::ExecutionError::ServiceUnavailable {
+            service_id: "database".into(),
+            phase: robine_execution::ServiceFailurePhase::Readiness,
+            diagnostic: b"bounded diagnostic".to_vec(),
+        });
+        assert_eq!(
+            execution_outcome(&result),
+            ("failed", Some("service_unavailable"), false)
         );
     }
 

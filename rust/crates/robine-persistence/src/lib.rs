@@ -70,7 +70,22 @@ impl Database {
         Self { pool }
     }
 
-    /// Verifies that every tenant's retained metadata still addresses the configured backend.
+    /// Lists tenants whose storage namespace must be checked at startup.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error when tenant identities cannot be listed.
+    pub async fn storage_tenants(&self) -> Result<Vec<String>, PersistenceError> {
+        let mut tenants = sqlx::query_scalar::<_, String>("SELECT id FROM ci_tenants ORDER BY id")
+            .fetch_all(&self.pool)
+            .await?;
+        if !tenants.iter().any(|tenant| tenant == "standalone") {
+            tenants.push("standalone".to_owned());
+        }
+        Ok(tenants)
+    }
+
+    /// Verifies that one tenant's retained metadata still addresses the configured backend.
     ///
     /// # Errors
     ///
@@ -78,67 +93,59 @@ impl Database {
     /// different storage namespace, or a database error when state cannot be checked atomically.
     pub async fn verify_storage_backend(
         &self,
+        tenant_id: &str,
         backend: &str,
         namespace_digest: &str,
         acknowledgement: Option<&str>,
     ) -> Result<(), PersistenceError> {
-        let tenants = sqlx::query_scalar::<_, String>("SELECT id FROM ci_tenants ORDER BY id")
-            .fetch_all(&self.pool)
-            .await?;
-        let mut tenants = tenants;
-        if !tenants.iter().any(|tenant| tenant == "standalone") {
-            tenants.push("standalone".to_owned());
+        let mut transaction = self.tenant_transaction(tenant_id).await?;
+        let state = sqlx::query_as::<_, (String, String)>(
+            "SELECT backend, namespace_digest FROM storage_backend_states \
+             WHERE tenant_id = $1 AND id = 'primary' FOR UPDATE",
+        )
+        .bind(tenant_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let retained = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS (SELECT 1 FROM artifacts WHERE tenant_id = $1) \
+             OR EXISTS (SELECT 1 FROM cache_entries WHERE tenant_id = $1)",
+        )
+        .bind(tenant_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        let previous = state
+            .as_ref()
+            .map_or("unrecorded", |(_, digest)| digest.as_str());
+        let changed = state
+            .as_ref()
+            .is_none_or(|(stored_backend, stored_digest)| {
+                stored_backend != backend || stored_digest != namespace_digest
+            });
+        let expected = storage_transition_ack(previous, namespace_digest);
+        let requires_ack = state.is_some() || backend != "local";
+        if changed && retained && requires_ack && acknowledgement != Some(expected.as_str()) {
+            transaction.rollback().await?;
+            return Err(PersistenceError::StorageMigrationAcknowledgementRequired(
+                expected,
+            ));
         }
-        for tenant_id in tenants {
-            let mut transaction = self.tenant_transaction(&tenant_id).await?;
-            let state = sqlx::query_as::<_, (String, String)>(
-                "SELECT backend, namespace_digest FROM storage_backend_states \
-                 WHERE tenant_id = $1 AND id = 'primary' FOR UPDATE",
+        if changed {
+            sqlx::query(
+                "INSERT INTO storage_backend_states \
+                 (tenant_id, id, backend, namespace_digest, acknowledged_at, inserted_at, updated_at) \
+                 VALUES ($1, 'primary', $2, $3, $4, NOW(), NOW()) \
+                 ON CONFLICT (tenant_id, id) DO UPDATE SET \
+                   backend = EXCLUDED.backend, namespace_digest = EXCLUDED.namespace_digest, \
+                   acknowledged_at = EXCLUDED.acknowledged_at, updated_at = NOW()",
             )
-            .bind(&tenant_id)
-            .fetch_optional(&mut *transaction)
+            .bind(tenant_id)
+            .bind(backend)
+            .bind(namespace_digest)
+            .bind((acknowledgement == Some(expected.as_str())).then(Utc::now))
+            .execute(&mut *transaction)
             .await?;
-            let retained = sqlx::query_scalar::<_, bool>(
-                "SELECT EXISTS (SELECT 1 FROM artifacts WHERE tenant_id = $1) \
-                 OR EXISTS (SELECT 1 FROM cache_entries WHERE tenant_id = $1)",
-            )
-            .bind(&tenant_id)
-            .fetch_one(&mut *transaction)
-            .await?;
-            let previous = state
-                .as_ref()
-                .map_or("unrecorded", |(_, digest)| digest.as_str());
-            let changed = state
-                .as_ref()
-                .is_none_or(|(stored_backend, stored_digest)| {
-                    stored_backend != backend || stored_digest != namespace_digest
-                });
-            let expected = storage_transition_ack(previous, namespace_digest);
-            let requires_ack = state.is_some() || backend != "local";
-            if changed && retained && requires_ack && acknowledgement != Some(expected.as_str()) {
-                transaction.rollback().await?;
-                return Err(PersistenceError::StorageMigrationAcknowledgementRequired(
-                    expected,
-                ));
-            }
-            if changed {
-                sqlx::query(
-                    "INSERT INTO storage_backend_states \
-                     (tenant_id, id, backend, namespace_digest, acknowledged_at, inserted_at, updated_at) \
-                     VALUES ($1, 'primary', $2, $3, $4, NOW(), NOW()) \
-                     ON CONFLICT (tenant_id, id) DO UPDATE SET \
-                       backend = EXCLUDED.backend, namespace_digest = EXCLUDED.namespace_digest, \
-                       acknowledged_at = EXCLUDED.acknowledged_at, updated_at = NOW()",
-                )
-                .bind(&tenant_id)
-                .bind(backend)
-                .bind(namespace_digest)
-                .bind((acknowledgement == Some(expected.as_str())).then(Utc::now))
-                .execute(&mut *transaction)
-                .await?;
-            }
-            transaction.commit().await?;
         }
+        transaction.commit().await?;
         Ok(())
     }
 

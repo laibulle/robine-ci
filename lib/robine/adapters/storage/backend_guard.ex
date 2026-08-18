@@ -12,6 +12,7 @@ defmodule Robine.Adapters.Storage.BackendGuard do
 
   alias Robine.Adapters.Storage.{LocalBlobStore, S3BlobStore}
   alias Robine.Repo
+  alias Robine.Runtime.TenantScope
 
   @state_id "primary"
 
@@ -37,8 +38,14 @@ defmodule Robine.Adapters.Storage.BackendGuard do
   defp verify_in_transaction do
     current = current_backend()
 
+    tenant_id = TenantScope.tenant_id()
+
     state =
-      Repo.one(from row in StorageBackendState, where: row.id == @state_id, lock: "FOR UPDATE")
+      Repo.one(
+        from row in StorageBackendState,
+          where: fragment("tenant_id = ?", ^tenant_id) and row.id == @state_id,
+          lock: "FOR UPDATE"
+      )
 
     case state do
       nil -> initialize_state(current)
@@ -101,8 +108,14 @@ defmodule Robine.Adapters.Storage.BackendGuard do
   end
 
   defp retained_metadata? do
-    Repo.exists?(from artifact in Artifact, select: 1) or
-      Repo.exists?(from cache in CacheEntry, select: 1)
+    tenant_id = TenantScope.tenant_id()
+
+    Repo.exists?(
+      from artifact in Artifact, where: fragment("tenant_id = ?", ^tenant_id), select: 1
+    ) or
+      Repo.exists?(
+        from cache in CacheEntry, where: fragment("tenant_id = ?", ^tenant_id), select: 1
+      )
   end
 
   defp current_backend do

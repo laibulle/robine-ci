@@ -1,7 +1,7 @@
 use crate::{
     BuiltinRestore, CancellationSignal, ExecutionControl, ExecutionError, ExecutionResult,
     ExecutionRunner, ExecutionSpecification, ExecutionStatus, OutputChannel, OutputChunk,
-    OutputSink, StepCondition, StepKind,
+    OutputSink, ServiceFailurePhase, StepCondition, StepKind,
 };
 use async_trait::async_trait;
 use std::collections::HashSet;
@@ -14,6 +14,7 @@ use tokio::process::Command;
 
 const READINESS_IMAGE: &str =
     "alpine@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce";
+const SERVICE_DIAGNOSTIC_LIMIT: usize = 64_000;
 
 #[derive(Clone, Debug)]
 pub struct DockerConfig {
@@ -227,12 +228,14 @@ impl DockerCli {
         control: &ExecutionControl<'_>,
     ) -> Result<ExecutionResult, ExecutionError> {
         self.ensure_image(&specification.image).await?;
+        let mut sequence = control.last_sequence;
         let network = if specification.services.is_empty() {
             None
         } else {
             let network = format!("robine-net-{}", specification.attempt_id.simple());
             self.create_network(specification, &network).await?;
-            self.start_services(specification, &network).await?;
+            self.start_services(specification, &network, &mut sequence, control)
+                .await?;
             Some(network)
         };
         self.checked_with_environment(
@@ -246,7 +249,6 @@ impl DockerCli {
         self.copy_source(specification, container).await?;
         let mut failed = false;
         let mut exit_code = Some(0);
-        let mut sequence = control.last_sequence;
         for (step_index, step) in specification.steps.iter().enumerate() {
             let should_run = match step.condition {
                 StepCondition::Success => !failed,
@@ -538,23 +540,92 @@ impl DockerCli {
         &self,
         specification: &ExecutionSpecification,
         network: &str,
+        sequence: &mut u64,
+        control: &ExecutionControl<'_>,
     ) -> Result<(), ExecutionError> {
         for service in &specification.services {
-            self.ensure_image(&service.image).await?;
             let name = format!(
                 "robine-service-{}-{}",
                 specification.attempt_id.simple(),
                 service.id
             );
-            self.checked_with_environment(
-                &self.service_create_args(specification, service, network, &name),
-                &service.secrets,
-                "service_create",
-            )
-            .await?;
-            self.checked(&["start", &name], "service_start").await?;
-            self.wait_for_service(specification, service, network, &name)
-                .await?;
+            if self.ensure_image(&service.image).await.is_err() {
+                return Err(self
+                    .service_failure(
+                        specification,
+                        service,
+                        &name,
+                        ServiceFailurePhase::ImageAcquisition,
+                        "image acquisition failed",
+                        sequence,
+                        control,
+                    )
+                    .await?);
+            }
+            if self
+                .checked_with_environment(
+                    &self.service_create_args(specification, service, network, &name),
+                    &service.secrets,
+                    "service_create",
+                )
+                .await
+                .is_err()
+            {
+                return Err(self
+                    .service_failure(
+                        specification,
+                        service,
+                        &name,
+                        ServiceFailurePhase::ContainerStart,
+                        "container creation failed",
+                        sequence,
+                        control,
+                    )
+                    .await?);
+            }
+            if self
+                .checked(&["start", &name], "service_start")
+                .await
+                .is_err()
+            {
+                return Err(self
+                    .service_failure(
+                        specification,
+                        service,
+                        &name,
+                        ServiceFailurePhase::ContainerStart,
+                        "container start failed",
+                        sequence,
+                        control,
+                    )
+                    .await?);
+            }
+            if self
+                .wait_for_service(specification, service, network, &name)
+                .await
+                .is_err()
+            {
+                let detail = service.readiness.as_ref().map_or_else(
+                    || "service exited during stabilization".to_owned(),
+                    |readiness| {
+                        format!(
+                            "readiness failed after a bounded {}ms wait",
+                            readiness.timeout_ms
+                        )
+                    },
+                );
+                return Err(self
+                    .service_failure(
+                        specification,
+                        service,
+                        &name,
+                        ServiceFailurePhase::Readiness,
+                        &detail,
+                        sequence,
+                        control,
+                    )
+                    .await?);
+            }
         }
         Ok(())
     }
@@ -674,6 +745,17 @@ impl DockerCli {
             if output.status.success() {
                 return Ok(());
             }
+            let state = self
+                .command(&["inspect", "--format", "{{.State.Running}}", name])
+                .await
+                .map_err(|_| ExecutionError::Unavailable {
+                    phase: "service_readiness",
+                })?;
+            if !state.status.success() || state.stdout != b"true\n" {
+                return Err(ExecutionError::Runner {
+                    phase: "service_readiness",
+                });
+            }
             if tokio::time::Instant::now() >= deadline {
                 return Err(ExecutionError::Runner {
                     phase: "service_readiness",
@@ -754,7 +836,18 @@ impl DockerCli {
                         let _ = child.wait().await;
                         return Ok(ExecutionResult { status: ExecutionStatus::Cancelled, exit_code: None });
                     }
-                    if !self.services_healthy(specification).await? {
+                    if let Some((service, name)) = self.unavailable_service(specification).await? {
+                        let _diagnostic = self
+                            .service_failure(
+                                specification,
+                                service,
+                                &name,
+                                ServiceFailurePhase::Liveness,
+                                "service became unavailable while a job step was running",
+                                sequence,
+                                control,
+                            )
+                            .await?;
                         let _ = self.command(&["stop", "--time", "5", container]).await;
                         let _ = child.wait().await;
                         return Ok(ExecutionResult { status: ExecutionStatus::ServiceUnavailable, exit_code: None });
@@ -778,10 +871,10 @@ impl DockerCli {
         })
     }
 
-    async fn services_healthy(
+    async fn unavailable_service<'a>(
         &self,
-        specification: &ExecutionSpecification,
-    ) -> Result<bool, ExecutionError> {
+        specification: &'a ExecutionSpecification,
+    ) -> Result<Option<(&'a crate::ServiceSpecification, String)>, ExecutionError> {
         for service in &specification.services {
             let name = format!(
                 "robine-service-{}-{}",
@@ -795,10 +888,69 @@ impl DockerCli {
                     phase: "service_liveness",
                 })?;
             if !output.status.success() || output.stdout != b"true\n" {
-                return Ok(false);
+                return Ok(Some((service, name)));
             }
         }
-        Ok(true)
+        Ok(None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn service_failure(
+        &self,
+        specification: &ExecutionSpecification,
+        service: &crate::ServiceSpecification,
+        name: &str,
+        phase: ServiceFailurePhase,
+        detail: &str,
+        sequence: &mut u64,
+        control: &ExecutionControl<'_>,
+    ) -> Result<ExecutionError, ExecutionError> {
+        let tail = self.service_diagnostic(specification, name).await;
+        let mut diagnostic = format!("Service {}: {detail}\n", service.id).into_bytes();
+        let available = SERVICE_DIAGNOSTIC_LIMIT.saturating_sub(diagnostic.len());
+        diagnostic.extend_from_slice(&tail[tail.len().saturating_sub(available)..]);
+        emit_chunk(
+            control.output,
+            sequence,
+            0,
+            &format!("Service {}", service.id),
+            OutputChannel::System,
+            &diagnostic,
+        )
+        .await?;
+        Ok(ExecutionError::ServiceUnavailable {
+            service_id: service.id.clone(),
+            phase,
+            diagnostic,
+        })
+    }
+
+    async fn service_diagnostic(
+        &self,
+        specification: &ExecutionSpecification,
+        name: &str,
+    ) -> Vec<u8> {
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            self.command(&["logs", "--tail", "200", name]),
+        )
+        .await;
+        let raw = match output {
+            Ok(Ok(output)) => [output.stdout, output.stderr].concat(),
+            _ => b"service diagnostic unavailable".to_vec(),
+        };
+        let secrets = specification
+            .secrets
+            .values()
+            .chain(
+                specification
+                    .services
+                    .iter()
+                    .flat_map(|service| service.secrets.values()),
+            )
+            .map(|value| value.as_bytes().to_vec())
+            .collect::<Vec<_>>();
+        bounded_redacted_tail(&raw, &secrets, SERVICE_DIAGNOSTIC_LIMIT)
     }
 
     async fn ensure_image(&self, image: &str) -> Result<(), ExecutionError> {
@@ -1003,6 +1155,16 @@ impl StreamingRedactor {
         }
         self.pending.drain(..consumed);
         output
+    }
+}
+
+fn bounded_redacted_tail(raw: &[u8], secrets: &[Vec<u8>], limit: usize) -> Vec<u8> {
+    let mut redactor = StreamingRedactor::new(secrets);
+    let redacted = redactor.push(raw, true);
+    if redacted.len() > limit {
+        redacted[redacted.len() - limit..].to_vec()
+    } else {
+        redacted
     }
 }
 
@@ -1236,6 +1398,26 @@ mod tests {
         async fn requested(&self) -> Result<bool, ExecutionError> {
             Ok(self.cancel)
         }
+    }
+
+    #[test]
+    fn service_diagnostic_tail_is_bounded_and_redacted_before_persistence() {
+        let secret = b"fixture-service-secret".to_vec();
+        let mut raw = vec![b'x'; SERVICE_DIAGNOSTIC_LIMIT + 10_000];
+        raw.extend_from_slice(b" token=");
+        raw.extend_from_slice(&secret);
+        let diagnostic = bounded_redacted_tail(
+            &raw,
+            std::slice::from_ref(&secret),
+            SERVICE_DIAGNOSTIC_LIMIT,
+        );
+        assert_eq!(diagnostic.len(), SERVICE_DIAGNOSTIC_LIMIT);
+        assert!(diagnostic.ends_with(b"token=[REDACTED]"));
+        assert!(
+            !diagnostic
+                .windows(secret.len())
+                .any(|window| window == secret)
+        );
     }
 
     #[test]
@@ -1669,6 +1851,7 @@ mod tests {
             return;
         }
         let attempt_id = Uuid::new_v4();
+        let secret = "service-secret-fixture";
         let specification = ExecutionSpecification {
             attempt_id,
             image: "alpine:3.22".into(),
@@ -1686,8 +1869,12 @@ mod tests {
                 user: None,
                 env: BTreeMap::new(),
                 secret_references: BTreeMap::new(),
-                secrets: BTreeMap::new(),
-                command: vec!["sleep".into(), "1".into()],
+                secrets: BTreeMap::from([("TOKEN".into(), zeroize::Zeroizing::new(secret.into()))]),
+                command: vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "printf 'token=%s\\n' \"$TOKEN\"; sleep 1".into(),
+                ],
                 readiness: None,
                 privileged: false,
             }],
@@ -1703,9 +1890,123 @@ mod tests {
             instance: format!("rust-test-{attempt_id}"),
             ..DockerConfig::default()
         });
+        let control = RecordingControl::default();
         let started = std::time::Instant::now();
-        let result = runner.run(&specification).await.expect("service liveness");
+        let result = runner
+            .run_controlled(
+                &specification,
+                ExecutionControl {
+                    output: &control,
+                    cancellation: &control,
+                    builtins: None,
+                    last_sequence: 10,
+                },
+            )
+            .await
+            .expect("service liveness");
         assert_eq!(result.status, ExecutionStatus::ServiceUnavailable);
         assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        let chunks = control.chunks.lock().expect("output lock");
+        let diagnostic = chunks
+            .iter()
+            .find(|chunk| chunk.channel == OutputChannel::System)
+            .expect("service diagnostic");
+        assert_eq!(diagnostic.sequence, 11);
+        assert_eq!(diagnostic.step_name, "Service short-lived");
+        assert!(
+            diagnostic
+                .bytes
+                .windows(10)
+                .any(|value| value == b"[REDACTED]")
+        );
+        assert!(
+            !diagnostic
+                .bytes
+                .windows(secret.len())
+                .any(|value| value == secret.as_bytes())
+        );
+        assert!(diagnostic.bytes.len() <= SERVICE_DIAGNOSTIC_LIMIT);
+    }
+
+    #[tokio::test]
+    async fn readiness_exit_fails_early_with_a_bounded_redacted_tail_when_enabled() {
+        if std::env::var_os("ROBINE_DOCKER_INTEGRATION").is_none() {
+            return;
+        }
+        let attempt_id = Uuid::new_v4();
+        let secret = "readiness-secret-fixture";
+        let specification = ExecutionSpecification {
+            attempt_id,
+            image: "alpine:3.22".into(),
+            workspace: "/workspace".into(),
+            shell: "/bin/sh".into(),
+            timeout_ms: 30_000,
+            env: BTreeMap::new(),
+            build_env: BTreeMap::new(),
+            secret_names: Vec::new(),
+            secrets: BTreeMap::new(),
+            source_files: Vec::new(),
+            services: vec![ServiceSpecification {
+                id: "broken-database".into(),
+                image: "alpine:3.22".into(),
+                user: None,
+                env: BTreeMap::new(),
+                secret_references: BTreeMap::new(),
+                secrets: BTreeMap::from([("TOKEN".into(), zeroize::Zeroizing::new(secret.into()))]),
+                command: vec![
+                    "sh".into(),
+                    "-c".into(),
+                    "head -c 70000 /dev/zero | tr '\\0' x; printf ' token=%s\\n' \"$TOKEN\"; exit 17".into(),
+                ],
+                readiness: Some(ServiceReadiness {
+                    tcp: 54_321,
+                    timeout_ms: 20_000,
+                }),
+                privileged: false,
+            }],
+            steps: vec![ExecutionStep {
+                name: "must-not-run".into(),
+                kind: StepKind::Run,
+                value: "exit 99".into(),
+                condition: StepCondition::Success,
+                with: BTreeMap::new(),
+            }],
+        };
+        let runner = DockerCli::new(DockerConfig {
+            instance: format!("rust-test-{attempt_id}"),
+            ..DockerConfig::default()
+        });
+        let control = RecordingControl::default();
+        let started = std::time::Instant::now();
+        let error = runner
+            .run_controlled(
+                &specification,
+                ExecutionControl {
+                    output: &control,
+                    cancellation: &control,
+                    builtins: None,
+                    last_sequence: 20,
+                },
+            )
+            .await
+            .expect_err("readiness must fail");
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert!(matches!(
+            error,
+            ExecutionError::ServiceUnavailable {
+                ref service_id,
+                phase: ServiceFailurePhase::Readiness,
+                ref diagnostic,
+            } if service_id == "broken-database"
+                && diagnostic.len() <= SERVICE_DIAGNOSTIC_LIMIT
+                && diagnostic.windows(10).any(|value| value == b"[REDACTED]")
+                && !diagnostic.windows(secret.len()).any(|value| value == secret.as_bytes())
+        ));
+        let chunks = control.chunks.lock().expect("output lock");
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].sequence, 21);
+        assert_eq!(chunks[0].step_name, "Service broken-database");
+        assert_eq!(chunks[0].channel, OutputChannel::System);
+        assert!(chunks[0].bytes.len() <= SERVICE_DIAGNOSTIC_LIMIT);
     }
 }

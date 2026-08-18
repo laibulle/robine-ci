@@ -59,16 +59,18 @@ async fn main() -> io::Result<()> {
     }
     let (blob_store, storage_backend, storage_namespace_digest) =
         configure_blob_store(storage_root, max_object_bytes).await?;
-    database
-        .verify_storage_backend(
-            &storage_backend,
-            &storage_namespace_digest,
-            std::env::var("ROBINE_STORAGE_BACKEND_MIGRATION_ACK")
-                .ok()
-                .as_deref(),
-        )
-        .await
-        .map_err(io::Error::other)?;
+    let storage_migration_ack = std::env::var("ROBINE_STORAGE_BACKEND_MIGRATION_ACK").ok();
+    for tenant_id in database.storage_tenants().await.map_err(io::Error::other)? {
+        database
+            .verify_storage_backend(
+                &tenant_id,
+                &storage_backend,
+                &storage_namespace_digest,
+                storage_migration_ack.as_deref(),
+            )
+            .await
+            .map_err(io::Error::other)?;
+    }
     control_plane =
         control_plane.with_storage_runtime(database.clone(), blob_store, storage_quotas);
     control_plane = control_plane.with_retention_runtime(

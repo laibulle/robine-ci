@@ -135,6 +135,14 @@ pub enum ExecutionStatus {
     ServiceUnavailable,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ServiceFailurePhase {
+    ImageAcquisition,
+    ContainerStart,
+    Readiness,
+    Liveness,
+}
+
 #[derive(Debug, Error)]
 pub enum ExecutionError {
     #[error("invalid execution specification: {0}")]
@@ -147,6 +155,12 @@ pub enum ExecutionError {
     Unavailable { phase: &'static str },
     #[error("execution output could not be persisted")]
     Output,
+    #[error("service {service_id} became unavailable during {phase:?}")]
+    ServiceUnavailable {
+        service_id: String,
+        phase: ServiceFailurePhase,
+        diagnostic: Vec<u8>,
+    },
 }
 
 #[async_trait]
@@ -252,6 +266,10 @@ impl ExecutionSpecification {
                         || (index > 0 && (byte.is_ascii_digit() || byte == b'-' || byte == b'_'))
                 })
                 || service.image.is_empty()
+                || service
+                    .user
+                    .as_ref()
+                    .is_some_and(|user| user.is_empty() || user.len() > 255 || user.contains('\0'))
                 || service.env.len() > 64
                 || service.env.iter().any(|(name, value)| {
                     name.is_empty()
@@ -266,10 +284,9 @@ impl ExecutionSpecification {
                     .command
                     .iter()
                     .any(|argument| argument.is_empty() || argument.len() > 4_096)
-                || service
-                    .readiness
-                    .as_ref()
-                    .is_some_and(|readiness| readiness.tcp == 0 || readiness.timeout_ms == 0)
+                || service.readiness.as_ref().is_some_and(|readiness| {
+                    readiness.tcp == 0 || !(1_000..=120_000).contains(&readiness.timeout_ms)
+                })
             {
                 return Err(ExecutionError::InvalidSpecification("service"));
             }

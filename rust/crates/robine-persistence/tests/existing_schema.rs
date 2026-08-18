@@ -338,7 +338,7 @@ async fn storage_backend_changes_require_the_exact_acknowledgement_with_retained
 
     let local_digest = format!("{:x}", Sha256::digest(b"local:/var/lib/robine"));
     database
-        .verify_storage_backend("local", &local_digest, None)
+        .verify_storage_backend(&tenant, "local", &local_digest, None)
         .await
         .expect("first local namespace is compatible");
     let s3_digest = format!(
@@ -348,12 +348,12 @@ async fn storage_backend_changes_require_the_exact_acknowledgement_with_retained
     let expected = storage_transition_ack(&local_digest, &s3_digest);
     assert!(matches!(
         database
-            .verify_storage_backend("s3", &s3_digest, Some("wrong"))
+            .verify_storage_backend(&tenant, "s3", &s3_digest, Some("wrong"))
             .await,
         Err(PersistenceError::StorageMigrationAcknowledgementRequired(token)) if token == expected
     ));
     database
-        .verify_storage_backend("s3", &s3_digest, Some(&expected))
+        .verify_storage_backend(&tenant, "s3", &s3_digest, Some(&expected))
         .await
         .expect("exact migration acknowledgement");
 
