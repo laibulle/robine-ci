@@ -549,17 +549,27 @@ async fn scheduled_reconciliation_is_exact_sha_durable_and_idempotent() {
             .try_into()
             .expect("UUID prefix"),
     ) & i64::MAX;
+    let repository_name = format!("scheduled-{provider_id}");
+    let repository_full_name = format!("acme/{repository_name}");
     let mut setup = database
         .tenant_transaction("standalone")
         .await
         .expect("setup transaction");
+    sqlx::query(
+        "DELETE FROM github_repositories WHERE tenant_id = 'standalone' AND owner = 'acme' AND name LIKE 'scheduled%'",
+    )
+    .execute(&mut *setup)
+    .await
+    .expect("remove stale scheduled-test repositories");
     sqlx::query("DELETE FROM schedule_reconciliation_states WHERE tenant_id = 'standalone' AND key = 'scheduled-workflows:v1'")
         .execute(&mut *setup)
         .await
         .expect("reset schedule cursor");
-    sqlx::query("INSERT INTO github_repositories (id, provider_id, installation_id, owner, name, full_name, trusted, inserted_at, provider, provider_instance, tenant_id) VALUES ($1, $2, 1, 'acme', 'scheduled', 'acme/scheduled', TRUE, $3, 'github', 'https://github.com', 'standalone')")
+    sqlx::query("INSERT INTO github_repositories (id, provider_id, installation_id, owner, name, full_name, trusted, inserted_at, provider, provider_instance, tenant_id) VALUES ($1, $2, 1, 'acme', $3, $4, TRUE, $5, 'github', 'https://github.com', 'standalone')")
         .bind(repository_id)
         .bind(provider_id)
+        .bind(&repository_name)
+        .bind(&repository_full_name)
         .bind(Utc::now())
         .execute(&mut *setup)
         .await
@@ -618,9 +628,25 @@ async fn scheduled_reconciliation_is_exact_sha_durable_and_idempotent() {
         .await
         .expect("first reconciliation");
     assert_eq!(first.scanned_minutes, 1);
-    assert_eq!(first.due_occurrences, 1);
-    assert_eq!(first.pipelines, 1);
+    assert!(first.due_occurrences >= 1);
+    assert!(first.pipelines >= 1);
     assert!(first.cursor_advanced);
+    let mut own_pipeline_verification = database
+        .tenant_transaction("standalone")
+        .await
+        .expect("own scheduled pipeline verification");
+    let own_pipeline_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM pipelines WHERE tenant_id = 'standalone' AND repository_id = $1 AND trigger = 'schedule'",
+    )
+    .bind(repository_id)
+    .fetch_one(&mut *own_pipeline_verification)
+    .await
+    .expect("count own scheduled pipeline");
+    own_pipeline_verification
+        .commit()
+        .await
+        .expect("commit own pipeline verification");
+    assert_eq!(own_pipeline_count, 1);
     let duplicate = control_plane
         .reconcile_scheduled_workflows(now)
         .await
@@ -2152,6 +2178,9 @@ async fn creation_persists_revision_graph_and_event_atomically() {
     assert!(browser_pipeline["jobs"][0].get("latest_phase").is_some());
     assert!(browser_pipeline["jobs"][0].get("terminal_reason").is_some());
     assert!(browser_pipeline["jobs"][0].get("duration_ms").is_some());
+    assert_eq!(browser_job["workflow_path"], ".robine-ci/workflows/ci.yml");
+    assert_eq!(browser_job["commit_sha"], "d".repeat(40));
+    assert_eq!(browser_job["pipeline_inputs"], serde_json::json!({}));
     assert_eq!(browser_workflow["path"], ".robine-ci/workflows/ci.yml");
     assert!(browser_job["key"] == "build" || browser_job["key"] == "test");
     assert!(browser_log.is_empty());

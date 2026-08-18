@@ -1352,9 +1352,309 @@ async fn browser_workflow(
     )
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct JobBrowserQuery {
+    #[serde(default)]
+    search: String,
+    #[serde(default)]
+    phase: String,
+    #[serde(default)]
+    step: String,
+}
+
+#[derive(Debug)]
+struct JobLogStep<'a> {
+    attempt: i64,
+    phase: &'a str,
+    position: i64,
+    name: &'a str,
+    status: &'a str,
+    chunks: Vec<(i64, &'a str, &'a str)>,
+}
+
+fn bounded_query(value: &str) -> String {
+    value.trim().chars().take(128).collect()
+}
+
+fn job_log_steps<'a>(
+    logs: &'a [serde_json::Value],
+    query: &JobBrowserQuery,
+) -> Vec<JobLogStep<'a>> {
+    let search = bounded_query(&query.search).to_lowercase();
+    let phase_filter = bounded_query(&query.phase);
+    let step_filter = bounded_query(&query.step).to_lowercase();
+    let mut steps: Vec<JobLogStep<'_>> = Vec::new();
+    for log in logs {
+        let attempt = log
+            .get("attempt_number")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0);
+        let sequence = log
+            .get("sequence")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0);
+        let position = log
+            .get("step_position")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0);
+        let phase = log
+            .get("phase")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("execution");
+        let name = log
+            .get("step_name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("step");
+        let status = log
+            .get("step_status")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        let stream = log
+            .get("stream")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("combined");
+        let content = log
+            .get("content")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let matches = (phase_filter.is_empty() || phase == phase_filter)
+            && (step_filter.is_empty() || name.to_lowercase().contains(&step_filter))
+            && (search.is_empty()
+                || content.to_lowercase().contains(&search)
+                || name.to_lowercase().contains(&search)
+                || phase.to_lowercase().contains(&search));
+        if !matches {
+            continue;
+        }
+        if let Some(step) = steps.iter_mut().find(|step| {
+            step.attempt == attempt
+                && step.phase == phase
+                && step.position == position
+                && step.name == name
+        }) {
+            step.status = status;
+            step.chunks.push((sequence, stream, content));
+        } else {
+            steps.push(JobLogStep {
+                attempt,
+                phase,
+                position,
+                name,
+                status,
+                chunks: vec![(sequence, stream, content)],
+            });
+        }
+    }
+    steps
+}
+
+fn render_job_log_steps(steps: &[JobLogStep<'_>], filtered: bool) -> (String, String) {
+    let mut navigation = String::new();
+    let mut body = String::new();
+    let mut current_phase = None;
+    let mut first_failure = String::new();
+    for step in steps {
+        let step_id = format!(
+            "step-{}-{}-{}",
+            step.attempt,
+            step.position,
+            safe_slug(step.phase)
+        );
+        if current_phase != Some((step.attempt, step.phase)) {
+            if current_phase.is_some() {
+                body.push_str("</section>");
+            }
+            let phase_id = format!("phase-{}-{}", step.attempt, safe_slug(step.phase));
+            let _ = write!(
+                navigation,
+                "<li><a href=\"#{phase_id}\">Attempt {} · {}</a></li>",
+                step.attempt,
+                escape_html(step.phase)
+            );
+            let _ = write!(
+                body,
+                "<section class=\"log-phase\" id=\"{phase_id}\" data-log-phase data-attempt=\"{}\" data-phase=\"{}\"><h3>Attempt {} · {} phase</h3>",
+                step.attempt,
+                escape_html(step.phase),
+                step.attempt,
+                escape_html(step.phase)
+            );
+            current_phase = Some((step.attempt, step.phase));
+        }
+        let failed = step.status == "failed";
+        if failed && first_failure.is_empty() {
+            first_failure = format!(
+                "<p class=\"secret\" role=\"alert\">First failing step: <a href=\"#{step_id}\">{}</a></p>",
+                escape_html(step.name)
+            );
+        }
+        let chunks = step.chunks.iter().fold(String::new(), |mut output, (sequence, stream, content)| {
+            let _ = write!(output, "<li id=\"log-{}-{}\"><span class=\"meta\">{} · sequence {}</span><pre>{}</pre></li>", step.attempt, sequence, escape_html(stream), sequence, escape_html(content));
+            output
+        });
+        let open = if failed || filtered { " open" } else { "" };
+        let class = if failed {
+            "log-step failed"
+        } else {
+            "log-step"
+        };
+        let _ = write!(
+            body,
+            "<details id=\"{step_id}\" class=\"{class}\" data-log-step data-attempt=\"{}\" data-phase=\"{}\" data-position=\"{}\"{open}><summary><strong>{}</strong><span>{} · <span data-log-count>{}</span> chunks</span></summary><ol data-log-chunks>{chunks}</ol></details>",
+            step.attempt,
+            escape_html(step.phase),
+            step.position,
+            escape_html(step.name),
+            escape_html(step.status),
+            step.chunks.len()
+        );
+    }
+    if current_phase.is_some() {
+        body.push_str("</section>");
+    }
+    (
+        format!(
+            "{first_failure}<nav class=\"log-navigation\" aria-label=\"Log phases\"><ul>{navigation}</ul></nav>"
+        ),
+        body,
+    )
+}
+
+fn safe_slug(value: &str) -> String {
+    let slug = value
+        .chars()
+        .filter_map(|character| {
+            if character.is_ascii_alphanumeric() {
+                Some(character.to_ascii_lowercase())
+            } else if matches!(character, '-' | '_') {
+                Some('-')
+            } else {
+                None
+            }
+        })
+        .take(48)
+        .collect::<String>();
+    if slug.is_empty() {
+        "unknown".into()
+    } else {
+        slug
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    if !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-' | b'=' | b',')
+        })
+    {
+        value.into()
+    } else {
+        format!("'{}'", value.replace('\'', "'\"'\"'"))
+    }
+}
+
+fn reproduction_command(projection: &serde_json::Value) -> String {
+    let text = |field| {
+        projection
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+    };
+    let mut command = format!(
+        "git checkout --detach {} && robine run {} --workflow {}",
+        shell_quote(text("commit_sha")),
+        shell_quote(text("key")),
+        shell_quote(text("workflow_path"))
+    );
+    if let Some(inputs) = projection
+        .get("pipeline_inputs")
+        .and_then(serde_json::Value::as_object)
+    {
+        for (name, value) in inputs {
+            let value = value
+                .as_str()
+                .map_or_else(|| value.to_string(), str::to_owned);
+            let _ = write!(
+                command,
+                " --input {}",
+                shell_quote(&format!("{name}={value}"))
+            );
+        }
+    }
+    command
+}
+
+fn render_pipeline_inputs(projection: &serde_json::Value) -> String {
+    projection
+        .get("pipeline_inputs")
+        .and_then(serde_json::Value::as_object)
+        .filter(|inputs| !inputs.is_empty())
+        .map_or_else(
+            || "<p>No explicit non-secret inputs were retained for this pipeline.</p>".into(),
+            |inputs| {
+                let rows = inputs
+                    .iter()
+                    .fold(String::new(), |mut output, (name, value)| {
+                        let value = value
+                            .as_str()
+                            .map_or_else(|| value.to_string(), str::to_owned);
+                        let _ = write!(
+                            output,
+                            "<li><code>{}={}</code></li>",
+                            escape_html(name),
+                            escape_html(&value)
+                        );
+                        output
+                    });
+                format!("<ul>{rows}</ul>")
+            },
+        )
+}
+
+fn render_attempts(projection: &serde_json::Value) -> String {
+    projection
+        .get("attempts")
+        .and_then(serde_json::Value::as_array)
+        .filter(|attempts| !attempts.is_empty())
+        .map_or_else(
+            || "<div class=\"empty\">This job has not started an attempt yet.</div>".into(),
+            |attempts| {
+                attempts.iter().fold(String::new(), |mut output, attempt| {
+                    let number = attempt.get("number").and_then(serde_json::Value::as_i64).unwrap_or(0);
+                    let status = attempt.get("status").and_then(serde_json::Value::as_str).unwrap_or("unknown");
+                    let sequence = attempt.get("last_sequence").and_then(serde_json::Value::as_i64).unwrap_or(0);
+                    let reason = attempt.get("result_reason").and_then(serde_json::Value::as_str).unwrap_or("No terminal reason");
+                    let inserted_at = attempt.get("inserted_at").and_then(serde_json::Value::as_str).unwrap_or("unknown");
+                    let _ = write!(output, "<article class=\"surface-panel attempt-card\"><h3>Attempt {number}</h3><dl><dt>Status</dt><dd>{}</dd><dt>Started</dt><dd><time datetime=\"{}\">{}</time></dd><dt>Last log sequence</dt><dd>{sequence}</dd><dt>Terminal reason</dt><dd>{}</dd></dl></article>", escape_html(status), escape_html(inserted_at), escape_html(inserted_at), escape_html(reason));
+                    output
+                })
+            },
+        )
+}
+
+fn render_artifacts(projection: &serde_json::Value) -> String {
+    projection
+        .get("artifacts")
+        .and_then(serde_json::Value::as_array)
+        .filter(|artifacts| !artifacts.is_empty())
+        .map_or_else(
+            || "<div class=\"empty\">No retained artifacts are available for this job.</div>".into(),
+            |artifacts| {
+                artifacts.iter().fold(String::new(), |mut output, artifact| {
+                    let name = artifact.get("name").and_then(serde_json::Value::as_str).unwrap_or("artifact");
+                    let size = artifact.get("size").and_then(serde_json::Value::as_i64).unwrap_or(0);
+                    let digest = artifact.get("digest").and_then(serde_json::Value::as_str).unwrap_or("unknown");
+                    let _ = write!(output, "<article class=\"surface-panel artifact-card\"><h3>{}</h3><p>{size} bytes · SHA-256 <code>{}</code></p></article>", escape_html(name), escape_html(digest));
+                    output
+                })
+            },
+        )
+}
+
 async fn browser_job(
     request: HttpRequest,
     path: web::Path<(Uuid, Uuid)>,
+    query: web::Query<JobBrowserQuery>,
     state: web::Data<AppState>,
 ) -> HttpResponse {
     let Ok(user) = authenticated_user(&request, &state).await else {
@@ -1378,43 +1678,91 @@ async fn browser_job(
             .and_then(serde_json::Value::as_str)
             .unwrap_or("")
     };
-    let attempts = serde_json::to_string_pretty(
-        projection
-            .get("attempts")
-            .unwrap_or(&serde_json::Value::Null),
-    )
-    .unwrap_or_default();
-    let artifacts = serde_json::to_string_pretty(
-        projection
-            .get("artifacts")
-            .unwrap_or(&serde_json::Value::Null),
-    )
-    .unwrap_or_default();
-    let logs = projection
+    let attempts = render_attempts(&projection);
+    let artifacts = render_artifacts(&projection);
+    let log_values = projection
         .get("logs")
         .and_then(serde_json::Value::as_array)
-        .map_or_else(String::new, |logs| {
-            logs.iter().fold(String::new(), |mut output, log| {
-                let attempt = log.get("attempt_number").and_then(serde_json::Value::as_i64).unwrap_or(0);
-                let sequence = log.get("sequence").and_then(serde_json::Value::as_i64).unwrap_or(0);
-                let phase = log.get("phase").and_then(serde_json::Value::as_str).unwrap_or("execution");
-                let step = log.get("step_name").and_then(serde_json::Value::as_str).unwrap_or("step");
-                let stream = log.get("stream").and_then(serde_json::Value::as_str).unwrap_or("combined");
-                let content = log.get("content").and_then(serde_json::Value::as_str).unwrap_or("");
-                let _ = write!(output, "<li id=\"log-{attempt}-{sequence}\" class=\"surface-panel\"><header><strong>{} · {}</strong><span>attempt {attempt} · {} · sequence {sequence}</span></header><pre>{}</pre></li>", escape_html(phase), escape_html(step), escape_html(stream), escape_html(content));
-                output
-            })
-        });
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let filtered = !query.search.trim().is_empty()
+        || !query.phase.trim().is_empty()
+        || !query.step.trim().is_empty();
+    let steps = job_log_steps(log_values, &query);
+    let (log_navigation, logs) = render_job_log_steps(&steps, filtered);
+    let log_result = if steps.is_empty() {
+        "<div id=\"job-log-empty\" class=\"empty\">No retained log chunks match these filters.</div>".into()
+    } else {
+        logs
+    };
+    let reproduction = reproduction_command(&projection);
+    let pipeline_inputs = render_pipeline_inputs(&projection);
     html_page(
         "Job",
         &format!(
-            "<section id=\"job-detail\" data-live-pipeline data-events-url=\"/pipelines/{pipeline_id}/events\"><p class=\"eyebrow\">Pipeline job</p><h1>{}</h1><p class=\"status\">{}</p><p><a id=\"job-logs-download\" href=\"/pipelines/{pipeline_id}/jobs/{job_id}/logs\">Download complete log</a></p><h2>Attempts</h2><pre>{}</pre><h2>Artifacts</h2><pre>{}</pre><h2>Recent structured logs</h2><p>The newest 200 persisted chunks are shown; the complete retained log remains downloadable.</p><ol id=\"job-log-window\">{logs}</ol></section>",
+            "<section id=\"job-detail\" data-live-job data-events-url=\"/pipelines/{pipeline_id}/jobs/{job_id}/events\" data-filtered=\"{filtered}\"><p class=\"eyebrow\">Pipeline job</p><h1>{}</h1><p class=\"status\">{}</p><section id=\"local-reproduction\" class=\"surface-panel\"><h2>Reproduce locally</h2><p>Run from a clean clone. This checks out the immutable CI revision before executing the same workflow job and dependencies.</p><pre id=\"local-reproduction-command\"><code>{}</code></pre><button type=\"button\" data-copy-target=\"local-reproduction-command\">Copy command</button><h3>Retained non-secret inputs</h3>{pipeline_inputs}<h3>CI-only inputs omitted locally</h3><ul><li>Server-held repository secrets</li><li>Provider delivery and identity metadata</li><li>Remote cache restore/save operations</li><li>Artifact download/upload operations</li></ul></section><p><a id=\"job-logs-download\" href=\"/pipelines/{pipeline_id}/jobs/{job_id}/logs\">Download complete log</a></p><h2>Attempts</h2><div id=\"job-attempts\">{}</div><h2>Artifacts</h2><div id=\"job-artifacts\">{}</div><h2>Recent structured logs</h2><p>The newest 50 persisted chunks are shown; the complete retained log remains downloadable.</p><form id=\"job-log-filters\" class=\"filter-bar\" method=\"get\"><label>Search<input type=\"search\" name=\"search\" maxlength=\"128\" value=\"{}\" placeholder=\"Search the visible log window\"></label><label>Phase<input name=\"phase\" maxlength=\"128\" value=\"{}\" placeholder=\"execution\"></label><label>Step<input name=\"step\" maxlength=\"128\" value=\"{}\" placeholder=\"Step name\"></label><button type=\"submit\">Filter logs</button><a href=\"/pipelines/{pipeline_id}/jobs/{job_id}\">Clear</a></form><p id=\"job-log-result-feedback\" role=\"status\" aria-live=\"polite\">Showing {} grouped steps from at most 50 recent chunks.</p>{log_navigation}<div id=\"job-log-window\">{log_result}</div></section>",
             escape_html(text("key")),
             escape_html(text("status")),
-            escape_html(&attempts),
-            escape_html(&artifacts)
+            escape_html(&reproduction),
+            attempts,
+            artifacts,
+            escape_html(&bounded_query(&query.search)),
+            escape_html(&bounded_query(&query.phase)),
+            escape_html(&bounded_query(&query.step)),
+            steps.len()
         ),
     )
+}
+
+async fn job_log_events(
+    request: HttpRequest,
+    path: web::Path<(Uuid, Uuid)>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let Ok(user) = authenticated_user(&request, &state).await else {
+        return HttpResponse::Unauthorized().finish();
+    };
+    let (pipeline_id, job_id) = path.into_inner();
+    let control_plane = state.control_plane.clone();
+    let stream = futures_util::stream::unfold(
+        (control_plane, user, None::<String>, true),
+        move |(control_plane, user, previous, initial)| async move {
+            if !initial {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            let (body, next) = match control_plane
+                .job_browser_projection(&user, pipeline_id, job_id)
+                .await
+            {
+                Ok(projection) => {
+                    let logs = projection
+                        .get("logs")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!([]));
+                    let serialized = serde_json::to_string(&logs).unwrap_or_else(|_| "[]".into());
+                    if previous.as_deref() == Some(&serialized) {
+                        (": keepalive\n\n".into(), previous)
+                    } else {
+                        (
+                            format!("event: logs\ndata: {serialized}\n\n"),
+                            Some(serialized),
+                        )
+                    }
+                }
+                Err(_) => ("event: unavailable\ndata: {}\n\n".into(), previous),
+            };
+            Some((
+                Ok::<_, actix_web::Error>(web::Bytes::from(body)),
+                (control_plane, user, next, false),
+            ))
+        },
+    );
+    HttpResponse::Ok()
+        .insert_header((header::CACHE_CONTROL, "no-store"))
+        .insert_header((header::CONNECTION, "keep-alive"))
+        .insert_header(("x-accel-buffering", "no"))
+        .content_type("text/event-stream; charset=utf-8")
+        .streaming(stream)
 }
 
 async fn download_job_logs(
@@ -3801,6 +4149,10 @@ pub fn configure(config: &mut web::ServiceConfig) {
             web::get().to(browser_job),
         )
         .route(
+            "/pipelines/{pipeline_id}/jobs/{job_id}/events",
+            web::get().to(job_log_events),
+        )
+        .route(
             "/pipelines/{pipeline_id}/jobs/{job_id}/logs",
             web::get().to(download_job_logs),
         )
@@ -4539,7 +4891,7 @@ mod tests {
             job_id: Uuid,
         ) -> Result<serde_json::Value, PortError> {
             Ok(
-                serde_json::json!({"id":job_id,"pipeline_id":pipeline_id,"key":"test","status":"succeeded","needs":[],"attempts":[],"artifacts":[],"logs":[{"attempt_id":Uuid::nil(),"attempt_number":1,"sequence":1,"phase":"execution","step_position":0,"step_name":"test","step_status":"succeeded","stream":"stdout","content":"test output\n"}]}),
+                serde_json::json!({"id":job_id,"pipeline_id":pipeline_id,"key":"test","status":"failed","workflow_path":".robine-ci/workflows/ci.yml","commit_sha":"a".repeat(40),"pipeline_inputs":{"environment":"staging","dry_run":"true"},"needs":[],"attempts":[],"artifacts":[],"logs":[{"attempt_id":Uuid::nil(),"attempt_number":1,"sequence":1,"phase":"execution","step_position":0,"step_name":"test","step_status":"running","stream":"stdout","content":"test output\n"},{"attempt_id":Uuid::nil(),"attempt_number":1,"sequence":2,"phase":"execution","step_position":0,"step_name":"test","step_status":"failed","stream":"stderr","content":"test failed\n"}]}),
             )
         }
 
@@ -5137,6 +5489,71 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn job_logs_are_bounded_grouped_searchable_and_deep_linkable() {
+        let app = test::init_service(App::new().app_data(state(true)).configure(configure)).await;
+        let pipeline_id = Uuid::new_v4();
+        let job_id = Uuid::new_v4();
+        let request = test::TestRequest::get()
+            .uri(&format!("/pipelines/{pipeline_id}/jobs/{job_id}"))
+            .insert_header((header::COOKIE, "robine_session=session"))
+            .to_request();
+        let response = test::call_service(&app, request).await;
+        let body = test::read_body(response).await;
+        let html = std::str::from_utf8(&body).expect("failed job log HTML");
+        assert!(html.contains("First failing step:"));
+        assert!(html.contains("class=\"log-step failed\""));
+        assert!(html.contains("failed · <span data-log-count>2</span> chunks"));
+        assert!(html.contains("id=\"local-reproduction-command\""));
+        assert!(html.contains("git checkout --detach aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+        assert!(html.contains("robine run test --workflow .robine-ci/workflows/ci.yml"));
+        assert!(html.contains("--input dry_run=true --input environment=staging"));
+        assert!(html.contains("Server-held repository secrets"));
+        assert!(!html.contains("secret-value"));
+
+        let request = test::TestRequest::get()
+            .uri(&format!(
+                "/pipelines/{pipeline_id}/jobs/{job_id}?search=output&phase=execution&step=test"
+            ))
+            .insert_header((header::COOKIE, "robine_session=session"))
+            .to_request();
+        let response = test::call_service(&app, request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = test::read_body(response).await;
+        let html = std::str::from_utf8(&body).expect("job log HTML");
+        assert!(html.contains("id=\"job-log-filters\""));
+        assert!(html.contains("value=\"output\""));
+        assert!(html.contains("id=\"phase-1-execution\""));
+        assert!(html.contains("id=\"step-1-0-execution\""));
+        assert!(html.contains("Showing 1 grouped steps from at most 50 recent chunks."));
+
+        let request = test::TestRequest::get()
+            .uri(&format!(
+                "/pipelines/{pipeline_id}/jobs/{job_id}?search=absent"
+            ))
+            .insert_header((header::COOKIE, "robine_session=session"))
+            .to_request();
+        let response = test::call_service(&app, request).await;
+        let body = test::read_body(response).await;
+        assert!(
+            std::str::from_utf8(&body)
+                .expect("empty filtered log HTML")
+                .contains("id=\"job-log-empty\"")
+        );
+    }
+
+    #[actix_web::test]
+    async fn local_reproduction_shell_quotes_every_persisted_value() {
+        let command = reproduction_command(&serde_json::json!({
+            "commit_sha": "a".repeat(40),
+            "key": "test; touch unsafe",
+            "workflow_path": ".robine-ci/workflows/ci.yml",
+            "pipeline_inputs": {"message": "it's $(not executed)"}
+        }));
+        assert!(command.contains("'test; touch unsafe'"));
+        assert!(command.contains("--input 'message=it'\"'\"'s $(not executed)'"));
+    }
+
+    #[actix_web::test]
     async fn pipeline_event_stream_is_cookie_authenticated_and_locally_bundled() {
         let app = test::init_service(App::new().app_data(state(true)).configure(configure)).await;
         let uri = format!("/pipelines/{}/events", Uuid::new_v4());
@@ -5159,6 +5576,30 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("text/event-stream; charset=utf-8")
         );
+        let job_uri = format!(
+            "/pipelines/{}/jobs/{}/events",
+            Uuid::new_v4(),
+            Uuid::new_v4()
+        );
+        let response =
+            test::call_service(&app, test::TestRequest::get().uri(&job_uri).to_request()).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let response = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri(&job_uri)
+                .insert_header((header::COOKIE, "robine_session=session"))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/event-stream; charset=utf-8")
+        );
         let script = test::call_and_read_body(
             &app,
             test::TestRequest::get().uri("/assets/app.js").to_request(),
@@ -5167,6 +5608,8 @@ mod tests {
         let script = std::str::from_utf8(&script).expect("JavaScript");
         assert!(script.contains("EventSource"));
         assert!(script.contains("pipelineStatus.textContent"));
+        assert!(script.contains("appendChunk"));
+        assert!(script.contains("chunks.length - 50"));
         assert!(script.contains("reconnecting automatically"));
         assert!(!script.contains("window.location.reload"));
     }

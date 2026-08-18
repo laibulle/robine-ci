@@ -16,6 +16,21 @@ a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible
 .pipeline-row > span:first-child { display: grid; gap: .2rem; }
 .pipeline-row small, .pipeline-row time { color: #91a4ba; }
 .pipeline-row time { font-size: .78rem; }
+.log-navigation ul { display: flex; flex-wrap: wrap; gap: .6rem; padding: 0; list-style: none; }
+.log-navigation a { display: inline-flex; border: 1px solid #3b526c; border-radius: 999px; padding: .35rem .7rem; color: #bcd0e5; text-decoration: none; }
+.log-phase { margin-top: 2rem; }
+.log-step { margin: .75rem 0; border: 1px solid #29415d; border-radius: .8rem; background: #0b1726dd; }
+.log-step.failed { border-color: #9e5361; }
+.log-step summary { cursor: pointer; display: flex; justify-content: space-between; gap: 1rem; padding: 1rem; }
+.log-step ol { margin: 0; padding: 0 1rem 1rem; list-style: none; }
+.log-step li { border-top: 1px solid #263950; padding-top: .75rem; }
+.log-step pre { max-height: 28rem; overflow: auto; white-space: pre-wrap; }
+#local-reproduction { margin: 1.5rem 0; }
+#local-reproduction pre { overflow-x: auto; white-space: pre-wrap; }
+#job-attempts, #job-artifacts { display: grid; gap: .75rem; }
+.attempt-card h3, .artifact-card h3 { margin-top: 0; }
+.attempt-card dl { display: grid; grid-template-columns: minmax(8rem, auto) 1fr; gap: .4rem 1rem; }
+.attempt-card dt { color: #91a4ba; }
 @media (max-width: 760px) {
   .topbar { align-items: flex-start; flex-direction: column; }
   .topbar nav { gap: .8rem; padding: .5rem 0 1.25rem; }

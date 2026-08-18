@@ -1998,7 +1998,11 @@ impl PipelineRepository for Database {
         let projection = sqlx::query_scalar::<_, serde_json::Value>(
             "SELECT jsonb_build_object('id', j.id, 'pipeline_id', j.pipeline_id, 'key', j.job_key, \
              'status', j.status, 'needs', j.needs, 'position', j.position, 'execution', \
-             j.execution_spec, 'attempts', COALESCE((SELECT jsonb_agg(jsonb_build_object('id', \
+             j.execution_spec, 'workflow_path', (SELECT w.path FROM workflow_revisions w WHERE \
+             w.tenant_id = j.tenant_id AND w.pipeline_id = j.pipeline_id), 'pipeline_inputs', \
+             COALESCE((SELECT p.inputs FROM pipelines p WHERE p.tenant_id = j.tenant_id AND p.id = \
+             j.pipeline_id), '{}'::jsonb), 'commit_sha', (SELECT p.commit_sha FROM pipelines p WHERE \
+             p.tenant_id = j.tenant_id AND p.id = j.pipeline_id), 'attempts', COALESCE((SELECT jsonb_agg(jsonb_build_object('id', \
              a.id, 'number', a.number, 'status', a.status, 'last_sequence', a.last_sequence, \
              'result_reason', a.result_reason, 'inserted_at', a.inserted_at) ORDER BY a.number DESC) \
              FROM job_attempts a WHERE a.tenant_id = j.tenant_id AND a.job_id = j.id), '[]'::jsonb), \
@@ -2012,7 +2016,7 @@ impl PipelineRepository for Database {
              l.step_position, 'step_name', l.step_name, 'step_status', l.step_status, 'stream', \
              l.stream, 'content', l.content) AS entry FROM log_chunks l JOIN job_attempts a ON \
              a.id = l.attempt_id AND a.tenant_id = l.tenant_id WHERE l.tenant_id = j.tenant_id \
-             AND a.job_id = j.id ORDER BY a.number DESC, l.sequence DESC LIMIT 200) recent), \
+             AND a.job_id = j.id ORDER BY a.number DESC, l.sequence DESC LIMIT 50) recent), \
              '[]'::jsonb)) FROM pipeline_jobs j \
              WHERE j.tenant_id = $1 AND j.pipeline_id = $2 AND j.id = $3",
         ).bind(tenant_id).bind(pipeline_id).bind(job_id).fetch_optional(&mut *transaction).await.map_err(|_| PortError::Unavailable)?.ok_or(PortError::NotFound)?;
