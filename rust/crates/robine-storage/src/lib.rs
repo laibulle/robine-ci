@@ -41,6 +41,40 @@ pub struct StorageQuotas {
     pub repository_bytes: i64,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InventoryObject {
+    pub blob_id: String,
+    pub size: i64,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct BlobInventory {
+    pub objects: Vec<InventoryObject>,
+    pub unsafe_objects: u64,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RetentionStage {
+    pub artifacts_deleted: u64,
+    pub caches_deleted: u64,
+    pub logs_deleted: u64,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RetentionResult {
+    pub artifacts_deleted: u64,
+    pub caches_deleted: u64,
+    pub logs_deleted: u64,
+    pub blobs_deleted: u64,
+    pub logical_bytes: i64,
+    pub physical_bytes: i64,
+    pub orphan_objects: u64,
+    pub missing_objects: u64,
+    pub unsafe_objects: u64,
+    pub temporary_deleted: u64,
+    pub orphans_staged: u64,
+}
+
 #[derive(Debug, Error, Eq, PartialEq)]
 pub enum StorageError {
     #[error("storage input is invalid")]
@@ -63,6 +97,13 @@ pub enum StorageError {
 pub trait BlobStore: Send + Sync {
     async fn put(&self, tenant_id: &str, content: Vec<u8>) -> Result<StoredObject, StorageError>;
     async fn get(&self, tenant_id: &str, object: &StoredObject) -> Result<Vec<u8>, StorageError>;
+    async fn delete(&self, tenant_id: &str, blob_id: &str) -> Result<(), StorageError>;
+    async fn inventory(&self, tenant_id: &str) -> Result<BlobInventory, StorageError>;
+    async fn delete_temporary_before(
+        &self,
+        tenant_id: &str,
+        cutoff: DateTime<Utc>,
+    ) -> Result<u64, StorageError>;
 }
 
 #[async_trait]
@@ -105,6 +146,50 @@ pub trait MetadataRepository: Send + Sync {
         not_before: DateTime<Utc>,
         now: DateTime<Utc>,
     ) -> Result<(), StorageError>;
+}
+
+#[async_trait]
+pub trait RetentionRepository: Send + Sync {
+    async fn stage_expired(
+        &self,
+        tenant_id: &str,
+        now: DateTime<Utc>,
+        log_cutoff: DateTime<Utc>,
+        not_before: DateTime<Utc>,
+        batch_size: i64,
+    ) -> Result<RetentionStage, StorageError>;
+
+    async fn eligible_gc(
+        &self,
+        tenant_id: &str,
+        now: DateTime<Utc>,
+        batch_size: i64,
+    ) -> Result<Vec<String>, StorageError>;
+
+    async fn blob_referenced(
+        &self,
+        tenant_id: &str,
+        blob_id: &str,
+    ) -> Result<bool, StorageError>;
+
+    async fn acknowledge_gc(
+        &self,
+        tenant_id: &str,
+        blob_id: &str,
+    ) -> Result<(), StorageError>;
+
+    async fn referenced_objects(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<InventoryObject>, StorageError>;
+
+    async fn stage_orphans(
+        &self,
+        tenant_id: &str,
+        blob_ids: &[String],
+        not_before: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Result<u64, StorageError>;
 }
 
 #[derive(Clone, Debug)]

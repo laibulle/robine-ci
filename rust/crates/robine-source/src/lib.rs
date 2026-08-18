@@ -336,6 +336,7 @@ pub struct ArchiveLimits {
     pub max_expanded_bytes: usize,
     pub max_expansion_ratio: usize,
     pub max_path_bytes: usize,
+    pub max_duration: std::time::Duration,
 }
 
 impl Default for ArchiveLimits {
@@ -346,6 +347,7 @@ impl Default for ArchiveLimits {
             max_expanded_bytes: 1_000_000_000,
             max_expansion_ratio: 100,
             max_path_bytes: 4_096,
+            max_duration: std::time::Duration::from_secs(10),
         }
     }
 }
@@ -380,6 +382,8 @@ pub enum SourceError {
     UnsupportedEntry,
     #[error("source archive has no common root directory")]
     MissingRoot,
+    #[error("source archive parsing exceeded its deadline")]
+    Timeout,
 }
 
 #[must_use]
@@ -409,8 +413,10 @@ pub fn extract_tar_gz(
     let mut files = Vec::new();
     let mut entry_count = 0_usize;
     let mut expanded = 0_usize;
+    let started = std::time::Instant::now();
 
     for entry in entries {
+        enforce_deadline(started, limits.max_duration)?;
         entry_count = entry_count.checked_add(1).ok_or(SourceError::EntryLimit)?;
         if entry_count > limits.max_entries {
             return Err(SourceError::EntryLimit);
@@ -419,7 +425,7 @@ pub fn extract_tar_gz(
         let entry_type = entry.header().entry_type();
         if entry_type == EntryType::XGlobalHeader {
             expanded = checked_expanded(expanded, entry.size(), compressed.len(), limits)?;
-            std::io::copy(&mut entry, &mut std::io::sink()).map_err(|_| SourceError::Malformed)?;
+            drain_entry(&mut entry, started, limits.max_duration)?;
             continue;
         }
         if !entry_type.is_file() && !entry_type.is_dir() {
@@ -465,10 +471,7 @@ pub fn extract_tar_gz(
 
         let expected_size =
             usize::try_from(entry.size()).map_err(|_| SourceError::ExpandedLimit)?;
-        let mut contents = Vec::with_capacity(expected_size.min(1_048_576));
-        entry
-            .read_to_end(&mut contents)
-            .map_err(|_| SourceError::Malformed)?;
+        let contents = read_entry(&mut entry, expected_size, started, limits.max_duration)?;
         if contents.len() != expected_size {
             return Err(SourceError::Malformed);
         }
@@ -499,7 +502,9 @@ pub fn validate_workspace_tar_gz(
     let entries = archive.entries().map_err(|_| SourceError::Malformed)?;
     let mut entry_count = 0_usize;
     let mut expanded = 0_usize;
+    let started = std::time::Instant::now();
     for entry in entries {
+        enforce_deadline(started, limits.max_duration)?;
         entry_count = entry_count.checked_add(1).ok_or(SourceError::EntryLimit)?;
         if entry_count > limits.max_entries {
             return Err(SourceError::EntryLimit);
@@ -508,7 +513,7 @@ pub fn validate_workspace_tar_gz(
         let entry_type = entry.header().entry_type();
         if entry_type == EntryType::XGlobalHeader {
             expanded = checked_expanded(expanded, entry.size(), compressed.len(), limits)?;
-            std::io::copy(&mut entry, &mut std::io::sink()).map_err(|_| SourceError::Malformed)?;
+            drain_entry(&mut entry, started, limits.max_duration)?;
             continue;
         }
         if !entry_type.is_file() && !entry_type.is_dir() {
@@ -530,7 +535,7 @@ pub fn validate_workspace_tar_gz(
         {
             return Err(SourceError::UnsafePath);
         }
-        std::io::copy(&mut entry, &mut std::io::sink()).map_err(|_| SourceError::Malformed)?;
+        drain_entry(&mut entry, started, limits.max_duration)?;
     }
     Ok(())
 }
@@ -555,6 +560,58 @@ fn checked_expanded(
         return Err(SourceError::ExpansionRatio);
     }
     Ok(expanded)
+}
+
+fn enforce_deadline(
+    started: std::time::Instant,
+    maximum: std::time::Duration,
+) -> Result<(), SourceError> {
+    if started.elapsed() > maximum {
+        Err(SourceError::Timeout)
+    } else {
+        Ok(())
+    }
+}
+
+fn drain_entry(
+    reader: &mut impl Read,
+    started: std::time::Instant,
+    maximum: std::time::Duration,
+) -> Result<(), SourceError> {
+    let mut buffer = vec![0_u8; 65_536];
+    loop {
+        enforce_deadline(started, maximum)?;
+        if reader
+            .read(&mut buffer)
+            .map_err(|_| SourceError::Malformed)?
+            == 0
+        {
+            return Ok(());
+        }
+    }
+}
+
+fn read_entry(
+    reader: &mut impl Read,
+    expected: usize,
+    started: std::time::Instant,
+    maximum: std::time::Duration,
+) -> Result<Vec<u8>, SourceError> {
+    let mut content = Vec::with_capacity(expected.min(1_048_576));
+    let mut buffer = vec![0_u8; 65_536];
+    loop {
+        enforce_deadline(started, maximum)?;
+        let size = reader
+            .read(&mut buffer)
+            .map_err(|_| SourceError::Malformed)?;
+        if size == 0 {
+            return Ok(content);
+        }
+        content.extend_from_slice(&buffer[..size]);
+        if content.len() > expected {
+            return Err(SourceError::Malformed);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -661,6 +718,16 @@ mod tests {
         assert_eq!(
             validate_workspace_tar_gz(&traversal, ArchiveLimits::default()),
             Err(SourceError::UnsafePath)
+        );
+        assert_eq!(
+            validate_workspace_tar_gz(
+                &bytes,
+                ArchiveLimits {
+                    max_duration: std::time::Duration::ZERO,
+                    ..ArchiveLimits::default()
+                }
+            ),
+            Err(SourceError::Timeout)
         );
     }
 }
