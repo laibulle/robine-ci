@@ -19,7 +19,10 @@ use robine_core::{
 };
 use robine_persistence::{Database, PersistenceError, Readiness, storage_transition_ack};
 use robine_secrets::SecretRepository;
-use robine_source::{Provider, RepositoryStore};
+use robine_source::{
+    ArchiveFetcher, ArchiveLimits, Provider, Repository, RepositoryStore, SourceError, SourceFile,
+    create_source_tar_gz,
+};
 use robine_storage::{
     Artifact, BlobStore, CacheEntry, LocalBlobStore, MetadataRepository, StorageError,
     StorageQuotas, StoredObject,
@@ -29,6 +32,145 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 struct FakeOidc(OidcClaims);
+
+struct WorkflowArchive(Vec<u8>);
+
+#[async_trait]
+impl ArchiveFetcher for WorkflowArchive {
+    async fn fetch_archive(
+        &self,
+        _repository: &Repository,
+        _commit_sha: &str,
+    ) -> Result<Vec<u8>, SourceError> {
+        Ok(self.0.clone())
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn source_control_worker_creates_an_exact_sha_tenant_pipeline() {
+    let Ok(database_url) = std::env::var("ROBINE_DATABASE_INTEGRATION_URL") else {
+        return;
+    };
+    let database = Arc::new(
+        Database::connect(&database_url, 2)
+            .await
+            .expect("connect migrated database"),
+    );
+    let admin_pool = PgPool::connect(&database_url)
+        .await
+        .expect("connect tenant registry database");
+    let tenant = format!("rust-source-worker-{}", Uuid::new_v4());
+    let repository_id = Uuid::new_v4();
+    let provider_id = 9_001_i64;
+    let delivery_id = Uuid::new_v4().to_string();
+    let sha = "a".repeat(40);
+    sqlx::query("INSERT INTO ci_tenants (id, inserted_at) VALUES ($1, $2)")
+        .bind(&tenant)
+        .bind(Utc::now())
+        .execute(&admin_pool)
+        .await
+        .expect("register tenant");
+    let mut setup = database
+        .tenant_transaction(&tenant)
+        .await
+        .expect("repository setup transaction");
+    sqlx::query(
+        "INSERT INTO github_repositories \
+         (id, provider_id, installation_id, owner, name, full_name, trusted, inserted_at, \
+          provider, provider_instance, tenant_id) \
+         VALUES ($1, $2, 1, 'acme', 'widget', 'acme/widget', TRUE, $3, 'github', 'default', $4)",
+    )
+    .bind(repository_id)
+    .bind(provider_id)
+    .bind(Utc::now())
+    .bind(&tenant)
+    .execute(&mut *setup)
+    .await
+    .expect("insert trusted repository");
+    setup.commit().await.expect("commit repository");
+    let delivery = SourceControlDelivery {
+        id: delivery_id.clone(),
+        provider: "github".into(),
+        provider_instance: "default".into(),
+        provider_delivery_id: delivery_id.clone(),
+        event: "push".into(),
+        payload: serde_json::json!({
+            "repository": {"id": provider_id},
+            "after": sha,
+            "ref": "refs/heads/main",
+            "sender": {"login": "octo"}
+        }),
+        received_at: Utc::now(),
+    };
+    database
+        .accept_source_control_delivery(&tenant, &delivery)
+        .await
+        .expect("accept delivery");
+    let archive = create_source_tar_gz(
+        &[SourceFile {
+            path: ".robine-ci/workflows/ci.yml".into(),
+            contents: b"version: 1\nname: CI\non:\n  push:\n    branches: [main]\njobs:\n  test:\n    image: alpine:3.22\n    steps:\n      - run: echo ok\n"
+                .to_vec(),
+        }],
+        ArchiveLimits::default(),
+    )
+    .expect("workflow archive");
+    let control_plane = ControlPlane::new(database.clone(), database.clone())
+        .with_source_runtime(database.clone(), Arc::new(WorkflowArchive(archive)));
+    let batch = control_plane
+        .process_all_tenant_source_control(10)
+        .await
+        .expect("process delivery");
+    assert_eq!(batch.processed, 1);
+
+    let mut verification = database
+        .tenant_transaction(&tenant)
+        .await
+        .expect("worker verification transaction");
+    let pipeline = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT commit_sha, source_ref, actor FROM pipelines WHERE repository_id = $1",
+    )
+    .bind(repository_id)
+    .fetch_one(&mut *verification)
+    .await
+    .expect("read webhook pipeline");
+    let delivery_status =
+        sqlx::query_scalar::<_, String>("SELECT status FROM github_deliveries WHERE id = $1")
+            .bind(&delivery_id)
+            .fetch_one(&mut *verification)
+            .await
+            .expect("read processed delivery");
+    sqlx::query("DELETE FROM pipelines WHERE repository_id = $1")
+        .bind(repository_id)
+        .execute(&mut *verification)
+        .await
+        .expect("cleanup pipeline");
+    sqlx::query("DELETE FROM durable_jobs WHERE payload->>'delivery_id' = $1")
+        .bind(&delivery_id)
+        .execute(&mut *verification)
+        .await
+        .expect("cleanup delivery job");
+    sqlx::query("DELETE FROM github_deliveries WHERE id = $1")
+        .bind(&delivery_id)
+        .execute(&mut *verification)
+        .await
+        .expect("cleanup delivery");
+    sqlx::query("DELETE FROM github_repositories WHERE id = $1")
+        .bind(repository_id)
+        .execute(&mut *verification)
+        .await
+        .expect("cleanup repository");
+    verification.commit().await.expect("commit cleanup");
+    sqlx::query("DELETE FROM ci_tenants WHERE id = $1")
+        .bind(&tenant)
+        .execute(&admin_pool)
+        .await
+        .expect("cleanup tenant");
+
+    assert_eq!(pipeline, (sha, "main".into(), "github:octo".into()));
+    assert_eq!(delivery_status, "processed");
+}
 
 #[tokio::test]
 async fn source_control_delivery_acceptance_is_tenant_scoped_and_deduplicated() {
