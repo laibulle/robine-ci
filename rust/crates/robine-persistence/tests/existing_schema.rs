@@ -17,6 +17,7 @@ use robine_core::{
     ports::{IdentityRepository, OidcProvider, PipelineRepository, PortError},
 };
 use robine_persistence::{Database, Readiness};
+use robine_secrets::SecretRepository;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -1600,6 +1601,16 @@ async fn sql_outbox_claims_once_enqueues_dispatch_and_dead_letters_bounded_failu
                 "shell": "/bin/sh",
                 "timeout_ms": 10_000,
                 "env": {},
+                "services": {
+                    "database": {
+                        "id": "database",
+                        "image": "alpine:3.22",
+                        "env": {},
+                        "secret_env": {},
+                        "command": ["sleep", "30"],
+                        "privileged": false
+                    }
+                },
                 "steps": [{
                     "name": "test",
                     "kind": "run",
@@ -1614,6 +1625,45 @@ async fn sql_outbox_claims_once_enqueues_dispatch_and_dead_letters_bounded_failu
         .create(&tenant, &pipeline)
         .await
         .expect("create pending outbox event");
+    let secret_id = Uuid::new_v4();
+    let unauthorized_secret_id = Uuid::new_v4();
+    let mut secret_fixture = database
+        .tenant_transaction(&tenant)
+        .await
+        .expect("secret fixture transaction");
+    for (id, repository_id, name) in [
+        (secret_id, pipeline.repository_id, "TOKEN"),
+        (unauthorized_secret_id, Uuid::new_v4(), "OTHER"),
+    ] {
+        sqlx::query(
+            "INSERT INTO secrets (id, name, scope, repository_id, allowed_repository_ids, \
+             ciphertext, nonce, tag, key_version, inserted_at, tenant_id) \
+             VALUES ($1, $2, 'repository', $3, '{}', '\\x01', decode(repeat('00', 12), 'hex'), \
+             decode(repeat('00', 16), 'hex'), 1, $4, $5)",
+        )
+        .bind(id)
+        .bind(name)
+        .bind(repository_id)
+        .bind(now)
+        .bind(&tenant)
+        .execute(&mut *secret_fixture)
+        .await
+        .expect("insert secret fixture");
+    }
+    secret_fixture
+        .commit()
+        .await
+        .expect("commit secret fixture");
+    let authorized = SecretRepository::find_authorized(
+        &database,
+        &tenant,
+        pipeline.repository_id,
+        &["TOKEN".into(), "OTHER".into()],
+    )
+    .await
+    .expect("resolve authorized secrets");
+    assert_eq!(authorized.len(), 1);
+    assert_eq!(authorized[0].id, secret_id);
     let process_at = now + Duration::seconds(1);
     let first_database = database.clone();
     let second_database = database.clone();
@@ -1781,6 +1831,7 @@ async fn sql_outbox_claims_once_enqueues_dispatch_and_dead_letters_bounded_failu
         .expect("load local execution work");
     assert_eq!(execution_work.attempt.id, attempt.id);
     assert_eq!(execution_work.last_log_sequence, 0);
+    assert!(execution_work.specification["services"].is_array());
     assert_eq!(
         execution_work.specification["attempt_id"],
         attempt.id.to_string()
@@ -1955,6 +2006,11 @@ async fn sql_outbox_claims_once_enqueues_dispatch_and_dead_letters_bounded_failu
         .execute(&mut *verification)
         .await
         .expect("cleanup pipeline");
+    sqlx::query("DELETE FROM secrets WHERE id = ANY($1)")
+        .bind([secret_id, unauthorized_secret_id])
+        .execute(&mut *verification)
+        .await
+        .expect("cleanup secrets");
     verification.commit().await.expect("commit cleanup");
 
     assert_eq!(pipeline_status, "succeeded");

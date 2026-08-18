@@ -14,6 +14,7 @@ use robine_core::{
     },
     ports::{IdentityRepository, PipelineRepository, PortError},
 };
+use robine_secrets::{EncryptedSecret, SecretError, SecretRepository, SecretScope};
 use sqlx::{PgPool, Postgres, Transaction, postgres::PgPoolOptions};
 use thiserror::Error;
 use uuid::Uuid;
@@ -423,6 +424,60 @@ impl IdentityRepository for Database {
             disabled: false,
             inserted_at,
         })
+    }
+}
+
+#[async_trait]
+impl SecretRepository for Database {
+    async fn find_authorized(
+        &self,
+        tenant_id: &str,
+        repository_id: Uuid,
+        names: &[String],
+    ) -> Result<Vec<EncryptedSecret>, SecretError> {
+        if names.len() > 64 || names.iter().any(String::is_empty) {
+            return Err(SecretError::InvalidConfiguration);
+        }
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| SecretError::Unavailable)?;
+        let rows = sqlx::query_as::<_, SecretRow>(
+            "SELECT id, name, scope, repository_id, allowed_repository_ids, ciphertext, nonce, tag, key_version \
+             FROM secrets WHERE tenant_id = $1 AND name = ANY($2) AND ( \
+               (scope = 'repository' AND repository_id = $3) OR \
+               (scope = 'instance' AND $3 = ANY(allowed_repository_ids))) \
+             ORDER BY name, id",
+        )
+        .bind(tenant_id)
+        .bind(names)
+        .bind(repository_id)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(|_| SecretError::Unavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| SecretError::Unavailable)?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(EncryptedSecret {
+                    id: row.id,
+                    name: row.name,
+                    scope: match row.scope.as_str() {
+                        "repository" => SecretScope::Repository,
+                        "instance" => SecretScope::Instance,
+                        _ => return Err(SecretError::InvalidCiphertext),
+                    },
+                    repository_id: row.repository_id,
+                    allowed_repository_ids: row.allowed_repository_ids,
+                    ciphertext: row.ciphertext,
+                    nonce: row.nonce,
+                    tag: row.tag,
+                    key_version: row.key_version,
+                })
+            })
+            .collect()
     }
 }
 
@@ -1704,6 +1759,22 @@ fn execution_offer(row: &RemoteOfferRow) -> Result<serde_json::Value, PortError>
         .as_object()
         .cloned()
         .ok_or(PortError::InvalidData)?;
+    if let Some(services) = execution
+        .get("services")
+        .and_then(serde_json::Value::as_object)
+    {
+        let mut services = services.iter().collect::<Vec<_>>();
+        services.sort_by_key(|(id, _service)| id.as_str());
+        execution.insert(
+            "services".into(),
+            serde_json::Value::Array(
+                services
+                    .into_iter()
+                    .map(|(_id, service)| service.clone())
+                    .collect(),
+            ),
+        );
+    }
     let timestamp = row.started_at.unwrap_or(row.inserted_at).and_utc();
     let ref_type = match row.trigger.as_str() {
         "tag" => "tag",
@@ -2600,6 +2671,19 @@ struct DurableJobRow {
     payload: serde_json::Value,
     claim_token: Uuid,
     attempts: i32,
+}
+
+#[derive(sqlx::FromRow)]
+struct SecretRow {
+    id: Uuid,
+    name: String,
+    scope: String,
+    repository_id: Option<Uuid>,
+    allowed_repository_ids: Vec<Uuid>,
+    ciphertext: Vec<u8>,
+    nonce: Vec<u8>,
+    tag: Vec<u8>,
+    key_version: i32,
 }
 
 impl AttemptEventRow {

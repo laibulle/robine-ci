@@ -27,6 +27,7 @@ use robine_execution::{
     CancellationSignal, ExecutionControl, ExecutionError, ExecutionResult, ExecutionRunner,
     ExecutionSpecification, ExecutionStatus, OutputChannel, OutputChunk, OutputSink,
 };
+use robine_secrets::{SecretDecryptor, SecretRepository};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
@@ -48,6 +49,8 @@ pub struct ControlPlane {
     oidc: Option<Arc<dyn OidcProvider>>,
     runner_credential_key: Option<[u8; 32]>,
     execution_runner: Option<Arc<dyn ExecutionRunner>>,
+    secret_repository: Option<Arc<dyn SecretRepository>>,
+    secret_decryptor: Option<Arc<dyn SecretDecryptor>>,
 }
 
 struct BootstrapConfig {
@@ -207,12 +210,25 @@ impl ControlPlane {
             oidc: None,
             runner_credential_key: None,
             execution_runner: None,
+            secret_repository: None,
+            secret_decryptor: None,
         }
     }
 
     #[must_use]
     pub fn with_execution_runner(mut self, runner: Arc<dyn ExecutionRunner>) -> Self {
         self.execution_runner = Some(runner);
+        self
+    }
+
+    #[must_use]
+    pub fn with_secret_runtime(
+        mut self,
+        repository: Arc<dyn SecretRepository>,
+        decryptor: Arc<dyn SecretDecryptor>,
+    ) -> Self {
+        self.secret_repository = Some(repository);
+        self.secret_decryptor = Some(decryptor);
         self
     }
 
@@ -1207,7 +1223,10 @@ impl ControlPlane {
                 exit_code: None,
             })
         } else {
-            match serde_json::from_value::<ExecutionSpecification>(work.specification) {
+            match self
+                .resolve_execution_specification(tenant_id, work.specification)
+                .await
+            {
                 Ok(specification) => {
                     runner
                         .run(
@@ -1293,6 +1312,91 @@ impl ControlPlane {
         Ok(attempt)
     }
 
+    async fn resolve_execution_specification(
+        &self,
+        tenant_id: &str,
+        raw: serde_json::Value,
+    ) -> Result<ExecutionSpecification, serde_json::Error> {
+        let repository_id = raw
+            .get("repository_id")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|value| Uuid::parse_str(value).ok());
+        let mut specification = serde_json::from_value::<ExecutionSpecification>(raw)?;
+        if specification.secret_names.is_empty() {
+            return Ok(specification);
+        }
+        let Some(repository_id) = repository_id else {
+            return Err(serde_json::Error::io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "secret repository identity is invalid",
+            )));
+        };
+        let repository = self.secret_repository.as_ref().ok_or_else(|| {
+            serde_json::Error::io(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "secret repository is not configured",
+            ))
+        })?;
+        let decryptor = self.secret_decryptor.as_ref().ok_or_else(|| {
+            serde_json::Error::io(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "secret decryptor is not configured",
+            ))
+        })?;
+        let encrypted = repository
+            .find_authorized(tenant_id, repository_id, &specification.secret_names)
+            .await
+            .map_err(|_| serde_json::Error::io(std::io::Error::other("secret lookup failed")))?;
+        let mut resolved = std::collections::BTreeMap::new();
+        for secret in encrypted {
+            let plaintext = decryptor.decrypt(&secret).map_err(|_| {
+                serde_json::Error::io(std::io::Error::other("secret decryption failed"))
+            })?;
+            let plaintext = String::from_utf8(plaintext.to_vec()).map_err(|_| {
+                serde_json::Error::io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "secret plaintext is not UTF-8",
+                ))
+            })?;
+            if resolved
+                .insert(secret.name, zeroize::Zeroizing::new(plaintext))
+                .is_some()
+            {
+                return Err(serde_json::Error::io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "duplicate authorized secret",
+                )));
+            }
+        }
+        if specification
+            .secret_names
+            .iter()
+            .any(|name| !resolved.contains_key(name))
+        {
+            return Err(serde_json::Error::io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "required secret is missing",
+            )));
+        }
+        for service in &mut specification.services {
+            for (environment_name, secret_name) in &service.secret_references {
+                let value = resolved.get(secret_name).ok_or_else(|| {
+                    serde_json::Error::io(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "service secret is missing",
+                    ))
+                })?;
+                service
+                    .secrets
+                    .insert(environment_name.clone(), value.clone());
+            }
+            service.secret_references.clear();
+        }
+        specification.secret_names.clear();
+        specification.secrets = resolved;
+        Ok(specification)
+    }
+
     async fn authenticate_runner(
         &self,
         tenant_id: &str,
@@ -1364,6 +1468,10 @@ fn execution_outcome(
             status: ExecutionStatus::Cancelled,
             ..
         }) => ("cancelled", Some("cancelled"), false),
+        Ok(ExecutionResult {
+            status: ExecutionStatus::ServiceUnavailable,
+            ..
+        }) => ("failed", Some("service_unavailable"), false),
         Err(_) => ("failed", Some("system_failure"), false),
     }
 }

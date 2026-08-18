@@ -5,9 +5,10 @@ mod docker;
 use async_trait::async_trait;
 pub use docker::{DockerCli, DockerConfig};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -54,6 +55,10 @@ pub struct ExecutionSpecification {
     #[serde(default)]
     pub build_env: BTreeMap<String, String>,
     #[serde(default)]
+    pub secret_names: Vec<String>,
+    #[serde(skip)]
+    pub secrets: BTreeMap<String, Zeroizing<String>>,
+    #[serde(default)]
     pub services: Vec<ServiceSpecification>,
     pub steps: Vec<ExecutionStep>,
 }
@@ -66,6 +71,10 @@ pub struct ServiceSpecification {
     pub user: Option<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    #[serde(default, rename = "secret_env")]
+    pub secret_references: BTreeMap<String, String>,
+    #[serde(skip)]
+    pub secrets: BTreeMap<String, Zeroizing<String>>,
     #[serde(default)]
     pub command: Vec<String>,
     #[serde(default)]
@@ -120,6 +129,7 @@ pub enum ExecutionStatus {
     Failed,
     Cancelled,
     TimedOut,
+    ServiceUnavailable,
 }
 
 #[derive(Debug, Error)]
@@ -201,13 +211,44 @@ impl ExecutionSpecification {
         if self.steps.iter().any(|step| step.kind == StepKind::Builtin) {
             return Err(ExecutionError::Unsupported("builtin step"));
         }
+        if !self.secret_names.is_empty() {
+            return Err(ExecutionError::Unsupported("secret resolution"));
+        }
+        if self.secrets.len() > 64
+            || self
+                .secrets
+                .iter()
+                .any(|(name, value)| name.is_empty() || value.is_empty() || value.len() > 65_536)
+        {
+            return Err(ExecutionError::InvalidSpecification("secrets"));
+        }
+        if self.services.len() > 8 {
+            return Err(ExecutionError::InvalidSpecification("services"));
+        }
+        let mut service_ids = BTreeSet::new();
         for service in &self.services {
             if service.id.is_empty()
-                || !service
-                    .id
-                    .bytes()
-                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+                || service.id.len() > 63
+                || !service_ids.insert(&service.id)
+                || !service.id.bytes().enumerate().all(|(index, byte)| {
+                    byte.is_ascii_lowercase()
+                        || (index > 0 && (byte.is_ascii_digit() || byte == b'-' || byte == b'_'))
+                })
                 || service.image.is_empty()
+                || service.env.len() > 64
+                || service.env.iter().any(|(name, value)| {
+                    name.is_empty()
+                        || name.len() > 255
+                        || !name.bytes().all(|byte| {
+                            byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_'
+                        })
+                        || value.len() > 65_536
+                })
+                || service.command.len() > 32
+                || service
+                    .command
+                    .iter()
+                    .any(|argument| argument.is_empty() || argument.len() > 4_096)
                 || service
                     .readiness
                     .as_ref()
@@ -221,6 +262,9 @@ impl ExecutionSpecification {
                     || !service.image.contains("dind"))
             {
                 return Err(ExecutionError::InvalidSpecification("privileged service"));
+            }
+            if !service.secret_references.is_empty() {
+                return Err(ExecutionError::Unsupported("service secret resolution"));
             }
         }
         Ok(())
@@ -241,6 +285,8 @@ mod tests {
             timeout_ms: 1_000,
             env: BTreeMap::from([("ROBINE_BUILD_COMMIT_SHA".into(), "forged".into())]),
             build_env: BTreeMap::from([("ROBINE_BUILD_COMMIT_SHA".into(), "real".into())]),
+            secret_names: Vec::new(),
+            secrets: BTreeMap::new(),
             services: Vec::new(),
             steps: vec![ExecutionStep {
                 name: "test".into(),

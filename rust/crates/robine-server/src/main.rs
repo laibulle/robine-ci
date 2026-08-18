@@ -6,6 +6,7 @@ use robine_application::ControlPlane;
 use robine_execution::{DockerCli, DockerConfig};
 use robine_oidc::OidcClient;
 use robine_persistence::Database;
+use robine_secrets::AesGcmKeyring;
 use robine_server::AppState;
 use tokio::sync::watch;
 
@@ -25,6 +26,21 @@ async fn main() -> io::Result<()> {
             .unwrap_or_else(|_| "production".into()),
         ..DockerConfig::default()
     })));
+    let single_secret_key = std::env::var("ROBINE_CI_SECRET_KEY").ok();
+    let secret_keys = std::env::var("ROBINE_CI_SECRET_KEYS").ok();
+    if single_secret_key.is_some() || secret_keys.is_some() {
+        let key_version = std::env::var("ROBINE_CI_SECRET_KEY_VERSION")
+            .ok()
+            .and_then(|value| value.parse::<i32>().ok())
+            .unwrap_or(1);
+        let keyring = AesGcmKeyring::from_encoded(
+            single_secret_key.as_deref(),
+            secret_keys.as_deref(),
+            key_version,
+        )
+        .map_err(io::Error::other)?;
+        control_plane = control_plane.with_secret_runtime(database.clone(), Arc::new(keyring));
+    }
     if let Ok(token) = std::env::var("ROBINE_BOOTSTRAP_TOKEN") {
         control_plane =
             control_plane.with_bootstrap_token(&token, Utc::now() + Duration::minutes(15));

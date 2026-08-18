@@ -5,6 +5,7 @@ members = [
   "rust/crates/robine-execution",
   "rust/crates/robine-oidc",
   "rust/crates/robine-persistence",
+  "rust/crates/robine-secrets",
   "rust/crates/robine-server",
 ]
 resolver = "3"
@@ -17,6 +18,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 actix-web = "4.11"
+aes-gcm = "0.10"
 argon2 = "0.5"
 async-trait = "0.1"
 base64 = "0.22"
@@ -33,6 +35,7 @@ openidconnect = { version = "4.0", features = ["reqwest"] }
 tokio = { version = "1.47", features = ["io-util", "macros", "process", "rt-multi-thread", "signal", "sync", "time"] }
 uuid = { version = "1.18", features = ["serde", "v4"] }
 url = "2.5"
+zeroize = "1.8"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
