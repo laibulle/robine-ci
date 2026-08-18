@@ -344,6 +344,20 @@ fn schedule_failure_code(error: &ApplicationError) -> &'static str {
     }
 }
 
+fn schedule_window(
+    cursor: Option<chrono::DateTime<Utc>>,
+    minute: chrono::DateTime<Utc>,
+) -> Option<(chrono::DateTime<Utc>, u32, u64)> {
+    if cursor.is_some_and(|cursor| cursor >= minute) {
+        return None;
+    }
+    let desired_start = cursor.map_or(minute, |cursor| cursor + Duration::minutes(1));
+    let start = desired_start.max(minute - Duration::minutes(1_439));
+    let truncated = (start - desired_start).num_minutes().max(0).cast_unsigned();
+    let scanned = u32::try_from((minute - start).num_minutes() + 1).ok()?;
+    Some((start, scanned, truncated))
+}
+
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct RunnerEnrollment {
     pub id: Uuid,
@@ -1068,7 +1082,8 @@ impl ControlPlane {
         cursor: Option<chrono::DateTime<Utc>>,
         minute: chrono::DateTime<Utc>,
     ) -> Result<ScheduleReconciliation, ApplicationError> {
-        if cursor.is_some_and(|cursor| cursor >= minute) {
+        let Some((start, scanned_minutes, truncated_minutes)) = schedule_window(cursor, minute)
+        else {
             return Ok(ScheduleReconciliation {
                 scanned_minutes: 0,
                 due_occurrences: 0,
@@ -1076,13 +1091,7 @@ impl ControlPlane {
                 truncated_minutes: 0,
                 cursor_advanced: false,
             });
-        }
-        let desired_start = cursor.map_or(minute, |cursor| cursor + Duration::minutes(1));
-        let oldest_bounded = minute - Duration::minutes(1_439);
-        let start = desired_start.max(oldest_bounded);
-        let truncated_minutes = (start - desired_start).num_minutes().max(0).cast_unsigned();
-        let scanned_minutes = u32::try_from((minute - start).num_minutes() + 1)
-            .map_err(|_| ApplicationError::Unavailable)?;
+        };
         let repositories = self
             .source_repositories
             .as_ref()
@@ -4255,6 +4264,7 @@ fn valid_email(email: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
     use robine_execution::{ExecutionStep, SourceFile, StepCondition, StepKind};
     use robine_storage::{
         BlobInventory, InventoryObject, RetentionStage, StorageError, StoredObject,
@@ -4263,6 +4273,22 @@ mod tests {
     use std::{collections::BTreeMap, path::PathBuf};
 
     struct IncompleteBlobStore;
+
+    #[test]
+    fn schedule_window_is_bounded_and_never_moves_a_future_cursor_backwards() {
+        let now = Utc
+            .with_ymd_and_hms(2026, 8, 18, 12, 0, 0)
+            .single()
+            .expect("test timestamp");
+        let cursor = now - Duration::minutes(2_001);
+        let (start, scanned, truncated) =
+            schedule_window(Some(cursor), now).expect("recovery window");
+        assert_eq!(start, now - Duration::minutes(1_439));
+        assert_eq!(scanned, 1_440);
+        assert_eq!(truncated, 561);
+        assert!(schedule_window(Some(now), now).is_none());
+        assert!(schedule_window(Some(now + Duration::minutes(1)), now).is_none());
+    }
 
     #[test]
     fn source_control_trigger_filters_match_branches_tags_and_pull_requests() {

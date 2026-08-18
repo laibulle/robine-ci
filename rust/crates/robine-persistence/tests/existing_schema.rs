@@ -5,7 +5,7 @@ use argon2::{
     password_hash::{PasswordHasher, SaltString},
 };
 use async_trait::async_trait;
-use chrono::{Duration, Utc};
+use chrono::{Duration, Timelike, Utc};
 use hmac::{Hmac, Mac};
 use robine_application::{ApplicationError, ControlPlane, RetentionConfig};
 use robine_core::{
@@ -300,6 +300,40 @@ async fn scheduled_reconciliation_is_exact_sha_durable_and_idempotent() {
         .await
         .expect("insert repository");
     setup.commit().await.expect("commit repository");
+    let now = Utc::now();
+    let invalid_archive = create_source_tar_gz(
+        &[SourceFile {
+            path: ".robine-ci/workflows/nightly.yml".into(),
+            contents: b"version: 1\nname: Nightly\non:\n  schedule:\n    - cron: '@daily'\njobs:\n  test:\n    image: alpine:3.22\n    steps:\n      - run: echo scheduled\n"
+                .to_vec(),
+        }],
+        ArchiveLimits::default(),
+    )
+    .expect("invalid workflow archive");
+    let invalid_source = Arc::new(WorkflowArchive(invalid_archive));
+    let invalid_control_plane = ControlPlane::new(database.clone(), database.clone())
+        .with_source_runtime(database.clone(), invalid_source.clone())
+        .with_source_inspector(invalid_source);
+    assert!(matches!(
+        invalid_control_plane
+            .reconcile_scheduled_workflows(now)
+            .await,
+        Err(ApplicationError::InvalidWorkflow(_))
+    ));
+    let mut failed_scan = database
+        .tenant_transaction("standalone")
+        .await
+        .expect("failed scan transaction");
+    let failed_state = sqlx::query_as::<_, (Option<chrono::NaiveDateTime>, Option<String>)>(
+        "SELECT cursor, last_failure FROM schedule_reconciliation_states WHERE tenant_id = 'standalone' AND key = 'scheduled-workflows:v1'",
+    )
+    .fetch_one(&mut *failed_scan)
+    .await
+    .expect("failed schedule state");
+    assert!(failed_state.0.is_none());
+    assert_eq!(failed_state.1.as_deref(), Some("invalid_workflow"));
+    failed_scan.commit().await.expect("commit failed scan read");
+
     let archive = create_source_tar_gz(
         &[SourceFile {
             path: ".robine-ci/workflows/nightly.yml".into(),
@@ -313,7 +347,6 @@ async fn scheduled_reconciliation_is_exact_sha_durable_and_idempotent() {
     let control_plane = ControlPlane::new(database.clone(), database.clone())
         .with_source_runtime(database.clone(), source.clone())
         .with_source_inspector(source);
-    let now = Utc::now();
     let first = control_plane
         .reconcile_scheduled_workflows(now)
         .await
@@ -327,6 +360,41 @@ async fn scheduled_reconciliation_is_exact_sha_durable_and_idempotent() {
         .await
         .expect("duplicate reconciliation");
     assert_eq!(duplicate.scanned_minutes, 0);
+
+    let future_cursor =
+        now.with_nanosecond(0).expect("valid second precision") + Duration::minutes(10);
+    let mut future_setup = database
+        .tenant_transaction("standalone")
+        .await
+        .expect("future cursor transaction");
+    sqlx::query("UPDATE schedule_reconciliation_states SET cursor = $1 WHERE tenant_id = 'standalone' AND key = 'scheduled-workflows:v1'")
+        .bind(future_cursor)
+        .execute(&mut *future_setup)
+        .await
+        .expect("set future cursor");
+    future_setup.commit().await.expect("commit future cursor");
+    let future_scan = control_plane
+        .reconcile_scheduled_workflows(now)
+        .await
+        .expect("future cursor reconciliation");
+    assert_eq!(future_scan.scanned_minutes, 0);
+    let mut future_verification = database
+        .tenant_transaction("standalone")
+        .await
+        .expect("future cursor verification transaction");
+    let persisted_future = sqlx::query_scalar::<_, Option<chrono::NaiveDateTime>>(
+        "SELECT cursor FROM schedule_reconciliation_states WHERE tenant_id = 'standalone' AND key = 'scheduled-workflows:v1'",
+    )
+    .fetch_one(&mut *future_verification)
+    .await
+    .expect("read future cursor")
+    .expect("cursor present")
+    .and_utc();
+    assert_eq!(persisted_future, future_cursor);
+    future_verification
+        .commit()
+        .await
+        .expect("commit future verification");
 
     let mut verification = database
         .tenant_transaction("standalone")
