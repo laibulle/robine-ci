@@ -27,7 +27,7 @@ defmodule MyApp.BuildInfo do
 end
 ```
 
-Robine itself follows this pattern in `Robine.BuildInfo`. Its authenticated product shell shows a small footer linking to `/build-information`, where operators can retrieve the complete provenance for support and deployment verification.
+Robine itself captures these variables through Rust `option_env!` compile-time constants. Its authenticated product shell shows a small footer linking to `/build-information`, where operators can retrieve the complete provenance for support and deployment verification.
 
 ## JavaScript applications
 

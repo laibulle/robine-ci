@@ -82,7 +82,7 @@ A Robine administrator operating a small heterogeneous fleet for a team or start
 
 ## Proposed design
 
-Runner identity and connection follow RUN-001. The `Robine.Runners` domain owns labels, capabilities, lifecycle state, capacity reservations, and matching. Scheduling use cases receive runner-registry and job-queue ports; PostgreSQL adapters use transactional row or advisory locks for atomic selection and reservation. Phoenix LiveView is an administrative adapter, never a source of fleet policy.
+Runner identity and connection follow RUN-001. Framework-independent runner contracts own labels, capabilities, lifecycle state, capacity reservations, and matching. Application scheduling receives runner-registry and job-queue ports; PostgreSQL adapters use transactional row or advisory locks for atomic selection and reservation. The Actix administration surface is a delivery adapter, never a source of fleet policy.
 
 `runs-on` uses an all-labels-match rule deliberately. Boolean expressions, weights, and cloud-specific selectors would create a second query language before evidence justifies it. The local Docker runner registers the system label `docker`, preserving existing workflow behavior.
 

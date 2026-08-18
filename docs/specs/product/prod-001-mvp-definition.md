@@ -74,7 +74,7 @@ An individual developer or startup engineer who owns a trusted GitHub repository
 
 ## Proposed design
 
-The MVP is a vertical product slice with four first-class surfaces: Docker Compose installation, a Phoenix LiveView web application, a `robine` CLI, and Docker execution. UX quality is evaluated across the complete journey rather than treated as a separate presentation layer.
+The MVP is a vertical product slice with four first-class surfaces: Docker Compose installation, an Actix-rendered progressively enhanced web application, a native `robine` CLI, and Docker execution. UX quality is evaluated across the complete journey rather than treated as a separate presentation layer.
 
 ## Failure modes and recovery
 

@@ -101,7 +101,7 @@ jobs:
       - run: mix test
 ```
 
-`Robine.Workflows.Domain.Service` owns normalized workflow policy. `Robine.Execution.Contracts.Service` is embedded in the versioned `Specification`; it contains resolved service secret values only at execution time and excludes them from inspection. The existing workflow and execution facades remain the entry points.
+`robine-workflows` owns normalized service policy. `robine_execution::ServiceSpecification` is embedded in the versioned execution contract; it contains resolved service secret values only at execution time and excludes them from serialization and debug inspection. Application and CLI planners remain the entry points.
 
 The Docker adapter creates one labeled network named from the opaque attempt identifier, starts labeled service containers with network aliases, observes readiness from the runner host against the container's network address, then starts the job container on the same network. It never binds `-p`/`--publish`. Cleanup removes the job container, service containers, workspace volume, and finally the network. Restart reconciliation extends the existing label-owned resource scan to networks and services.
 

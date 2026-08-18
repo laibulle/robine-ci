@@ -83,7 +83,7 @@ A self-hosting administrator who owns the control plane and one or more trusted 
 
 ## Proposed design
 
-`Robine.Runners` is a clean-architecture context. Its facade exposes use cases with exact `defdelegate` functions. Domain modules own enrollment expiry, credential rotation, runner lifecycle, and protocol compatibility. Ports describe a runner registry, credential digester, clock, ID generator, and session publisher. PostgreSQL, Phoenix HTTP/WebSocket, and the standalone runner executable are adapters assembled in `Robine.Runtime.Dependencies`.
+Framework-independent runner contracts own enrollment expiry, credential rotation, runner lifecycle, and protocol compatibility. Application methods coordinate runner-registry and attempt capabilities. PostgreSQL, Actix HTTP/WebSocket, and the standalone native runner are explicit adapters assembled by `robine-server`.
 
 The first implementation uses an opaque random runner credential because it is practical for small self-hosted installations. The server stores only a digest. A later mTLS adapter may replace the credential proof without changing use cases or the protocol identity.
 

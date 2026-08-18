@@ -41,7 +41,7 @@ A developer testing one codebase against a bounded set of supported runtime comb
 1. Test two Elixir versions against two OTP versions.
 2. Run one downstream aggregation job only after every expanded test variant succeeds.
 3. Reproduce all variants or one generated variant through the local CLI.
-4. Compare each variant independently in the LiveView and GitHub checks.
+4. Compare each variant independently in the Actix browser and GitHub checks.
 
 ## Requirements
 

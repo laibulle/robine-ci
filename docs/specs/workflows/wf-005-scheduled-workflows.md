@@ -65,7 +65,7 @@ A repository maintainer declaring periodic trusted CI work and an operator diagn
 
 ### Operational requirements
 
-- **OR-1:** Cron parsing and matching MUST be pure, deterministic, bounded, and independent of Oban or wall-clock APIs.
+- **OR-1:** Cron parsing and matching MUST be pure, deterministic, bounded, and independent of Tokio worker loops or wall-clock APIs.
 - **OR-2:** One reconciliation MUST fetch each trusted repository head and workflow set at most once, regardless of the number of recovered minutes.
 - **OR-3:** A repository/GitHub/validation/pipeline failure MUST fail the scan and retain its prior cursor for idempotent retry.
 - **OR-4:** Metrics MUST expose scan duration, outcome, scanned minutes, due occurrences, created-or-reused pipelines, and truncated minutes using bounded labels only.
@@ -88,7 +88,7 @@ The shutdown-aware Tokio worker invokes the application service once per minute.
 | Failure | Expected behavior | Recovery |
 |---|---|---|
 | Duplicate or overlapping reconciliation | Same occurrence returns one pipeline | Idempotency and cursor CAS converge automatically |
-| GitHub unavailable | No cursor advancement | Oban retries, then the next scan catches up |
+| GitHub unavailable | No cursor advancement | The durable Rust worker retries, then the next scan catches up |
 | Workflow becomes invalid | No occurrence from the failing scan is forgotten | Correct workflow; reconciliation retries |
 | Downtime under 24 hours | Every missed minute is evaluated | Automatic bounded catch-up |
 | Downtime over 24 hours | Oldest excess minutes are reported as truncated | Operator reviews health; newest 24 hours run |

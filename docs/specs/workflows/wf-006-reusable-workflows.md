@@ -62,12 +62,12 @@ A developer maintaining several workflows in one trusted repository and extracti
 
 - **UX-1:** Validation diagnostics MUST identify the owning file, source path, line, and column where parser information permits.
 - **UX-2:** Workflow revision detail MUST list every included path and digest and distinguish the entry file.
-- **UX-3:** Pipeline and job names MUST use the stable generated namespace consistently in LiveView, logs, checks, retry, and CLI selection.
+- **UX-3:** Pipeline and job names MUST use the stable generated namespace consistently in the Actix browser, logs, checks, retry, and CLI selection.
 - **UX-4:** Local validation and execution MUST discover repository-local workflow sources automatically and fail clearly when invoked outside the source tree required by an include.
 
 ### Operational requirements
 
-- **OR-1:** Resolution and composition MUST be pure, deterministic, bounded, and free of filesystem, GitHub, Ecto, Phoenix, Docker, or Oban dependencies.
+- **OR-1:** Resolution and composition MUST be pure, deterministic, bounded, and free of filesystem, GitHub, SQLx, Actix, Docker, or worker-runtime dependencies.
 - **OR-2:** GitHub delivery, manual launch, and schedule reconciliation MUST fetch the exact workflow source set once per repository/SHA operation and perform no follow-up mutable-ref reads.
 - **OR-3:** No pipeline, revision, job, outbox, or audit row may be created when any included source or composed invariant fails.
 - **OR-4:** Metrics MUST report bounded include depth, file count, composed job count, duration, and outcome without paths, aliases, input names, values, repository data, or source.

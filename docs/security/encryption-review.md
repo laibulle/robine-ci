@@ -2,7 +2,7 @@
 
 ## Scope and decision
 
-Robine's MVP stores secret values with versioned direct AES-256-GCM. This review covers `Robine.Adapters.Security.AesGcmCipher`, persistence boundaries, key loading, and rotation. It does not claim protection from a compromised application host or trusted workflow code that deliberately exfiltrates a supplied secret.
+Robine's MVP stores secret values with versioned direct AES-256-GCM. This review covers `robine_secrets::AesGcmKeyring`, SQLx persistence boundaries, key loading, and rotation. It does not claim protection from a compromised application host or trusted workflow code that deliberately exfiltrates a supplied secret.
 
 The construction is accepted for the self-hosted MVP. A KMS-backed envelope-encryption adapter remains future work.
 
@@ -13,8 +13,8 @@ The construction is accepted for the self-hosted MVP. A KMS-backed envelope-encr
 - AES-GCM produces and verifies a 128-bit authentication tag.
 - Authenticated additional data binds ciphertext to the immutable secret ID, name, scope, repository ownership, and sorted instance grants.
 - Records carry a positive key version. Reads select that exact version and fail closed when it is unavailable.
-- Ciphertext, nonce, and tag fields are redacted from Ecto inspection.
-- Adapter boundaries validate key, nonce, tag, version, and binary types before entering the crypto NIF.
+- Ciphertext, nonce, and tag fields never implement plaintext-oriented debug output and are absent from browser/API projections.
+- Adapter boundaries validate key, nonce, tag, version, and byte lengths before invoking the Rust crypto implementation.
 
 Random 96-bit nonce collision probability is negligible at the intended self-hosted scale. Operators should avoid cloning a keyring into unrelated high-volume instances.
 
@@ -26,7 +26,7 @@ Interrupted batches leave a readable mixture of versions. The returned cursor re
 
 ## Residual risks
 
-- BEAM binaries are immutable and cannot be reliably zeroized; plaintext lifetime is minimized but not cryptographically erased from process memory.
+- Plaintext is held in `zeroize`-backed values at execution boundaries; allocator copies and operating-system memory still prevent a claim of perfect erasure.
 - Environment variables and deployment configuration remain operator-controlled sensitive surfaces.
 - Database tampering can deny access, but authenticated encryption prevents modified ciphertext from being accepted as plaintext.
 - Masking reduces accidental disclosure; it cannot stop trusted executed code from encoding or transmitting a secret deliberately.

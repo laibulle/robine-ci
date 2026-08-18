@@ -2,7 +2,7 @@
 
 Robine's MVP assumes repository code and maintainers are trusted. Docker containers reduce accidental interference but are not a security boundary against hostile code. Fork pull requests are ignored, secrets are never delivered to forks, and workflows cannot request privileged mode, host networking, devices, host paths, or the Docker socket.
 
-Local passwords use Argon2id. OIDC uses Authorization Code with PKCE, state, nonce, issuer, audience, signature, and verified-email checks. A local administrator account remains the recovery path. Global roles are viewer, maintainer, and administrator; every route and LiveView event rechecks authorization on the server.
+Local passwords use Argon2id. OIDC uses Authorization Code with PKCE, state, nonce, issuer, audience, signature, and verified-email checks. A local administrator account remains the recovery path. Global roles are viewer, maintainer, and administrator; every protected Actix route and mutation rechecks authorization on the server.
 
 Secrets use versioned AES-256-GCM envelopes with a unique nonce and authenticated scope metadata. Master keys remain outside PostgreSQL. Secret reads are internal and explicit; UI/API responses expose metadata only. Runner output is demand-driven, independently redacted on stdout and stderr before persistence, and then ANSI-sanitized before HTML rendering.
 

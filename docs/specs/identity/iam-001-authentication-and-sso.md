@@ -80,13 +80,13 @@ The OIDC protocol client is selected at the application composition root and con
 
 | Surface | Minimum role | Server-side enforcement |
 |---|---|---|
-| Pipeline, job, workflow revision, repository reads | Viewer | Authenticated LiveView session plus read-use-case policy |
-| Cancel pipeline, retry job, check installation permissions | Maintainer | Mutation/use-case role guard; forged LiveView events are refused |
-| Repository secrets | Maintainer | Maintainer LiveView session plus secret use-case policy |
+| Pipeline, job, workflow revision, repository reads | Viewer | Authenticated Actix session plus application read policy |
+| Cancel pipeline, retry job, check installation permissions | Maintainer | Application role guard; forged HTTP mutations are refused |
+| Repository secrets | Maintainer | Maintainer Actix session plus secret application policy |
 | Repository discovery/trust | Administrator | Discovery/trust use-case policy; browser metadata is revalidated against GitHub |
-| Identity, health, retention, and instance credentials | Administrator | Administrator LiveView session plus each application use-case policy |
+| Identity, health, retention, and instance credentials | Administrator | Administrator Actix session plus each application policy |
 
-Visibility of a button is never an authorization boundary. Every LiveView event calls a facade use case with the session-derived actor, and tests issue hidden events directly to prove the underlying policy still rejects them.
+Visibility of a button is never an authorization boundary. Every protected Actix read or mutation resolves the opaque session and calls the application boundary with its server-derived actor; tests forge direct requests to prove the underlying policy still rejects them.
 
 ## Failure modes and recovery
 
@@ -111,7 +111,7 @@ Metrics include login success/failure by method, OIDC discovery/JWKS failures, s
 - [x] OIDC login validates issuer, audience, signature, nonce, state, and PKCE.
 - [x] Email collision cannot silently take over an existing local account.
 - [x] The last usable administrator cannot remove their own recovery path accidentally.
-- [x] Every protected LiveView route and action performs server-side authorization, including forged hidden-event coverage.
+- [x] Every protected Actix route and mutation performs server-side authorization, including forged direct-request coverage.
 - [x] A provider outage during authorization or callback creates no partial identity/session, and a local administrator can still sign in and reach instance administration.
 
 ## Open questions

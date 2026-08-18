@@ -65,7 +65,7 @@ A developer running tests for a trusted repository and an operator sharing one D
 - **UX-1:** Image pull, container creation, checkout, command execution, cancellation, and cleanup MUST appear as distinct phases.
 - **UX-2:** Failures MUST state whether they came from the command, image pull, Docker daemon, timeout, cancellation, or cleanup.
 - **UX-3:** When the job container stops unexpectedly, the retained log MUST include its Docker status, exit code, OOM-killed flag, daemon error, and finish time captured before cleanup.
-- **UX-4:** Active log views MUST retain at most 50 recent segments and follow new cursor pages without displacing a developer who scrolled away from the tail. Terminal log views MUST stop polling, freeze durations, and expose the complete retained log through an independently streamed, non-LiveView reader with stable scrolling and no segment truncation.
+- **UX-4:** Active log views MUST retain at most 50 recent segments and follow new cursor pages without displacing a developer who scrolled away from the tail. Terminal log views MUST stop polling, freeze durations, and expose the complete retained log through an independently streamed download with stable scrolling and no segment truncation.
 
 ### Operational requirements
 

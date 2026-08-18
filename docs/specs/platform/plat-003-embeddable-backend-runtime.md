@@ -27,7 +27,7 @@ An embedding host must be able to reuse Robine without starting its Actix endpoi
 
 - Sharing LiveViews, layouts, components, assets, hooks, or navigation.
 - Mapping a host application's roles automatically.
-- Allowing consumers to query Robine Ecto schemas directly.
+- Allowing consumers to query Robine SQLx persistence details directly.
 
 ## Users and use cases
 

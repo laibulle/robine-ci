@@ -73,7 +73,7 @@ A developer who needs reliable test cleanup and useful failure diagnostics from 
 
 ## Proposed design
 
-The workflow domain adds `condition` to normalized jobs and steps as one of `:success`, `:failure`, or `:always`. Persistence stores the normalized string in immutable job execution metadata. `Robine.Pipelines.Domain.Job.release/2` evaluates a pure condition policy once all dependencies are terminal and transitions the job atomically to `queued` or `skipped`; no attempt is created for a skipped job.
+The workflow domain adds `condition` to normalized jobs and steps as one of `success`, `failure`, or `always`. Persistence stores the normalized string in immutable job execution metadata. The pure pipeline release policy evaluates it once all dependencies are terminal and the SQLx adapter transitions the job atomically to `queued` or `skipped`; no attempt is created for a skipped job.
 
 The execution contract carries each step condition. The Docker adapter no longer reduces steps by halting on an ordinary command/built-in failure. It retains the first failure, appends explicit skipped `StepResult` values for non-matching steps, and executes matching failure/always steps. Cancellation, timeout, service loss, and adapter errors still halt immediately. The final `Result` remains failed when any ordinary step failed.
 

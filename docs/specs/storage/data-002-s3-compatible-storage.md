@@ -75,7 +75,7 @@ A self-hosting operator deploying Robine on replaceable or horizontally managed 
 
 ## Proposed design
 
-`Robine.Storage.Ports.BlobStore` remains the application boundary. Runtime dependency assembly selects `LocalBlobStore` or `S3BlobStore`; use cases and the `Robine.Storage` facade remain unchanged. Retention and reconciliation receive the selected port implementation through explicit dependencies rather than aliasing `LocalBlobStore`.
+`robine_storage::BlobStore` remains the application boundary. Binary or embedding-host assembly selects `LocalBlobStore` or `S3BlobStore`; application operations remain unchanged. Retention and reconciliation receive the selected trait implementation through explicit dependencies rather than constructing a concrete store.
 
 The S3 adapter maps digest `abcdef…` below an optional prefix to `objects/ab/abcdef…`. Because the final key is unknown until SHA-256 hashing completes, a streamed write first creates a private local spool file while incrementally hashing, counting, and enforcing the object limit. It then uploads that immutable spool to the final digest-derived key with bounded multipart parts, records uploaded part identifiers in process memory, and aborts on transport or completion failure. Small objects may use one conditional `PutObject`. The spool is removed after verified publication or failure and is covered by abandoned-temporary reconciliation. Identical keys are safe because content identity is the digest; a post-write metadata or checksum verification guards incompatible endpoints.
 

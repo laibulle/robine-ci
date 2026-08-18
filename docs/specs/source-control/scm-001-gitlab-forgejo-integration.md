@@ -78,9 +78,9 @@ An administrator of a self-hosted Robine instance connecting a trusted GitLab or
 
 ## Proposed design
 
-`Repositories.Ports.SourceControl` describes repository capabilities: discovery, exact default head, exact workflow/source fetch, permission diagnosis, and status upsert. A provider registry, assembled only by `Robine.Runtime.Dependencies`, maps the persisted provider-instance key to a configured adapter. A small application-level selector returns the adapter for a trusted repository; use cases never call GitHub-, GitLab-, or Forgejo-named modules.
+Provider-neutral Rust traits describe repository capabilities: discovery, exact default head, exact workflow/source fetch, permission diagnosis, and status upsert. Binary assembly maps the persisted provider-instance key to a configured adapter; application code selects it for a trusted repository without depending on vendor transport types.
 
-Provider webhook delivery adapters authenticate raw requests and submit a provider-tagged delivery command through `Robine.Repositories`. Provider-specific pure normalizers convert payloads to the existing normalized event contract. The shared delivery-processing use case then resolves workflows and creates pipelines exactly once. Provider status adapters translate the stable pipeline/job projection to GitHub checks, GitLab commit statuses, or Forgejo commit statuses.
+Actix webhook adapters authenticate raw requests and submit a provider-tagged command through `ControlPlane`. Provider-specific pure normalizers convert payloads to the shared event contract. The durable delivery batch then resolves workflows and creates pipelines exactly once. GitHub status projection is active for this cutover; GitLab and Forgejo outbound status adapters are explicitly deferred while their authenticated ingestion remains supported.
 
 Persistence evolves existing tables in place: repository identities gain provider and provider-instance columns; deliveries and status projections gain the same bounded identity. Existing rows backfill to the default GitHub instance. Names may remain legacy implementation details temporarily, but domain contracts and new code are provider-neutral. Unique constraints move from project ID alone to `(provider, provider_instance, provider_project_id)`.
 

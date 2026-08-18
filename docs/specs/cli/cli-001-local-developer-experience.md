@@ -5,7 +5,7 @@
 - **State:** Shipped
 - **Owner:** Developer Experience
 - **Target:** MVP
-- **Last updated:** 2026-08-09
+- **Last updated:** 2026-08-18
 
 ## Summary
 
@@ -76,18 +76,19 @@ robine init
 robine validate [path] [--format human|json]
 robine run [job-id] [--workflow path] [--no-deps]
 robine run <job-id> --step <name-or-index>
+robine verify-acceptance --first-pipeline FILE --accessibility FILE --artifact-manifest FILE
 robine version
 ```
 
 The initial detectors target Elixir/Mix, Node package managers, and a generic fallback. Generated files use immutable image references when practical and include comments explaining mutable tags if a digest cannot be selected safely.
 
-The MVP is packaged as a target-specific bundle containing a versioned escript and the Exile native runtime. GNU/Linux x86-64 with Erlang/OTP 29 is the verified binary target; other targets require their own native build and smoke test, and Windows is unsupported because Exile relies on Unix process primitives. `mix robine.release` produces the executable, native files, and a deterministic, atomically written `SHA256SUMS`; release automation labels the enclosing download with its OS and architecture and never combines files from different builds. Exit codes are stable classes: 0 success, 2 configuration or selection, 3 prerequisite or infrastructure, 4 protected mutation, 5 job failure, and 64 command-line usage.
+The MVP is packaged as one native Rust executable with no Elixir, Erlang, ERTS, or server dependency. `robine-package` builds version-matched CLI, server, and runner binaries plus deterministic `SHA256SUMS` manifests. Each target requires its own Rust build and smoke test. Exit codes are stable classes: 0 success, 2 configuration or selection, 3 prerequisite or infrastructure, 4 protected mutation, 5 job failure, and 64 command-line usage.
 
-CI workers and equivalence tests construct persisted runner inputs through `Robine.Execution.build_ci_specification/2`; local execution uses `build_local_plan/2`, and both return the same versioned `Specification` contract. The Docker-backed equivalence corpus compares image, shell, timeout, environment, `/workspace`, ordered commands, output, exit code, and terminal reason for both successful and failing jobs. Transport-only fields such as attempt ID, idempotency token, and source materialization path are deliberately excluded.
+CI workers and the CLI both consume `robine_execution::ExecutionSpecification`, derived from the same `robine-workflows` normalized graph. Equivalence coverage compares image, shell, timeout, environment, `/workspace`, ordered commands, output, exit code, and terminal reason. Transport-only fields such as attempt identity, source materialization, provider metadata, remote cache, and artifacts are explicit CI inputs rather than hidden semantic branches.
 
 Local secrets are opt-in and are never downloaded from the server. `robine run --env-file .robine.env` accepts only a regular file inside the current Git worktree for which `git check-ignore` succeeds; tracked, visible, external, linked, oversized, or malformed files are refused before their contents are read into an execution plan. The file is limited to 1 MiB and uses literal `NAME=VALUE` lines with optional single or double quotes and no interpolation, command substitution, or shell execution.
 
-Every value must satisfy the shared 8-byte through 64-KiB masking policy. A job receives only names listed in its workflow `secrets` declaration, undeclared file entries are ignored, and an explicitly supplied file missing a required name fails planning. Values enter the normalized `Specification.secrets` field only in memory, are masked by the same streaming redactor as CI, are omitted from debug inspection, and are never persisted or transmitted. Output reports only the count injected.
+Every value must satisfy the shared 8-byte through 64-KiB masking policy. A job receives only names listed in its workflow `secrets` declaration, undeclared file entries are ignored, and an explicitly supplied file missing a required name fails planning. Values enter `ExecutionSpecification.secrets` only in memory, are masked by the same streaming redactor as CI, are omitted from serialization and debug output, and are never persisted or transmitted. Output reports only the count injected.
 
 ## Failure modes and recovery
 

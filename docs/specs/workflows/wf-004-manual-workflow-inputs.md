@@ -55,7 +55,7 @@ A repository maintainer launching an explicitly enabled maintenance or release w
 - **FR-7:** Every missing optional input MUST use its default or the empty string. Every missing required input without a default MUST reject launch before pipeline creation.
 - **FR-8:** Every job receives `ROBINE_INPUT_<UPPER_ID>` with the normalized value. A workflow is invalid if an explicit job environment collides with a declared input variable.
 - **FR-9:** Manual discovery and launch MUST resolve the selected named branch through the installed source-control App, fetch workflows at that exact 40-character SHA, and select one exact workflow path. The provider-resolved SHA, never browser state, is authoritative.
-- **FR-10:** Launch MUST be allowed only for a trusted repository and an administrator or maintainer. Viewers and anonymous users MUST be forbidden even if they forge a LiveView event.
+- **FR-10:** Launch MUST be allowed only for a trusted repository and an administrator or maintainer. Viewers and anonymous users MUST be forbidden even if they forge a direct HTTP mutation.
 - **FR-11:** The pipeline MUST persist trigger `workflow_dispatch`, initiating actor, exact SHA, workflow revision, and normalized input map before dispatch.
 - **FR-12:** A caller-supplied opaque request ID MUST make duplicate submission idempotent. Reusing it with another repository, workflow, SHA, or input map MUST return a conflict.
 - **FR-13:** `robine run` MAY accept repeated `--input name=value` flags, MUST validate them against the same declaration, and MUST reject undeclared, duplicate, or missing required values.

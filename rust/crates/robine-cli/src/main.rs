@@ -733,7 +733,11 @@ mod tests {
         assert!(preview.contains("run: mix test"));
         assert!(!root.join(DEFAULT_WORKFLOW).exists());
         initialize(&["--yes".into()], &root).expect("write workflow");
-        assert!(fs::read_to_string(root.join(DEFAULT_WORKFLOW)).unwrap().contains("mix deps.get"));
+        assert!(
+            fs::read_to_string(root.join(DEFAULT_WORKFLOW))
+                .unwrap()
+                .contains("mix deps.get")
+        );
         assert_eq!(initialize(&["--yes".into()], &root).unwrap_err().0, 4);
         fs::remove_dir_all(root).expect("cleanup repository");
 

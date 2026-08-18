@@ -30,7 +30,7 @@ The light and dark daisyUI themes are the palette implementations. New product c
 - Tables use real `table`, `thead`, `th`, and `tbody` semantics. Horizontal overflow belongs to a labelled surrounding region when content exceeds the viewport.
 - Empty states name the missing resource and provide the next available action. Loading, disconnected, degraded, and retrying states use plain language and never expose internal exception terms.
 
-`ui_state/1` is the state boundary for empty, loading, degraded, and error content. Empty means a successful read with no records. Error means the requested local data could not be read. Degraded means an optional external capability failed while durable local behavior remains usable. Loading sets `aria-busy`; LiveView navigation also toggles `aria-busy` on the main region and announces completion. The layout owns disconnected and server-error recovery notices so every LiveView receives the same reconnect behavior.
+Shared server-rendered state patterns are the boundary for empty, loading, degraded, and error content. Empty means a successful read with no records. Error means the requested local data could not be read. Degraded means an optional external capability failed while durable local behavior remains usable. Loading sets `aria-busy`; the local enhancement bundle announces refresh completion and connection loss. The common Actix shell owns disconnected and server-error recovery language so every live surface receives the same reconnect behavior.
 
 ## Accessibility baseline
 

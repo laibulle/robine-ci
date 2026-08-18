@@ -9,7 +9,7 @@
 
 ## Summary
 
-The Phoenix LiveView interface provides complete setup, repository, workflow, pipeline, job, and administration experiences. Its central interaction is a live, navigable execution view that makes failure location and local reproduction obvious.
+The Actix-rendered interface provides complete setup, repository, workflow, pipeline, job, and administration experiences. A local progressive-enhancement bundle consumes authenticated SSE cursors for live execution state while durable server-rendered pages remain navigable without JavaScript.
 
 ## Problem
 
@@ -68,7 +68,7 @@ A developer diagnosing a build and an operator configuring repositories, identit
 
 - **UX-1:** Core pages MUST meet WCAG 2.2 AA for keyboard navigation, focus, contrast, labels, and status not conveyed by color alone.
 - **UX-2:** Every empty, loading, disconnected, degraded, and error state MUST be explicitly designed.
-- **UX-3:** LiveView reconnects MUST restore the current view and request only missing log segments.
+- **UX-3:** SSE reconnects MUST restore the current view and request only missing log segments.
 - **UX-4:** Destructive or costly actions MUST use clear confirmations and prevent duplicate submission.
 - **UX-5:** The interface MUST be responsive down to a practical phone viewport, while desktop remains the primary log-analysis target.
 - **UX-6:** Active and recently failed pipelines MUST be elevated above ordinary history, while the remaining runs are grouped chronologically and remain available in a compact scan-friendly layout.
@@ -89,7 +89,7 @@ A developer diagnosing a build and an operator configuring repositories, identit
 
 - **OR-1:** Initial job pages MUST not load the full log into server or browser memory.
 - **OR-2:** Live log delivery MUST use sequence cursors and support reconnection without duplication.
-- **OR-3:** Server-rendered pages SHOULD expose meaningful content before LiveView connects.
+- **OR-3:** Server-rendered pages SHOULD expose meaningful content before the local enhancement bundle connects.
 - **OR-4:** Tailwind usage MUST follow a documented design-token layer rather than ad hoc colors and spacing.
 
 ## Proposed design
@@ -110,17 +110,17 @@ Administration uses five URL-addressable work areas: Overview, Runners, Source c
 
 The MVP graph representation is an accessible dependency-ordered list: every job names its prerequisites, durable status, latest runner phase, elapsed duration, and terminal reason. Pipeline metadata persists the source trigger, initiating actor, exact commit, execution start, and terminal finish. Runner-loss and system-failure reasons are elevated as infrastructure failures and are visually and textually distinct from repository command failures and timeouts. This list is the canonical accessible graph; a decorative node-edge rendering may be layered on later without replacing it.
 
-The log viewer stores neither all output in a LiveView socket nor all rendered nodes in the browser. It requests bounded segments by sequence cursor, appends live events, and offers server-side search. ANSI output is sanitized and rendered through a restricted parser. Authorized users can download the retained combined log or exact stdout/stderr streams as files; downloads use the same durable segments and retention policy as the live viewer.
+The log viewer stores neither all output in an HTTP/SSE handler nor all rendered nodes in the browser. It requests bounded segments by sequence cursor, appends live events, and offers server-side search. ANSI output is sanitized and rendered through a restricted parser. Authorized users can download the retained combined log or exact stdout/stderr streams as files; downloads use the same durable segments and retention policy as the live viewer.
 
 Every persisted log segment carries an explicit runner phase (`image_acquisition`, `service_preparation`, `execution`, or `cleanup`) in addition to its step position. The job page renders phase sections containing expandable step groups; both levels have stable anchors, and search preserves the phase context of every match.
 
-The log navigation performance fixture persists exactly 100,000,000 bytes and verifies that initial navigation renders at most 50 × 64 KB segments, produces less than 4 MB of HTML, and keeps the LiveView process below 30 MB. Automated semantic smoke checks cover setup, sign-in, navigation, history, and pipeline detail: one main landmark and page heading, unique IDs, named navigation and controls, labelled form fields, image alternatives, and textual status labels.
+The log navigation performance fixture persists exactly 100,000,000 bytes and verifies that initial navigation renders at most 50 × 64 KB segments and produces less than 4 MB of HTML. Automated semantic smoke checks cover setup, sign-in, navigation, history, and pipeline detail: one main landmark and page heading, unique IDs, named navigation and controls, labelled form fields, image alternatives, and textual status labels.
 
 ## Failure modes and recovery
 
 | Failure | Expected behavior | Recovery |
 |---|---|---|
-| LiveView disconnects | A connection banner appears; existing content remains readable | Reconnect and fetch events after last cursor |
+| SSE disconnects | A connection banner appears; existing content remains readable | Reconnect and fetch events after last cursor |
 | Log segment unavailable | Retention/availability message replaces silent blank output | Download available archive or rerun |
 | Retry inputs expired | Retry is blocked with named missing artifacts | Rerun dependencies or entire pipeline |
 | GitHub degraded | Local state remains visible with integration warning | Automatic integration recovery |
@@ -131,13 +131,13 @@ All pages enforce server-side authorization. Logs are treated as sensitive repos
 
 ## Observability
 
-Measure LiveView connection count, reconnect rate, page latency, log segment latency, client payload sizes, failed actions, and time from job failure to first log view.
+Measure SSE connection count, reconnect rate, page latency, log segment latency, client payload sizes, failed actions, and time from job failure to first log view.
 
 ## Acceptance criteria
 
 - [x] A user can complete all MVP administration through the UI.
 - [x] A running job updates without manual refresh and reconnects without duplicate log lines.
-- [x] A 100 MB test log can be navigated without loading 100 MB into a LiveView process or browser DOM.
+- [x] A 100 MB test log can be navigated without loading 100 MB into an Actix response or browser DOM.
 - [x] A failed step is apparent from the pipeline page and directly linkable.
 - [ ] All core journeys pass automated keyboard and accessibility checks, plus a manual screen-reader smoke test.
 - [x] Retry clearly handles present and expired dependency artifacts.
