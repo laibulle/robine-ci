@@ -8,8 +8,8 @@ use crate::{
     pipelines::{
         AttemptProjection, DurableJobClaim, ExecutionLogChunk, LocalExecutionWork, NewPipeline,
         OutboxDelivery, PipelineProjection, RecordAttemptEvent, RecordRemoteAttemptEvent,
-        RetryProjection,
-        RunnerAuthenticationMaterial, RunnerLeaseHeartbeat, RunnerResume, SchedulerClaim,
+        RetryProjection, RunnerAuthenticationMaterial, RunnerLeaseHeartbeat, RunnerResume,
+        SchedulerClaim,
     },
 };
 

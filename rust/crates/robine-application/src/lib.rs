@@ -16,14 +16,17 @@ use robine_core::{
     execution_context::{Actor, ActorKind, Capability, ExecutionContext},
     identity::{OidcAuthorization, Role, User},
     pipelines::{
-        AttemptProjection, CreatePipelineInput, JobState, NewJob, NewPipeline, NewWorkflowRevision,
-        OutboxDelivery, PipelineProjection, RecordAttemptEvent, RecordRemoteAttemptEvent,
-        RetryProjection, RunnerLeaseHeartbeat, RunnerReconciliation, SchedulerClaim,
-        outbox_backoff_seconds, source_digest,
+        AttemptProjection, CreatePipelineInput, ExecutionLogChunk, JobState, NewJob, NewPipeline,
+        NewWorkflowRevision, OutboxDelivery, PipelineProjection, RecordAttemptEvent,
+        RecordRemoteAttemptEvent, RetryProjection, RunnerLeaseHeartbeat, RunnerReconciliation,
+        SchedulerClaim, outbox_backoff_seconds, source_digest,
     },
     ports::{IdentityRepository, OidcProvider, PipelineRepository, PortError},
 };
-use robine_execution::{ExecutionResult, ExecutionRunner, ExecutionSpecification, ExecutionStatus};
+use robine_execution::{
+    CancellationSignal, ExecutionControl, ExecutionError, ExecutionResult, ExecutionRunner,
+    ExecutionSpecification, ExecutionStatus, OutputChannel, OutputChunk, OutputSink,
+};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
@@ -50,6 +53,57 @@ pub struct ControlPlane {
 struct BootstrapConfig {
     token_digest: [u8; 32],
     expires_at: chrono::DateTime<Utc>,
+}
+
+struct DurableOutputSink {
+    pipelines: Arc<dyn PipelineRepository>,
+    tenant_id: String,
+    attempt_id: Uuid,
+}
+
+#[async_trait::async_trait]
+impl OutputSink for DurableOutputSink {
+    async fn append(&self, chunk: OutputChunk) -> Result<(), ExecutionError> {
+        self.pipelines
+            .append_execution_log(
+                &self.tenant_id,
+                &ExecutionLogChunk {
+                    id: Uuid::new_v4(),
+                    attempt_id: self.attempt_id,
+                    sequence: i64::try_from(chunk.sequence).map_err(|_| ExecutionError::Output)?,
+                    step_position: i32::try_from(chunk.step).map_err(|_| ExecutionError::Output)?,
+                    step_name: chunk.step_name,
+                    stream: match chunk.channel {
+                        OutputChannel::Stdout => "stdout",
+                        OutputChannel::Stderr => "stderr",
+                        OutputChannel::System => "system",
+                    }
+                    .into(),
+                    content: chunk.bytes,
+                    inserted_at: Utc::now(),
+                },
+            )
+            .await
+            .map_err(|_| ExecutionError::Output)
+    }
+}
+
+struct DurableCancellationSignal {
+    pipelines: Arc<dyn PipelineRepository>,
+    tenant_id: String,
+    idempotency_token: Uuid,
+}
+
+#[async_trait::async_trait]
+impl CancellationSignal for DurableCancellationSignal {
+    async fn requested(&self) -> Result<bool, ExecutionError> {
+        self.pipelines
+            .cancellation_requested(&self.tenant_id, self.idempotency_token)
+            .await
+            .map_err(|_| ExecutionError::Unavailable {
+                phase: "cancellation_poll",
+            })
+    }
 }
 
 #[derive(Debug, Error)]
@@ -1090,78 +1144,111 @@ impl ControlPlane {
             .map_err(|_| ApplicationError::Unavailable)?;
         let mut batch = ExecutionBatch::default();
         for tenant_id in tenants {
-            let claim_token = Uuid::new_v4();
-            let now = Utc::now();
-            let Some(job) = self
-                .pipelines
-                .claim_next_execution_job(
-                    &tenant_id,
-                    claim_token,
-                    now,
-                    now - chrono::Duration::minutes(5),
-                )
-                .await
-                .map_err(|_| ApplicationError::Unavailable)?
-            else {
-                continue;
-            };
-            batch.claimed += 1;
-            let work = self
-                .pipelines
-                .local_execution_work(&tenant_id, job.source_event_id)
-                .await
-                .map_err(|_| ApplicationError::Unavailable)?;
-            if matches!(
-                work.attempt.status.as_str(),
-                "succeeded" | "failed" | "cancelled"
-            ) {
-                self.pipelines
-                    .complete_durable_job(&tenant_id, job.id, job.claim_token, Utc::now())
-                    .await
-                    .map_err(|_| ApplicationError::Unavailable)?;
-                batch.recovered_terminal += 1;
-                continue;
-            }
-            let attempt = self.prepare_local_attempt(&tenant_id, work.attempt).await?;
-            let result = if attempt.status == "cancelling" {
-                Ok(ExecutionResult {
-                    status: ExecutionStatus::Cancelled,
-                    exit_code: None,
-                })
-            } else {
-                match serde_json::from_value::<ExecutionSpecification>(work.specification) {
-                    Ok(specification) => runner.run(&specification).await,
-                    Err(_) => Err(robine_execution::ExecutionError::InvalidSpecification(
-                        "persisted execution",
-                    )),
-                }
-            };
-            let (terminal_status, reason, succeeded) = execution_outcome(&result);
-            self.pipelines
-                .record_attempt_event(
-                    &tenant_id,
-                    Uuid::new_v4(),
-                    &RecordAttemptEvent {
-                        idempotency_token: attempt.idempotency_token,
-                        sequence: attempt.last_sequence + 1,
-                        status: terminal_status.into(),
-                        reason: reason.map(str::to_owned),
-                    },
-                    Utc::now(),
-                )
-                .await
-                .map_err(|_| ApplicationError::Unavailable)?;
-            self.pipelines
-                .complete_durable_job(&tenant_id, job.id, job.claim_token, Utc::now())
-                .await
-                .map_err(|_| ApplicationError::Unavailable)?;
-            if succeeded {
-                batch.succeeded += 1;
-            } else {
-                batch.failed += 1;
-            }
+            let tenant_batch = self
+                .process_tenant_execution(&tenant_id, runner.as_ref())
+                .await?;
+            merge_execution_batch(&mut batch, &tenant_batch);
         }
         Ok(batch)
+    }
+
+    async fn process_tenant_execution(
+        &self,
+        tenant_id: &str,
+        runner: &dyn ExecutionRunner,
+    ) -> Result<ExecutionBatch, ApplicationError> {
+        let now = Utc::now();
+        let Some(job) = self
+            .pipelines
+            .claim_next_execution_job(
+                tenant_id,
+                Uuid::new_v4(),
+                now,
+                now - chrono::Duration::minutes(5),
+            )
+            .await
+            .map_err(|_| ApplicationError::Unavailable)?
+        else {
+            return Ok(ExecutionBatch::default());
+        };
+        let work = self
+            .pipelines
+            .local_execution_work(tenant_id, job.source_event_id)
+            .await
+            .map_err(|_| ApplicationError::Unavailable)?;
+        if matches!(
+            work.attempt.status.as_str(),
+            "succeeded" | "failed" | "cancelled"
+        ) {
+            self.pipelines
+                .complete_durable_job(tenant_id, job.id, job.claim_token, Utc::now())
+                .await
+                .map_err(|_| ApplicationError::Unavailable)?;
+            return Ok(ExecutionBatch {
+                claimed: 1,
+                recovered_terminal: 1,
+                ..ExecutionBatch::default()
+            });
+        }
+        let attempt = self.prepare_local_attempt(tenant_id, work.attempt).await?;
+        let output = DurableOutputSink {
+            pipelines: self.pipelines.clone(),
+            tenant_id: tenant_id.into(),
+            attempt_id: attempt.id,
+        };
+        let cancellation = DurableCancellationSignal {
+            pipelines: self.pipelines.clone(),
+            tenant_id: tenant_id.into(),
+            idempotency_token: attempt.idempotency_token,
+        };
+        let result = if attempt.status == "cancelling" {
+            Ok(ExecutionResult {
+                status: ExecutionStatus::Cancelled,
+                exit_code: None,
+            })
+        } else {
+            match serde_json::from_value::<ExecutionSpecification>(work.specification) {
+                Ok(specification) => {
+                    runner
+                        .run(
+                            &specification,
+                            ExecutionControl {
+                                output: &output,
+                                cancellation: &cancellation,
+                                last_sequence: u64::try_from(work.last_log_sequence)
+                                    .map_err(|_| ApplicationError::Unavailable)?,
+                            },
+                        )
+                        .await
+                }
+                Err(_) => Err(ExecutionError::InvalidSpecification("persisted execution")),
+            }
+        };
+        let (terminal_status, reason, succeeded) = execution_outcome(&result);
+        self.pipelines
+            .record_attempt_event(
+                tenant_id,
+                Uuid::new_v4(),
+                &RecordAttemptEvent {
+                    idempotency_token: attempt.idempotency_token,
+                    sequence: attempt.last_sequence + 1,
+                    status: terminal_status.into(),
+                    reason: reason.map(str::to_owned),
+                },
+                Utc::now(),
+            )
+            .await
+            .map_err(|_| ApplicationError::Unavailable)?;
+        self.pipelines
+            .complete_durable_job(tenant_id, job.id, job.claim_token, Utc::now())
+            .await
+            .map_err(|_| ApplicationError::Unavailable)?;
+        Ok(ExecutionBatch {
+            claimed: 1,
+            succeeded: u64::from(succeeded),
+            failed: u64::from(!succeeded),
+            recovered_terminal: 0,
+        })
     }
 
     async fn prepare_local_attempt(
@@ -1279,6 +1366,13 @@ fn execution_outcome(
         }) => ("cancelled", Some("cancelled"), false),
         Err(_) => ("failed", Some("system_failure"), false),
     }
+}
+
+fn merge_execution_batch(total: &mut ExecutionBatch, batch: &ExecutionBatch) {
+    total.claimed += batch.claimed;
+    total.succeeded += batch.succeeded;
+    total.failed += batch.failed;
+    total.recovered_terminal += batch.recovered_terminal;
 }
 
 fn authentication_error(error: &PortError) -> ApplicationError {

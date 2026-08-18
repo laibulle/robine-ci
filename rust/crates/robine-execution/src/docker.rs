@@ -128,6 +128,11 @@ impl DockerCli {
         .await
     }
 
+    /// Runs with a durable output sink and cancellation projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns validation, Docker, output persistence, or cancellation polling errors.
     pub async fn run_controlled(
         &self,
         specification: &ExecutionSpecification,
@@ -270,8 +275,8 @@ impl DockerCli {
         })?;
         let mut stdout_open = true;
         let mut stderr_open = true;
-        let mut stdout_buffer = [0_u8; 16_384];
-        let mut stderr_buffer = [0_u8; 16_384];
+        let mut stdout_buffer = vec![0_u8; 16_384];
+        let mut stderr_buffer = vec![0_u8; 16_384];
         let mut cancellation = tokio::time::interval(std::time::Duration::from_millis(250));
         while stdout_open || stderr_open {
             tokio::select! {
@@ -298,9 +303,12 @@ impl DockerCli {
                 }
             }
         }
-        let status = child.wait().await.map_err(|_| ExecutionError::Unavailable {
-            phase: "step_execute",
-        })?;
+        let status = child
+            .wait()
+            .await
+            .map_err(|_| ExecutionError::Unavailable {
+                phase: "step_execute",
+            })?;
         Ok(ExecutionResult {
             status: if status.success() {
                 ExecutionStatus::Succeeded
@@ -466,7 +474,29 @@ mod tests {
     use super::*;
     use crate::ExecutionStep;
     use std::collections::BTreeMap;
+    use std::sync::Mutex;
     use uuid::Uuid;
+
+    #[derive(Default)]
+    struct RecordingControl {
+        chunks: Mutex<Vec<OutputChunk>>,
+        cancel: bool,
+    }
+
+    #[async_trait]
+    impl OutputSink for RecordingControl {
+        async fn append(&self, chunk: OutputChunk) -> Result<(), ExecutionError> {
+            self.chunks.lock().expect("output lock").push(chunk);
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl CancellationSignal for RecordingControl {
+        async fn requested(&self) -> Result<bool, ExecutionError> {
+            Ok(self.cancel)
+        }
+    }
 
     #[test]
     fn container_creation_is_labeled_bounded_and_hardened() {
@@ -531,7 +561,8 @@ mod tests {
             ExecutionStep {
                 name: "write".into(),
                 kind: StepKind::Run,
-                value: "printf shared > continuity".into(),
+                value: "printf shared > continuity; printf first-output; printf first-error >&2"
+                    .into(),
                 condition: StepCondition::Success,
                 with: BTreeMap::new(),
             },
@@ -547,8 +578,37 @@ mod tests {
             instance: format!("rust-test-{}", specification.attempt_id),
             ..DockerConfig::default()
         });
-        let result = runner.run(&specification).await.expect("Docker execution");
+        let control = RecordingControl::default();
+        let result = runner
+            .run_controlled(
+                &specification,
+                ExecutionControl {
+                    output: &control,
+                    cancellation: &control,
+                    last_sequence: 40,
+                },
+            )
+            .await
+            .expect("Docker execution");
         assert_eq!(result.status, ExecutionStatus::Succeeded);
+        let chunks = control.chunks.lock().expect("output lock").clone();
+        assert!(
+            chunks
+                .iter()
+                .any(|chunk| chunk.channel == OutputChannel::Stdout)
+        );
+        assert!(
+            chunks
+                .iter()
+                .any(|chunk| chunk.channel == OutputChannel::Stderr)
+        );
+        assert_eq!(chunks.first().expect("first chunk").sequence, 41);
+        assert!(
+            chunks
+                .windows(2)
+                .all(|pair| pair[1].sequence == pair[0].sequence + 1)
+        );
+        assert!(chunks.iter().all(|chunk| chunk.bytes.len() <= 16_384));
         let container = format!("robine-job-{}", specification.attempt_id.simple());
         let volume = format!("robine-workspace-{}", specification.attempt_id.simple());
         assert!(
@@ -567,5 +627,50 @@ mod tests {
                 .status
                 .success()
         );
+    }
+
+    #[tokio::test]
+    async fn cancellation_stops_the_active_container_when_enabled() {
+        if std::env::var_os("ROBINE_DOCKER_INTEGRATION").is_none() {
+            return;
+        }
+        let specification = ExecutionSpecification {
+            attempt_id: Uuid::new_v4(),
+            image: "alpine:3.22".into(),
+            workspace: "/workspace".into(),
+            shell: "/bin/sh".into(),
+            timeout_ms: 30_000,
+            env: BTreeMap::new(),
+            build_env: BTreeMap::new(),
+            steps: vec![ExecutionStep {
+                name: "wait".into(),
+                kind: StepKind::Run,
+                value: "sleep 30".into(),
+                condition: StepCondition::Success,
+                with: BTreeMap::new(),
+            }],
+        };
+        let runner = DockerCli::new(DockerConfig {
+            instance: format!("rust-test-{}", specification.attempt_id),
+            ..DockerConfig::default()
+        });
+        let control = RecordingControl {
+            cancel: true,
+            ..RecordingControl::default()
+        };
+        let started = std::time::Instant::now();
+        let result = runner
+            .run_controlled(
+                &specification,
+                ExecutionControl {
+                    output: &control,
+                    cancellation: &control,
+                    last_sequence: 0,
+                },
+            )
+            .await
+            .expect("cancel Docker execution");
+        assert_eq!(result.status, ExecutionStatus::Cancelled);
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
     }
 }

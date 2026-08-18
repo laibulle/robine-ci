@@ -53,7 +53,31 @@ pub struct ExecutionSpecification {
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub build_env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub services: Vec<ServiceSpecification>,
     pub steps: Vec<ExecutionStep>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ServiceSpecification {
+    pub id: String,
+    pub image: String,
+    #[serde(default)]
+    pub user: Option<String>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub command: Vec<String>,
+    #[serde(default)]
+    pub readiness: Option<ServiceReadiness>,
+    #[serde(default)]
+    pub privileged: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ServiceReadiness {
+    pub tcp: u16,
+    pub timeout_ms: u64,
 }
 
 fn default_workspace() -> String {
@@ -177,6 +201,28 @@ impl ExecutionSpecification {
         if self.steps.iter().any(|step| step.kind == StepKind::Builtin) {
             return Err(ExecutionError::Unsupported("builtin step"));
         }
+        for service in &self.services {
+            if service.id.is_empty()
+                || !service
+                    .id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+                || service.image.is_empty()
+                || service
+                    .readiness
+                    .as_ref()
+                    .is_some_and(|readiness| readiness.tcp == 0 || readiness.timeout_ms == 0)
+            {
+                return Err(ExecutionError::InvalidSpecification("service"));
+            }
+            if service.privileged
+                && (service.id != "docker"
+                    || !service.image.starts_with("docker:")
+                    || !service.image.contains("dind"))
+            {
+                return Err(ExecutionError::InvalidSpecification("privileged service"));
+            }
+        }
         Ok(())
     }
 }
@@ -195,6 +241,7 @@ mod tests {
             timeout_ms: 1_000,
             env: BTreeMap::from([("ROBINE_BUILD_COMMIT_SHA".into(), "forged".into())]),
             build_env: BTreeMap::from([("ROBINE_BUILD_COMMIT_SHA".into(), "real".into())]),
+            services: Vec::new(),
             steps: vec![ExecutionStep {
                 name: "test".into(),
                 kind: StepKind::Run,

@@ -1780,9 +1780,42 @@ async fn sql_outbox_claims_once_enqueues_dispatch_and_dead_letters_bounded_failu
         .await
         .expect("load local execution work");
     assert_eq!(execution_work.attempt.id, attempt.id);
+    assert_eq!(execution_work.last_log_sequence, 0);
     assert_eq!(
         execution_work.specification["attempt_id"],
         attempt.id.to_string()
+    );
+    let log_chunk = robine_core::pipelines::ExecutionLogChunk {
+        id: Uuid::new_v4(),
+        attempt_id: attempt.id,
+        sequence: 1,
+        step_position: 0,
+        step_name: "test".into(),
+        stream: "stdout".into(),
+        content: b"\x1b[31mhello\x1b[0m".to_vec(),
+        inserted_at: process_at,
+    };
+    database
+        .append_execution_log(&tenant, &log_chunk)
+        .await
+        .expect("append execution output");
+    database
+        .append_execution_log(&tenant, &log_chunk)
+        .await
+        .expect("idempotent execution output replay");
+    assert_eq!(
+        database
+            .local_execution_work(&tenant, attempt.id)
+            .await
+            .expect("reload execution cursor")
+            .last_log_sequence,
+        1
+    );
+    assert!(
+        !database
+            .cancellation_requested(&tenant, attempt.idempotency_token)
+            .await
+            .expect("read cancellation projection")
     );
     for (sequence, status, reason) in [
         (1, "preparing", None),
@@ -1893,6 +1926,13 @@ async fn sql_outbox_claims_once_enqueues_dispatch_and_dead_letters_bounded_failu
     .fetch_one(&mut *verification)
     .await
     .expect("read completed execution handoff");
+    let stored_log = sqlx::query_as::<_, (i64, String, String)>(
+        "SELECT COUNT(*), MIN(stream), MIN(content) FROM log_chunks WHERE attempt_id = $1",
+    )
+    .bind(attempt.id)
+    .fetch_one(&mut *verification)
+    .await
+    .expect("read durable execution output");
     let dead_lettered = sqlx::query_scalar::<_, bool>(
         "SELECT dead_lettered_at IS NOT NULL FROM outbox_events WHERE id = $1",
     )
@@ -1922,5 +1962,6 @@ async fn sql_outbox_claims_once_enqueues_dispatch_and_dead_letters_bounded_failu
     assert_eq!(dispatch_status, "completed");
     assert_eq!(execution_count, 1);
     assert_eq!(execution_status, "completed");
+    assert_eq!(stored_log, (1, "stdout".into(), "hello".into()));
     assert!(dead_lettered);
 }

@@ -1110,6 +1110,22 @@ mod tests {
             Err(PortError::NotFound)
         }
 
+        async fn append_execution_log(
+            &self,
+            _tenant_id: &str,
+            _chunk: &robine_core::pipelines::ExecutionLogChunk,
+        ) -> Result<(), PortError> {
+            Ok(())
+        }
+
+        async fn cancellation_requested(
+            &self,
+            _tenant_id: &str,
+            _idempotency_token: Uuid,
+        ) -> Result<bool, PortError> {
+            Ok(false)
+        }
+
         async fn complete_durable_job(
             &self,
             _tenant_id: &str,
