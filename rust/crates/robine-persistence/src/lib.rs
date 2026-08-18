@@ -10,7 +10,8 @@ use robine_core::{
         JobState, LocalExecutionWork, NewPipeline, OutboxDelivery, PipelineEvent,
         PipelineProjection, PipelineState, RecordAttemptEvent, RecordRemoteAttemptEvent,
         RetryProjection, RunnerAuthenticationMaterial, RunnerLeaseHeartbeat, RunnerResume,
-        SchedulerClaim, UnknownPipelineState, outbox_backoff_seconds,
+        SchedulerClaim, StatusProjectionItem, StatusProjectionSnapshot, UnknownPipelineState,
+        outbox_backoff_seconds,
     },
     ports::{IdentityRepository, PipelineRepository, PortError},
 };
@@ -2814,6 +2815,7 @@ impl PipelineRepository for Database {
         execution_offer(&row)
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn process_next_outbox_event(
         &self,
         tenant_id: &str,
@@ -2893,6 +2895,21 @@ impl PipelineRepository for Database {
             .map_err(|_| PortError::Unavailable)?;
         }
         sqlx::query(
+            "INSERT INTO durable_jobs \
+             (id, source_event_id, kind, payload, status, attempts, available_at, \
+              inserted_at, updated_at, tenant_id) \
+             VALUES ($1, $2, 'project_status', $3, 'available', 0, $4, $4, $4, $5) \
+             ON CONFLICT (tenant_id, source_event_id, kind) DO NOTHING",
+        )
+        .bind(Uuid::new_v4())
+        .bind(event.id)
+        .bind(serde_json::json!({"pipeline_id": event.aggregate_id}))
+        .bind(now)
+        .bind(tenant_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| PortError::Unavailable)?;
+        sqlx::query(
             "UPDATE outbox_events SET delivered_at = $2, delivery_attempts = $3, \
              last_error = NULL WHERE id = $1 AND tenant_id = $4",
         )
@@ -2949,6 +2966,138 @@ impl PipelineRepository for Database {
             stale_before,
         )
         .await
+    }
+
+    async fn claim_next_status_projection_job(
+        &self,
+        tenant_id: &str,
+        claim_token: Uuid,
+        now: DateTime<Utc>,
+        stale_before: DateTime<Utc>,
+    ) -> Result<Option<DurableJobClaim>, PortError> {
+        claim_durable_job(
+            self,
+            tenant_id,
+            "project_status",
+            claim_token,
+            now,
+            stale_before,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn status_projection_snapshot(
+        &self,
+        tenant_id: &str,
+        pipeline_id: Uuid,
+    ) -> Result<StatusProjectionSnapshot, PortError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        let pipeline = sqlx::query_as::<_, ProjectionPipelineRow>(
+            "SELECT pipeline.repository_id, pipeline.workflow_name, pipeline.commit_sha, \
+                    pipeline.status, check.provider_check_id \
+             FROM pipelines AS pipeline \
+             LEFT JOIN github_checks AS check ON check.tenant_id = pipeline.tenant_id \
+               AND check.external_key = CONCAT('pipeline:', pipeline.id::text) \
+               AND check.provider = 'github' \
+             WHERE pipeline.id = $1 AND pipeline.tenant_id = $2",
+        )
+        .bind(pipeline_id)
+        .bind(tenant_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| PortError::Unavailable)?
+        .ok_or(PortError::NotFound)?;
+        let jobs = sqlx::query_as::<_, ProjectionJobRow>(
+            "SELECT job.id, job.job_key, job.status, check.provider_check_id \
+             FROM pipeline_jobs AS job \
+             LEFT JOIN github_checks AS check ON check.tenant_id = job.tenant_id \
+               AND check.external_key = CONCAT('job:', job.id::text) \
+               AND check.provider = 'github' \
+             WHERE job.pipeline_id = $1 AND job.tenant_id = $2 ORDER BY job.position, job.id",
+        )
+        .bind(pipeline_id)
+        .bind(tenant_id)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(|_| PortError::Unavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        let mut items = Vec::with_capacity(jobs.len() + 1);
+        items.push(StatusProjectionItem {
+            external_key: format!("pipeline:{pipeline_id}"),
+            repository_id: pipeline.repository_id,
+            pipeline_id,
+            job_id: None,
+            name: format!("Robine / {}", pipeline.workflow_name),
+            commit_sha: pipeline.commit_sha.clone(),
+            state: pipeline.status,
+            provider_check_id: pipeline.provider_check_id,
+        });
+        items.extend(jobs.into_iter().map(|job| StatusProjectionItem {
+            external_key: format!("job:{}", job.id),
+            repository_id: pipeline.repository_id,
+            pipeline_id,
+            job_id: Some(job.id),
+            name: format!("Robine / {}", job.job_key),
+            commit_sha: pipeline.commit_sha.clone(),
+            state: job.status,
+            provider_check_id: job.provider_check_id,
+        }));
+        Ok(StatusProjectionSnapshot {
+            repository_id: pipeline.repository_id,
+            items,
+        })
+    }
+
+    async fn record_status_projection(
+        &self,
+        tenant_id: &str,
+        item: &StatusProjectionItem,
+        provider: &str,
+        provider_instance: &str,
+        provider_check_id: i64,
+        status: &str,
+        conclusion: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<(), PortError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        sqlx::query(
+            "INSERT INTO github_checks \
+             (id, external_key, repository_id, pipeline_id, job_id, provider_check_id, \
+              status, conclusion, inserted_at, updated_at, provider, provider_instance, tenant_id) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10, $11, $12) \
+             ON CONFLICT (tenant_id, provider, provider_instance, external_key) DO UPDATE SET \
+               provider_check_id = EXCLUDED.provider_check_id, status = EXCLUDED.status, \
+               conclusion = EXCLUDED.conclusion, updated_at = EXCLUDED.updated_at",
+        )
+        .bind(Uuid::new_v4())
+        .bind(&item.external_key)
+        .bind(item.repository_id)
+        .bind(item.pipeline_id)
+        .bind(item.job_id)
+        .bind(provider_check_id)
+        .bind(status)
+        .bind(conclusion)
+        .bind(now)
+        .bind(provider)
+        .bind(provider_instance)
+        .bind(tenant_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| PortError::Unavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PortError::Unavailable)
     }
 
     async fn local_execution_work(
@@ -4451,6 +4600,23 @@ struct RemoteOfferRow {
     trigger: String,
     started_at: Option<NaiveDateTime>,
     inserted_at: NaiveDateTime,
+}
+
+#[derive(sqlx::FromRow)]
+struct ProjectionPipelineRow {
+    repository_id: Uuid,
+    workflow_name: String,
+    commit_sha: String,
+    status: String,
+    provider_check_id: Option<i64>,
+}
+
+#[derive(sqlx::FromRow)]
+struct ProjectionJobRow {
+    id: Uuid,
+    job_key: String,
+    status: String,
+    provider_check_id: Option<i64>,
 }
 
 #[derive(sqlx::FromRow)]

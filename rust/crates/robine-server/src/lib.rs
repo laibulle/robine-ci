@@ -4058,6 +4058,38 @@ mod tests {
             Ok(None)
         }
 
+        async fn claim_next_status_projection_job(
+            &self,
+            _tenant_id: &str,
+            _claim_token: Uuid,
+            _now: DateTime<Utc>,
+            _stale_before: DateTime<Utc>,
+        ) -> Result<Option<robine_core::pipelines::DurableJobClaim>, PortError> {
+            Ok(None)
+        }
+
+        async fn status_projection_snapshot(
+            &self,
+            _tenant_id: &str,
+            _pipeline_id: Uuid,
+        ) -> Result<robine_core::pipelines::StatusProjectionSnapshot, PortError> {
+            Err(PortError::NotFound)
+        }
+
+        async fn record_status_projection(
+            &self,
+            _tenant_id: &str,
+            _item: &robine_core::pipelines::StatusProjectionItem,
+            _provider: &str,
+            _provider_instance: &str,
+            _provider_check_id: i64,
+            _status: &str,
+            _conclusion: Option<&str>,
+            _now: DateTime<Utc>,
+        ) -> Result<(), PortError> {
+            Ok(())
+        }
+
         async fn local_execution_work(
             &self,
             _tenant_id: &str,

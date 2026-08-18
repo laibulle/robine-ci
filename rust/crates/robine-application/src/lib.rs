@@ -33,8 +33,8 @@ use robine_execution::{
 };
 use robine_secrets::{AesGcmKeyring, SecretDecryptor, SecretRepository};
 use robine_source::{
-    ArchiveFetcher, ArchiveLimits, Provider, RepositoryStore, SourceInspector, extract_tar_gz,
-    valid_commit_sha,
+    ArchiveFetcher, ArchiveLimits, Provider, RepositoryStore, SourceInspector, StatusProjection,
+    StatusProjector, extract_tar_gz, valid_commit_sha,
 };
 use robine_storage::{
     Artifact, BlobStore, CacheEntry, MetadataRepository, RetentionRepository, RetentionResult,
@@ -67,6 +67,7 @@ pub struct ControlPlane {
     source_repositories: Option<Arc<dyn RepositoryStore>>,
     source_fetcher: Option<Arc<dyn ArchiveFetcher>>,
     source_inspector: Option<Arc<dyn SourceInspector>>,
+    status_projector: Option<Arc<dyn StatusProjector>>,
     storage_repository: Option<Arc<dyn MetadataRepository>>,
     retention_repository: Option<Arc<dyn RetentionRepository>>,
     blob_store: Option<Arc<dyn BlobStore>>,
@@ -358,6 +359,20 @@ fn schedule_window(
     Some((start, scanned, truncated))
 }
 
+fn github_check_state(
+    state: &str,
+) -> Result<(&'static str, Option<&'static str>), ApplicationError> {
+    match state {
+        "created" | "blocked" | "queued" => Ok(("queued", None)),
+        "running" | "cancelling" => Ok(("in_progress", None)),
+        "succeeded" => Ok(("completed", Some("success"))),
+        "failed" | "invalid" => Ok(("completed", Some("failure"))),
+        "cancelled" => Ok(("completed", Some("cancelled"))),
+        "skipped" => Ok(("completed", Some("neutral"))),
+        _ => Err(ApplicationError::Unavailable),
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct RunnerEnrollment {
     pub id: Uuid,
@@ -403,6 +418,15 @@ pub struct ExecutionBatch {
     pub recovered_terminal: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize)]
+pub struct ProjectionBatch {
+    pub claimed: u64,
+    pub projected: u64,
+    pub skipped: u64,
+    pub retried: u64,
+    pub discarded: u64,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SourceControlBatch {
     pub claimed: u64,
@@ -444,6 +468,7 @@ impl ControlPlane {
             source_repositories: None,
             source_fetcher: None,
             source_inspector: None,
+            status_projector: None,
             storage_repository: None,
             retention_repository: None,
             blob_store: None,
@@ -488,6 +513,12 @@ impl ControlPlane {
     #[must_use]
     pub fn with_source_inspector(mut self, inspector: Arc<dyn SourceInspector>) -> Self {
         self.source_inspector = Some(inspector);
+        self
+    }
+
+    #[must_use]
+    pub fn with_status_projector(mut self, projector: Arc<dyn StatusProjector>) -> Self {
+        self.status_projector = Some(projector);
         self
     }
 
@@ -2791,6 +2822,167 @@ impl ControlPlane {
         Ok(total)
     }
 
+    /// Projects bounded durable pipeline state batches to GitHub Checks for every tenant.
+    ///
+    /// # Errors
+    ///
+    /// Returns unavailable when tenant discovery or durable job state cannot be advanced.
+    pub async fn process_all_tenant_status_projections(
+        &self,
+        per_tenant_limit: usize,
+    ) -> Result<ProjectionBatch, ApplicationError> {
+        let tenants = self
+            .pipelines
+            .list_tenants()
+            .await
+            .map_err(|_| ApplicationError::Unavailable)?;
+        let mut total = ProjectionBatch::default();
+        for tenant in tenants {
+            let batch = self
+                .process_status_projection_batch(&tenant, per_tenant_limit)
+                .await?;
+            total.claimed += batch.claimed;
+            total.projected += batch.projected;
+            total.skipped += batch.skipped;
+            total.retried += batch.retried;
+            total.discarded += batch.discarded;
+        }
+        Ok(total)
+    }
+
+    /// Projects one tenant's bounded durable status batch.
+    ///
+    /// # Errors
+    ///
+    /// Returns unavailable when claiming, projecting, or retry persistence fails.
+    pub async fn process_status_projection_batch(
+        &self,
+        tenant_id: &str,
+        limit: usize,
+    ) -> Result<ProjectionBatch, ApplicationError> {
+        let mut batch = ProjectionBatch::default();
+        for _ in 0..limit.clamp(1, 100) {
+            let now = Utc::now();
+            let Some(job) = self
+                .pipelines
+                .claim_next_status_projection_job(
+                    tenant_id,
+                    Uuid::new_v4(),
+                    now,
+                    now - Duration::minutes(5),
+                )
+                .await
+                .map_err(|_| ApplicationError::Unavailable)?
+            else {
+                break;
+            };
+            batch.claimed += 1;
+            match self.process_status_projection_job(tenant_id, &job).await {
+                Ok(true) => batch.projected += 1,
+                Ok(false) => batch.skipped += 1,
+                Err(error) => {
+                    let discard = job.attempt >= 10;
+                    self.pipelines
+                        .retry_durable_job(
+                            tenant_id,
+                            job.id,
+                            job.claim_token,
+                            now + Duration::seconds(outbox_backoff_seconds(job.attempt, job.id)),
+                            schedule_failure_code(&error),
+                            discard,
+                            Utc::now(),
+                        )
+                        .await
+                        .map_err(|_| ApplicationError::Unavailable)?;
+                    if discard {
+                        batch.discarded += 1;
+                    } else {
+                        batch.retried += 1;
+                    }
+                }
+            }
+        }
+        Ok(batch)
+    }
+
+    async fn process_status_projection_job(
+        &self,
+        tenant_id: &str,
+        job: &robine_core::pipelines::DurableJobClaim,
+    ) -> Result<bool, ApplicationError> {
+        let pipeline_id = job
+            .payload
+            .get("pipeline_id")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|value| Uuid::parse_str(value).ok())
+            .ok_or(ApplicationError::Unavailable)?;
+        let snapshot = self
+            .pipelines
+            .status_projection_snapshot(tenant_id, pipeline_id)
+            .await
+            .map_err(|_| ApplicationError::Unavailable)?;
+        let repository = self
+            .source_repositories
+            .as_ref()
+            .ok_or(ApplicationError::Unavailable)?
+            .find_trusted(tenant_id, snapshot.repository_id)
+            .await
+            .map_err(|_| ApplicationError::Unavailable)?;
+        if repository.provider != Provider::GitHub {
+            self.complete_projection_job(tenant_id, job).await?;
+            return Ok(false);
+        }
+        let projector = self
+            .status_projector
+            .as_ref()
+            .ok_or(ApplicationError::Unavailable)?;
+        for item in &snapshot.items {
+            let (status, conclusion) = github_check_state(&item.state)?;
+            let projection = StatusProjection {
+                external_key: item.external_key.clone(),
+                name: item.name.clone(),
+                head_sha: item.commit_sha.clone(),
+                status: status.into(),
+                conclusion: conclusion.map(str::to_owned),
+                details_path: item.job_id.map_or_else(
+                    || format!("/pipelines/{}", item.pipeline_id),
+                    |job_id| format!("/pipelines/{}/jobs/{job_id}", item.pipeline_id),
+                ),
+                provider_check_id: item.provider_check_id,
+            };
+            let provider_check_id = projector
+                .upsert_status(&repository, &projection)
+                .await
+                .map_err(|_| ApplicationError::Unavailable)?;
+            self.pipelines
+                .record_status_projection(
+                    tenant_id,
+                    item,
+                    "github",
+                    &repository.provider_instance,
+                    provider_check_id,
+                    status,
+                    conclusion,
+                    Utc::now(),
+                )
+                .await
+                .map_err(|_| ApplicationError::Unavailable)?;
+        }
+        self.complete_projection_job(tenant_id, job).await?;
+        Ok(true)
+    }
+
+    async fn complete_projection_job(
+        &self,
+        tenant_id: &str,
+        job: &robine_core::pipelines::DurableJobClaim,
+    ) -> Result<(), ApplicationError> {
+        self.pipelines
+            .complete_durable_job(tenant_id, job.id, job.claim_token, Utc::now())
+            .await
+            .map_err(|_| ApplicationError::Unavailable)
+    }
+
     /// Reconciles local execution handoffs and consumes bounded durable scheduler work.
     ///
     /// # Errors
@@ -4288,6 +4480,32 @@ mod tests {
         assert_eq!(truncated, 561);
         assert!(schedule_window(Some(now), now).is_none());
         assert!(schedule_window(Some(now + Duration::minutes(1)), now).is_none());
+    }
+
+    #[test]
+    fn github_check_mapping_covers_every_durable_pipeline_and_job_state() {
+        assert_eq!(github_check_state("queued").unwrap(), ("queued", None));
+        assert_eq!(
+            github_check_state("running").unwrap(),
+            ("in_progress", None)
+        );
+        assert_eq!(
+            github_check_state("succeeded").unwrap(),
+            ("completed", Some("success"))
+        );
+        assert_eq!(
+            github_check_state("failed").unwrap(),
+            ("completed", Some("failure"))
+        );
+        assert_eq!(
+            github_check_state("cancelled").unwrap(),
+            ("completed", Some("cancelled"))
+        );
+        assert_eq!(
+            github_check_state("skipped").unwrap(),
+            ("completed", Some("neutral"))
+        );
+        assert!(github_check_state("unknown").is_err());
     }
 
     #[test]

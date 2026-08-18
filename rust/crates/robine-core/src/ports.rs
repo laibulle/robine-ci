@@ -11,6 +11,7 @@ use crate::{
         PipelineProjection, RecordAttemptEvent, RecordRemoteAttemptEvent, RetryProjection,
         RevokeRunner, RotateRunnerCredential, RunnerAuthenticationMaterial, RunnerFleetEntry,
         RunnerLeaseHeartbeat, RunnerResume, SchedulerClaim, SourceControlDelivery,
+        StatusProjectionItem, StatusProjectionSnapshot,
     },
 };
 
@@ -374,6 +375,33 @@ pub trait PipelineRepository: Send + Sync {
         now: DateTime<Utc>,
         stale_before: DateTime<Utc>,
     ) -> Result<Option<DurableJobClaim>, PortError>;
+
+    async fn claim_next_status_projection_job(
+        &self,
+        tenant_id: &str,
+        claim_token: Uuid,
+        now: DateTime<Utc>,
+        stale_before: DateTime<Utc>,
+    ) -> Result<Option<DurableJobClaim>, PortError>;
+
+    async fn status_projection_snapshot(
+        &self,
+        tenant_id: &str,
+        pipeline_id: Uuid,
+    ) -> Result<StatusProjectionSnapshot, PortError>;
+
+    #[allow(clippy::too_many_arguments)]
+    async fn record_status_projection(
+        &self,
+        tenant_id: &str,
+        item: &StatusProjectionItem,
+        provider: &str,
+        provider_instance: &str,
+        provider_check_id: i64,
+        status: &str,
+        conclusion: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<(), PortError>;
 
     async fn local_execution_work(
         &self,

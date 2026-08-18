@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicI64, Ordering},
+};
 
 use argon2::{
     Argon2,
@@ -21,7 +24,7 @@ use robine_persistence::{Database, PersistenceError, Readiness, storage_transiti
 use robine_secrets::{AesGcmKeyring, SecretRepository};
 use robine_source::{
     ArchiveFetcher, ArchiveLimits, BranchHead, Provider, Repository, RepositoryStore, SourceError,
-    SourceFile, SourceInspector, create_source_tar_gz,
+    SourceFile, SourceInspector, StatusProjection, StatusProjector, create_source_tar_gz,
 };
 use robine_storage::{
     Artifact, BlobStore, CacheEntry, LocalBlobStore, MetadataRepository, StorageError,
@@ -37,6 +40,20 @@ use uuid::Uuid;
 struct FakeOidc(OidcClaims);
 
 struct WorkflowArchive(Vec<u8>);
+
+#[derive(Default)]
+struct RecordingStatusProjector(AtomicI64);
+
+#[async_trait]
+impl StatusProjector for RecordingStatusProjector {
+    async fn upsert_status(
+        &self,
+        _repository: &Repository,
+        _projection: &StatusProjection,
+    ) -> Result<i64, SourceError> {
+        Ok(self.0.fetch_add(1, Ordering::SeqCst) + 1)
+    }
+}
 
 #[tokio::test]
 async fn rust_bootstrap_creates_and_revalidates_a_fresh_database() {
@@ -346,7 +363,8 @@ async fn scheduled_reconciliation_is_exact_sha_durable_and_idempotent() {
     let source = Arc::new(WorkflowArchive(archive));
     let control_plane = ControlPlane::new(database.clone(), database.clone())
         .with_source_runtime(database.clone(), source.clone())
-        .with_source_inspector(source);
+        .with_source_inspector(source)
+        .with_status_projector(Arc::new(RecordingStatusProjector::default()));
     let first = control_plane
         .reconcile_scheduled_workflows(now)
         .await
@@ -396,6 +414,17 @@ async fn scheduled_reconciliation_is_exact_sha_durable_and_idempotent() {
         .await
         .expect("commit future verification");
 
+    let outbox = control_plane
+        .process_outbox_batch("standalone", 100)
+        .await
+        .expect("process pipeline outbox");
+    assert!(outbox.dispatch_enqueued >= 1);
+    let projected = control_plane
+        .process_status_projection_batch("standalone", 100)
+        .await
+        .expect("project GitHub checks");
+    assert!(projected.projected >= 1);
+
     let mut verification = database
         .tenant_transaction("standalone")
         .await
@@ -426,6 +455,24 @@ async fn scheduled_reconciliation_is_exact_sha_durable_and_idempotent() {
     .await
     .expect("schedule audit");
     assert_eq!(audit, 1);
+    let checks = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM github_checks WHERE pipeline_id = $1 AND provider = 'github'",
+    )
+    .bind(pipeline.0)
+    .fetch_one(&mut *verification)
+    .await
+    .expect("GitHub check count");
+    assert_eq!(checks, 2);
+    sqlx::query("DELETE FROM github_checks WHERE pipeline_id = $1")
+        .bind(pipeline.0)
+        .execute(&mut *verification)
+        .await
+        .expect("delete checks");
+    sqlx::query("DELETE FROM durable_jobs WHERE payload->>'pipeline_id' = $1")
+        .bind(pipeline.0.to_string())
+        .execute(&mut *verification)
+        .await
+        .expect("delete durable jobs");
     sqlx::query("DELETE FROM outbox_events WHERE aggregate_id = $1")
         .bind(pipeline.0)
         .execute(&mut *verification)

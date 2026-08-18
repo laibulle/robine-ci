@@ -728,6 +728,24 @@ pub struct DurableJobClaim {
     pub attempt: i32,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StatusProjectionItem {
+    pub external_key: String,
+    pub repository_id: Uuid,
+    pub pipeline_id: Uuid,
+    pub job_id: Option<Uuid>,
+    pub name: String,
+    pub commit_sha: String,
+    pub state: String,
+    pub provider_check_id: Option<i64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StatusProjectionSnapshot {
+    pub repository_id: Uuid,
+    pub items: Vec<StatusProjectionItem>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct LocalExecutionWork {
     pub attempt: AttemptProjection,

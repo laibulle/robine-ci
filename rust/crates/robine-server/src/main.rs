@@ -34,6 +34,8 @@ async fn main() -> io::Result<()> {
         .await
         .map_err(io::Error::other)?;
     let mut control_plane = ControlPlane::new(database.clone(), database.clone());
+    let public_url =
+        std::env::var("ROBINE_PUBLIC_URL").unwrap_or_else(|_| "http://localhost:4000".into());
     control_plane = control_plane.with_workflow_limits(robine_workflows::WorkflowLimits {
         max_bytes: environment_usize("ROBINE_WORKFLOW_MAX_BYTES", 262_144)?,
         max_jobs: environment_usize("ROBINE_WORKFLOW_MAX_JOBS", 64)?,
@@ -51,12 +53,14 @@ async fn main() -> io::Result<()> {
             std::env::var("GITLAB_TOKEN").ok(),
             std::env::var("FORGEJO_URL").ok(),
             std::env::var("FORGEJO_TOKEN").ok(),
+            &public_url,
         )
         .map_err(io::Error::other)?,
     );
     control_plane = control_plane
         .with_source_runtime(database.clone(), source_fetcher.clone())
-        .with_source_inspector(source_fetcher);
+        .with_source_inspector(source_fetcher.clone())
+        .with_status_projector(source_fetcher);
     let configured_storage_root =
         std::env::var("ROBINE_STORAGE_ROOT").unwrap_or_else(|_| "var/storage".into());
     let storage_path = std::path::PathBuf::from(configured_storage_root);
@@ -131,19 +135,15 @@ async fn main() -> io::Result<()> {
         std::env::var("OIDC_ISSUER"),
         std::env::var("OIDC_CLIENT_ID"),
         std::env::var("OIDC_CLIENT_SECRET"),
-    ) {
-        let public_url =
-            std::env::var("ROBINE_PUBLIC_URL").unwrap_or_else(|_| "http://localhost:4000".into());
-        if let Ok(provider) = OidcClient::discover(
-            &issuer,
-            client_id,
-            client_secret,
-            format!("{}/auth/oidc/callback", public_url.trim_end_matches('/')),
-        )
-        .await
-        {
-            control_plane = control_plane.with_oidc_provider(Arc::new(provider));
-        }
+    ) && let Ok(provider) = OidcClient::discover(
+        &issuer,
+        client_id,
+        client_secret,
+        format!("{}/auth/oidc/callback", public_url.trim_end_matches('/')),
+    )
+    .await
+    {
+        control_plane = control_plane.with_oidc_provider(Arc::new(provider));
     }
     let control_plane = Arc::new(control_plane);
     let webhook_configuration = WebhookConfiguration::new(
@@ -359,6 +359,7 @@ async fn run_outbox_worker(control_plane: Arc<ControlPlane>, mut shutdown: watch
         tokio::select! {
             _ = interval.tick() => {
                 let _ = control_plane.process_all_tenant_outboxes(25).await;
+                let _ = control_plane.process_all_tenant_status_projections(25).await;
                 let _ = control_plane.process_all_tenant_source_control(25).await;
                 let _ = control_plane.process_all_tenant_dispatches(25).await;
             }

@@ -94,11 +94,32 @@ pub trait SourceInspector: Send + Sync {
     ) -> Result<BranchHead, SourceError>;
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StatusProjection {
+    pub external_key: String,
+    pub name: String,
+    pub head_sha: String,
+    pub status: String,
+    pub conclusion: Option<String>,
+    pub details_path: String,
+    pub provider_check_id: Option<i64>,
+}
+
+#[async_trait]
+pub trait StatusProjector: Send + Sync {
+    async fn upsert_status(
+        &self,
+        repository: &Repository,
+        projection: &StatusProjection,
+    ) -> Result<i64, SourceError>;
+}
+
 pub struct HttpArchiveFetcher {
     client: Client,
     github_api_origin: String,
     github_app_id: Option<String>,
     github_private_key: Option<Zeroizing<String>>,
+    public_url: String,
     gitlab_origin: Option<String>,
     gitlab_token: Option<Zeroizing<String>>,
     forgejo_origin: Option<String>,
@@ -118,6 +139,7 @@ impl HttpArchiveFetcher {
         gitlab_token: Option<String>,
         forgejo_origin: Option<String>,
         forgejo_token: Option<String>,
+        public_url: &str,
     ) -> Result<Self, SourceError> {
         let client = Client::builder()
             .redirect(Policy::none())
@@ -131,6 +153,7 @@ impl HttpArchiveFetcher {
             github_api_origin: "https://api.github.com".into(),
             github_app_id,
             github_private_key: github_private_key.map(Zeroizing::new),
+            public_url: normalize_public_url(public_url)?,
             gitlab_origin: normalize_origin(gitlab_origin)?,
             gitlab_token: gitlab_token.map(Zeroizing::new),
             forgejo_origin: normalize_origin(forgejo_origin)?,
@@ -266,6 +289,108 @@ impl HttpArchiveFetcher {
         response
             .json()
             .await
+            .map_err(|_| SourceError::ProviderUnavailable)
+    }
+}
+
+#[derive(Deserialize)]
+struct GitHubCheckRuns {
+    check_runs: Vec<GitHubCheckRun>,
+}
+
+#[derive(Deserialize)]
+struct GitHubCheckRun {
+    id: i64,
+    external_id: Option<String>,
+}
+
+#[async_trait]
+impl StatusProjector for HttpArchiveFetcher {
+    async fn upsert_status(
+        &self,
+        repository: &Repository,
+        projection: &StatusProjection,
+    ) -> Result<i64, SourceError> {
+        if repository.provider != Provider::GitHub {
+            return Err(SourceError::ProviderUnavailable);
+        }
+        let token = self.github_token(repository.installation_id).await?;
+        let repository_path = format!(
+            "/repos/{}/{}",
+            segment(&repository.owner),
+            segment(&repository.name)
+        );
+        let mut provider_check_id = projection.provider_check_id;
+        if provider_check_id.is_none() {
+            let response = self
+                .client
+                .get(format!(
+                    "{}{repository_path}/commits/{}/check-runs?per_page=100",
+                    self.github_api_origin,
+                    segment(&projection.head_sha)
+                ))
+                .bearer_auth(&token)
+                .header("accept", "application/vnd.github+json")
+                .header("x-github-api-version", "2022-11-28")
+                .send()
+                .await
+                .map_err(|_| SourceError::ProviderUnavailable)?;
+            if !response.status().is_success() {
+                return Err(SourceError::ProviderUnavailable);
+            }
+            let checks = response
+                .json::<GitHubCheckRuns>()
+                .await
+                .map_err(|_| SourceError::ProviderUnavailable)?;
+            provider_check_id = checks
+                .check_runs
+                .into_iter()
+                .find(|check| check.external_id.as_deref() == Some(&projection.external_key))
+                .map(|check| check.id);
+        }
+        let mut body = serde_json::json!({
+            "name": projection.name,
+            "head_sha": projection.head_sha,
+            "external_id": projection.external_key,
+            "details_url": format!("{}{}", self.public_url, projection.details_path),
+            "status": projection.status,
+            "output": {
+                "title": projection.name,
+                "summary": "This check is projected from Robine's durable pipeline state."
+            }
+        });
+        if let Some(conclusion) = &projection.conclusion {
+            body["conclusion"] = serde_json::json!(conclusion);
+        }
+        let request = provider_check_id.map_or_else(
+            || {
+                self.client.post(format!(
+                    "{}{repository_path}/check-runs",
+                    self.github_api_origin
+                ))
+            },
+            |check_id| {
+                self.client.patch(format!(
+                    "{}{repository_path}/check-runs/{check_id}",
+                    self.github_api_origin
+                ))
+            },
+        );
+        let response = request
+            .bearer_auth(token)
+            .header("accept", "application/vnd.github+json")
+            .header("x-github-api-version", "2022-11-28")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|_| SourceError::ProviderUnavailable)?;
+        if !response.status().is_success() {
+            return Err(SourceError::ProviderUnavailable);
+        }
+        response
+            .json::<GitHubCheckRun>()
+            .await
+            .map(|check| check.id)
             .map_err(|_| SourceError::ProviderUnavailable)
     }
 }
@@ -560,6 +685,10 @@ fn normalize_origin(origin: Option<String>) -> Result<Option<String>, SourceErro
             Ok(origin.trim_end_matches('/').to_owned())
         })
         .transpose()
+}
+
+fn normalize_public_url(url: &str) -> Result<String, SourceError> {
+    normalize_origin(Some(url.to_owned()))?.ok_or(SourceError::ProviderUnavailable)
 }
 
 fn configured_provider<'a>(
