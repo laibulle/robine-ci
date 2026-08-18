@@ -57,6 +57,12 @@ pub struct AvailableRepository {
     pub private: bool,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct IntegrationActivity {
+    pub last_webhook_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub last_webhook_status: Option<String>,
+}
+
 #[async_trait]
 pub trait RepositoryStore: Send + Sync {
     async fn list_trusted(&self, tenant_id: &str) -> Result<Vec<Repository>, SourceError>;
@@ -83,6 +89,17 @@ pub trait RepositoryStore: Send + Sync {
     ) -> Result<Repository, SourceError> {
         Err(SourceError::RepositoryUnavailable)
     }
+
+    async fn integration_activity(
+        &self,
+        _tenant_id: &str,
+        _repository: &Repository,
+    ) -> Result<IntegrationActivity, SourceError> {
+        Ok(IntegrationActivity {
+            last_webhook_at: None,
+            last_webhook_status: None,
+        })
+    }
 }
 
 #[async_trait]
@@ -92,6 +109,41 @@ pub trait GitHubDiscovery: Send + Sync {
         &self,
         installation_id: i64,
     ) -> Result<GitHubPermissionHealth, SourceError>;
+    async fn api_health(&self) -> GitHubApiHealth;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct GitHubApiHealth {
+    pub configured: bool,
+    pub healthy: bool,
+    pub checked_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub operation: Option<String>,
+    pub outcome: Option<String>,
+    pub status_class: Option<u16>,
+    pub rate_limit_remaining: Option<i64>,
+    pub rate_limit_limit: Option<i64>,
+    pub rate_limit_reset: Option<i64>,
+    pub operations: Vec<GitHubOperationMetric>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct GitHubOperationMetric {
+    pub operation: String,
+    pub outcome: String,
+    pub requests: u64,
+    pub duration_ms: u64,
+}
+
+#[derive(Default)]
+struct GitHubApiMonitor {
+    checked_at: Option<chrono::DateTime<chrono::Utc>>,
+    operation: Option<&'static str>,
+    outcome: Option<&'static str>,
+    status_class: Option<u16>,
+    rate_limit_remaining: Option<i64>,
+    rate_limit_limit: Option<i64>,
+    rate_limit_reset: Option<i64>,
+    operations: std::collections::BTreeMap<(&'static str, &'static str), (u64, u64)>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -167,6 +219,7 @@ pub struct HttpArchiveFetcher {
     github_private_key: Option<Zeroizing<String>>,
     public_url: String,
     github_tokens: tokio::sync::Mutex<std::collections::HashMap<i64, CachedGitHubToken>>,
+    github_monitor: tokio::sync::Mutex<GitHubApiMonitor>,
     gitlab_origin: Option<String>,
     gitlab_token: Option<Zeroizing<String>>,
     forgejo_origin: Option<String>,
@@ -206,6 +259,7 @@ impl HttpArchiveFetcher {
             github_private_key: github_private_key.map(Zeroizing::new),
             public_url: normalize_public_url(public_url)?,
             github_tokens: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            github_monitor: tokio::sync::Mutex::new(GitHubApiMonitor::default()),
             gitlab_origin: normalize_origin(gitlab_origin)?,
             gitlab_token: gitlab_token.map(Zeroizing::new),
             forgejo_origin: normalize_origin(forgejo_origin)?,
@@ -240,17 +294,18 @@ impl HttpArchiveFetcher {
         }
         let jwt = self.github_app_jwt()?;
         let response = self
-            .client
-            .post(format!(
-                "{}/app/installations/{installation_id}/access_tokens",
-                self.github_api_origin
-            ))
-            .bearer_auth(jwt)
-            .header("accept", "application/vnd.github+json")
-            .header("x-github-api-version", "2022-11-28")
-            .send()
-            .await
-            .map_err(|_| SourceError::ProviderUnavailable)?;
+            .github_send(
+                "token",
+                self.client
+                    .post(format!(
+                        "{}/app/installations/{installation_id}/access_tokens",
+                        self.github_api_origin
+                    ))
+                    .bearer_auth(jwt)
+                    .header("accept", "application/vnd.github+json")
+                    .header("x-github-api-version", "2022-11-28"),
+            )
+            .await?;
         if !response.status().is_success() {
             return Err(SourceError::ProviderUnavailable);
         }
@@ -288,6 +343,73 @@ impl HttpArchiveFetcher {
             .map_err(|_| SourceError::ProviderUnavailable)?;
         encode(&Header::new(Algorithm::RS256), &claims, &key)
             .map_err(|_| SourceError::ProviderUnavailable)
+    }
+
+    async fn github_send(
+        &self,
+        operation: &'static str,
+        request: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, SourceError> {
+        let started = std::time::Instant::now();
+        if let Ok(response) = request.send().await {
+            self.record_github_response(operation, &response, started.elapsed())
+                .await;
+            Ok(response)
+        } else {
+            self.record_github_failure(operation, started.elapsed())
+                .await;
+            Err(SourceError::ProviderUnavailable)
+        }
+    }
+
+    async fn record_github_response(
+        &self,
+        operation: &'static str,
+        response: &reqwest::Response,
+        duration: std::time::Duration,
+    ) {
+        let outcome = if response.status().is_success() || response.status().is_redirection() {
+            "success"
+        } else if response.status().as_u16() == 403
+            && response
+                .headers()
+                .get("x-ratelimit-remaining")
+                .and_then(|value| value.to_str().ok())
+                == Some("0")
+        {
+            "rate_limited"
+        } else {
+            "error"
+        };
+        let mut monitor = self.github_monitor.lock().await;
+        monitor.checked_at = Some(chrono::Utc::now());
+        monitor.operation = Some(operation);
+        monitor.outcome = Some(outcome);
+        monitor.status_class = Some(response.status().as_u16() / 100);
+        monitor.rate_limit_remaining = numeric_header(response, "x-ratelimit-remaining");
+        monitor.rate_limit_limit = numeric_header(response, "x-ratelimit-limit");
+        monitor.rate_limit_reset = numeric_header(response, "x-ratelimit-reset");
+        let metric = monitor.operations.entry((operation, outcome)).or_default();
+        metric.0 = metric.0.saturating_add(1);
+        metric.1 = metric
+            .1
+            .saturating_add(u64::try_from(duration.as_millis()).unwrap_or(u64::MAX));
+    }
+
+    async fn record_github_failure(&self, operation: &'static str, duration: std::time::Duration) {
+        let mut monitor = self.github_monitor.lock().await;
+        monitor.checked_at = Some(chrono::Utc::now());
+        monitor.operation = Some(operation);
+        monitor.outcome = Some("unavailable");
+        monitor.status_class = None;
+        let metric = monitor
+            .operations
+            .entry((operation, "unavailable"))
+            .or_default();
+        metric.0 = metric.0.saturating_add(1);
+        metric.1 = metric
+            .1
+            .saturating_add(u64::try_from(duration.as_millis()).unwrap_or(u64::MAX));
     }
 
     async fn bounded_body(&self, mut response: reqwest::Response) -> Result<Vec<u8>, SourceError> {
@@ -344,19 +466,20 @@ impl HttpArchiveFetcher {
     ) -> Result<reqwest::Response, SourceError> {
         let token = self.github_token(repository.installation_id).await?;
         let response = self
-            .client
-            .get(format!(
-                "{}/repos/{}/{}/tarball/{commit_sha}",
-                self.github_api_origin,
-                segment(&repository.owner),
-                segment(&repository.name)
-            ))
-            .bearer_auth(token)
-            .header("accept", "application/vnd.github+json")
-            .header("x-github-api-version", "2022-11-28")
-            .send()
-            .await
-            .map_err(|_| SourceError::ProviderUnavailable)?;
+            .github_send(
+                "source",
+                self.client
+                    .get(format!(
+                        "{}/repos/{}/{}/tarball/{commit_sha}",
+                        self.github_api_origin,
+                        segment(&repository.owner),
+                        segment(&repository.name)
+                    ))
+                    .bearer_auth(token)
+                    .header("accept", "application/vnd.github+json")
+                    .header("x-github-api-version", "2022-11-28"),
+            )
+            .await?;
         if !response.status().is_redirection() {
             return Ok(response);
         }
@@ -387,14 +510,15 @@ impl HttpArchiveFetcher {
     ) -> Result<T, SourceError> {
         let token = self.github_token(repository.installation_id).await?;
         let response = self
-            .client
-            .get(format!("{}{path}", self.github_api_origin))
-            .bearer_auth(token)
-            .header("accept", "application/vnd.github+json")
-            .header("x-github-api-version", "2022-11-28")
-            .send()
-            .await
-            .map_err(|_| SourceError::ProviderUnavailable)?;
+            .github_send(
+                "source",
+                self.client
+                    .get(format!("{}{path}", self.github_api_origin))
+                    .bearer_auth(token)
+                    .header("accept", "application/vnd.github+json")
+                    .header("x-github-api-version", "2022-11-28"),
+            )
+            .await?;
         if !response.status().is_success() {
             return Err(SourceError::ProviderUnavailable);
         }
@@ -403,6 +527,16 @@ impl HttpArchiveFetcher {
             .await
             .map_err(|_| SourceError::ProviderUnavailable)
     }
+}
+
+fn numeric_header(response: &reqwest::Response, name: &str) -> Option<i64> {
+    response
+        .headers()
+        .get(name)?
+        .to_str()
+        .ok()?
+        .parse::<i64>()
+        .ok()
 }
 
 #[derive(Deserialize)]
@@ -447,15 +581,16 @@ impl GitHubDiscovery for HttpArchiveFetcher {
         let mut installations = Vec::new();
         for page in 1..=100 {
             let response = self
-                .client
-                .get(format!("{}/app/installations", self.github_api_origin))
-                .bearer_auth(&app_token)
-                .header("accept", "application/vnd.github+json")
-                .header("x-github-api-version", "2022-11-28")
-                .query(&[("per_page", 100), ("page", page)])
-                .send()
-                .await
-                .map_err(|_| SourceError::ProviderUnavailable)?;
+                .github_send(
+                    "discovery",
+                    self.client
+                        .get(format!("{}/app/installations", self.github_api_origin))
+                        .bearer_auth(&app_token)
+                        .header("accept", "application/vnd.github+json")
+                        .header("x-github-api-version", "2022-11-28")
+                        .query(&[("per_page", 100), ("page", page)]),
+                )
+                .await?;
             if !response.status().is_success() {
                 return Err(SourceError::ProviderUnavailable);
             }
@@ -480,18 +615,19 @@ impl GitHubDiscovery for HttpArchiveFetcher {
             let token = self.github_token(installation.id).await?;
             for page in 1..=100 {
                 let response = self
-                    .client
-                    .get(format!(
-                        "{}/installation/repositories",
-                        self.github_api_origin
-                    ))
-                    .bearer_auth(&token)
-                    .header("accept", "application/vnd.github+json")
-                    .header("x-github-api-version", "2022-11-28")
-                    .query(&[("per_page", 100), ("page", page)])
-                    .send()
-                    .await
-                    .map_err(|_| SourceError::ProviderUnavailable)?;
+                    .github_send(
+                        "discovery",
+                        self.client
+                            .get(format!(
+                                "{}/installation/repositories",
+                                self.github_api_origin
+                            ))
+                            .bearer_auth(&token)
+                            .header("accept", "application/vnd.github+json")
+                            .header("x-github-api-version", "2022-11-28")
+                            .query(&[("per_page", 100), ("page", page)]),
+                    )
+                    .await?;
                 if !response.status().is_success() {
                     return Err(SourceError::ProviderUnavailable);
                 }
@@ -539,6 +675,41 @@ impl GitHubDiscovery for HttpArchiveFetcher {
             .ok_or(SourceError::ProviderUnavailable)?
             .permissions;
         Ok(evaluate_github_permissions(permissions))
+    }
+
+    async fn api_health(&self) -> GitHubApiHealth {
+        let configured = self
+            .github_app_id
+            .as_deref()
+            .is_some_and(|value| !value.is_empty())
+            && self.github_private_key.is_some();
+        let monitor = self.github_monitor.lock().await;
+        let healthy = configured
+            && monitor.outcome == Some("success")
+            && monitor.rate_limit_remaining != Some(0);
+        GitHubApiHealth {
+            configured,
+            healthy,
+            checked_at: monitor.checked_at,
+            operation: monitor.operation.map(str::to_owned),
+            outcome: monitor.outcome.map(str::to_owned),
+            status_class: monitor.status_class,
+            rate_limit_remaining: monitor.rate_limit_remaining,
+            rate_limit_limit: monitor.rate_limit_limit,
+            rate_limit_reset: monitor.rate_limit_reset,
+            operations: monitor
+                .operations
+                .iter()
+                .map(
+                    |(&(operation, outcome), &(requests, duration_ms))| GitHubOperationMetric {
+                        operation: operation.into(),
+                        outcome: outcome.into(),
+                        requests,
+                        duration_ms,
+                    },
+                )
+                .collect(),
+        }
     }
 }
 
@@ -603,14 +774,15 @@ impl StatusProjector for HttpArchiveFetcher {
                     .append_pair("page", &page.to_string())
                     .append_pair("check_name", &projection.name);
                 let response = self
-                    .client
-                    .get(url)
-                    .bearer_auth(&token)
-                    .header("accept", "application/vnd.github+json")
-                    .header("x-github-api-version", "2022-11-28")
-                    .send()
-                    .await
-                    .map_err(|_| SourceError::ProviderUnavailable)?;
+                    .github_send(
+                        "checks",
+                        self.client
+                            .get(url)
+                            .bearer_auth(&token)
+                            .header("accept", "application/vnd.github+json")
+                            .header("x-github-api-version", "2022-11-28"),
+                    )
+                    .await?;
                 if !response.status().is_success() {
                     return Err(SourceError::ProviderUnavailable);
                 }
@@ -658,14 +830,16 @@ impl StatusProjector for HttpArchiveFetcher {
                 ))
             },
         );
-        let response = request
-            .bearer_auth(token)
-            .header("accept", "application/vnd.github+json")
-            .header("x-github-api-version", "2022-11-28")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|_| SourceError::ProviderUnavailable)?;
+        let response = self
+            .github_send(
+                "checks",
+                request
+                    .bearer_auth(token)
+                    .header("accept", "application/vnd.github+json")
+                    .header("x-github-api-version", "2022-11-28")
+                    .json(&body),
+            )
+            .await?;
         if !response.status().is_success() {
             return Err(SourceError::ProviderUnavailable);
         }
@@ -1374,19 +1548,32 @@ mod tests {
             .and(query_param("per_page", "100"))
             .and(query_param("page", "1"))
             .and(header("authorization", "Bearer test-token"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "repositories": [
-                    {"id": 2, "full_name": "Zulu/private", "private": true},
-                    {"id": 1, "full_name": "acme/public", "private": false}
-                ]
-            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("x-ratelimit-remaining", "4998")
+                    .insert_header("x-ratelimit-limit", "5000")
+                    .insert_header("x-ratelimit-reset", "1800000000")
+                    .set_body_json(serde_json::json!({
+                        "repositories": [
+                            {"id": 2, "full_name": "Zulu/private", "private": true},
+                            {"id": 1, "full_name": "acme/public", "private": false}
+                        ]
+                    })),
+            )
             .expect(1)
             .mount(&server)
             .await;
-        let client =
-            HttpArchiveFetcher::new(None, None, None, None, None, None, "http://localhost:4000")
-                .expect("client")
-                .with_github_test_endpoint(server.uri(), "test-token");
+        let client = HttpArchiveFetcher::new(
+            Some("1".into()),
+            Some("test-private-key".into()),
+            None,
+            None,
+            None,
+            None,
+            "http://localhost:4000",
+        )
+        .expect("client")
+        .with_github_test_endpoint(server.uri(), "test-token");
 
         let repositories = client.available_repositories().await.expect("discovery");
 
@@ -1394,6 +1581,14 @@ mod tests {
         assert_eq!(repositories[0].full_name, "acme/public");
         assert_eq!(repositories[0].installation_id, 9);
         assert!(repositories[1].private);
+        let health = client.api_health().await;
+        assert!(health.configured);
+        assert!(health.healthy);
+        assert_eq!(health.operation.as_deref(), Some("discovery"));
+        assert_eq!(health.outcome.as_deref(), Some("success"));
+        assert_eq!(health.rate_limit_remaining, Some(4_998));
+        assert_eq!(health.rate_limit_limit, Some(5_000));
+        assert_eq!(health.operations[0].requests, 2);
     }
 
     #[test]
@@ -1409,6 +1604,43 @@ mod tests {
         assert_eq!(health.permissions[3].name, "checks");
         assert_eq!(health.permissions[3].required, "write");
         assert!(!health.permissions[3].healthy);
+    }
+
+    #[tokio::test]
+    async fn github_health_distinguishes_rate_exhaustion_without_sensitive_dimensions() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/app/installations"))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .insert_header("x-ratelimit-remaining", "0")
+                    .insert_header("x-ratelimit-limit", "5000")
+                    .insert_header("x-ratelimit-reset", "1800000000"),
+            )
+            .mount(&server)
+            .await;
+        let client = HttpArchiveFetcher::new(
+            Some("1".into()),
+            Some("test-private-key".into()),
+            None,
+            None,
+            None,
+            None,
+            "http://localhost:4000",
+        )
+        .expect("client")
+        .with_github_test_endpoint(server.uri(), "test-token");
+
+        assert_eq!(
+            client.available_repositories().await,
+            Err(SourceError::ProviderUnavailable)
+        );
+        let health = client.api_health().await;
+        assert!(!health.healthy);
+        assert_eq!(health.outcome.as_deref(), Some("rate_limited"));
+        assert_eq!(health.status_class, Some(4));
+        assert_eq!(health.rate_limit_remaining, Some(0));
+        assert_eq!(health.operations[0].outcome, "rate_limited");
     }
 
     #[tokio::test]

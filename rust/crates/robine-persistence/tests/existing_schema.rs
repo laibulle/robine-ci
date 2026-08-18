@@ -124,6 +124,24 @@ async fn trusting_a_rediscovered_github_repository_is_idempotent_and_audited() {
 
     assert_eq!(first.id, second.id);
     assert_eq!(first.full_name, "acme/discovered");
+    let webhook_at = Utc::now();
+    sqlx::query(
+        "INSERT INTO github_deliveries \
+         (id, event, payload, status, received_at, processed_at, provider, provider_instance, provider_delivery_id, tenant_id) \
+         VALUES ($1, 'push', $2, 'processed', $3, $3, 'github', 'https://github.com', $1, $4)",
+    )
+    .bind(format!("delivery-{}", Uuid::new_v4()))
+    .bind(serde_json::json!({"repository": {"full_name": "acme/discovered"}}))
+    .bind(webhook_at)
+    .bind(&tenant)
+    .execute(&pool)
+    .await
+    .expect("insert delivery activity");
+    let activity = RepositoryStore::integration_activity(&database, &tenant, &first)
+        .await
+        .expect("integration activity");
+    assert_eq!(activity.last_webhook_status.as_deref(), Some("processed"));
+    assert!(activity.last_webhook_at.is_some());
     let repository_count = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM github_repositories WHERE tenant_id = $1 AND provider_id = $2",
     )
@@ -147,6 +165,11 @@ async fn trusting_a_rediscovered_github_repository_is_idempotent_and_audited() {
         .execute(&pool)
         .await
         .expect("cleanup audit");
+    sqlx::query("DELETE FROM github_deliveries WHERE tenant_id = $1")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("cleanup delivery");
     sqlx::query("DELETE FROM github_repositories WHERE tenant_id = $1")
         .bind(&tenant)
         .execute(&pool)

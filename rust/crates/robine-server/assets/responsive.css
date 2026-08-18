@@ -1,0 +1,15 @@
+body { overflow-wrap: anywhere; }
+.topbar { width: min(1120px, calc(100% - 2rem)); margin: auto; display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.topbar nav { flex-wrap: wrap; }
+.topbar > a { color: #8ee9ca; text-decoration: none; }
+section, details, form, label { min-width: 0; }
+textarea, input, select { max-width: 100%; }
+textarea { width: 100%; min-height: 8rem; border: 1px solid #38516d; border-radius: .65rem; background: #081424; color: #edf6ff; padding: .75rem; }
+code { overflow-wrap: anywhere; word-break: break-word; }
+table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
+th, td { padding: .65rem; text-align: left; border-bottom: 1px solid #263950; }
+a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus-visible { outline: 3px solid #8ee9ca; outline-offset: 3px; }
+@media (max-width: 760px) {
+  .topbar { align-items: flex-start; flex-direction: column; }
+  .topbar nav { gap: .8rem; padding: .5rem 0 1.25rem; }
+}

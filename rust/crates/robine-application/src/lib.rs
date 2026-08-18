@@ -996,6 +996,63 @@ impl ControlPlane {
             .map_err(|_| ApplicationError::Unavailable)
     }
 
+    /// Returns sanitized last-webhook activity for an authenticated trusted repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns forbidden for disabled users, not-found for unknown repositories, and unavailable
+    /// on persistence failure.
+    pub async fn repository_integration_activity(
+        &self,
+        user: &User,
+        repository_id: Uuid,
+    ) -> Result<robine_source::IntegrationActivity, ApplicationError> {
+        if user.disabled {
+            return Err(ApplicationError::Forbidden);
+        }
+        let repositories = self
+            .source_repositories
+            .as_ref()
+            .ok_or(ApplicationError::Unavailable)?;
+        let repository = repositories
+            .find_trusted("standalone", repository_id)
+            .await
+            .map_err(|_| ApplicationError::PipelineNotFound)?;
+        repositories
+            .integration_activity("standalone", &repository)
+            .await
+            .map_err(|_| ApplicationError::Unavailable)
+    }
+
+    /// Returns the sanitized in-process GitHub API and rate-limit snapshot to administrators.
+    ///
+    /// # Errors
+    ///
+    /// Returns forbidden for non-administrators and unavailable when GitHub is not assembled.
+    pub async fn github_api_health(
+        &self,
+        user: &User,
+    ) -> Result<robine_source::GitHubApiHealth, ApplicationError> {
+        if user.disabled || user.role != Role::Administrator {
+            return Err(ApplicationError::Forbidden);
+        }
+        Ok(self
+            .github_discovery
+            .as_ref()
+            .ok_or(ApplicationError::Unavailable)?
+            .api_health()
+            .await)
+    }
+
+    /// Returns the same sanitized snapshot for the operator-token metrics delivery boundary.
+    #[must_use]
+    pub async fn github_api_metrics(&self) -> Option<robine_source::GitHubApiHealth> {
+        match &self.github_discovery {
+            Some(discovery) => Some(discovery.api_health().await),
+            None => None,
+        }
+    }
+
     /// Resolves public badge data only for an explicitly trusted repository.
     ///
     /// # Errors

@@ -31,6 +31,7 @@ pub struct AppState {
     control_plane: Arc<ControlPlane>,
     failure_limiter: Arc<FailureLimiter>,
     webhooks: Arc<WebhookConfiguration>,
+    public_url: Arc<String>,
 }
 
 #[derive(Clone, Default)]
@@ -96,12 +97,19 @@ impl AppState {
             control_plane,
             failure_limiter: Arc::new(FailureLimiter::default()),
             webhooks: Arc::new(WebhookConfiguration::default()),
+            public_url: Arc::new("http://localhost:4000".into()),
         }
     }
 
     #[must_use]
     pub fn with_webhooks(mut self, configuration: WebhookConfiguration) -> Self {
         self.webhooks = Arc::new(configuration);
+        self
+    }
+
+    #[must_use]
+    pub fn with_public_url(mut self, public_url: &str) -> Self {
+        self.public_url = Arc::new(public_url.trim_end_matches('/').to_owned());
         self
     }
 }
@@ -967,7 +975,13 @@ fn render_runner_fleet(
 async fn application_css() -> HttpResponse {
     HttpResponse::Ok()
         .content_type("text/css; charset=utf-8")
-        .body(include_str!("../assets/app.css"))
+        .body(
+            [
+                include_str!("../assets/app.css"),
+                include_str!("../assets/responsive.css"),
+            ]
+            .concat(),
+        )
 }
 
 async fn authenticated_user(
@@ -979,10 +993,12 @@ async fn authenticated_user(
 }
 
 fn html_page(title: &str, body: &str) -> HttpResponse {
+    let version = env!("CARGO_PKG_VERSION");
+    let reference = option_env!("ROBINE_BUILD_SOURCE_REF").unwrap_or("development");
     HttpResponse::Ok()
         .insert_header((header::CACHE_CONTROL, "no-store"))
         .content_type("text/html; charset=utf-8")
-        .body(format!("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{} · Robine</title><link rel=\"stylesheet\" href=\"/assets/app.css\"><script defer src=\"/assets/app.js\"></script></head><body><header class=\"topbar\"><a href=\"/\"><strong>Robine CI</strong></a><nav><a href=\"/pipelines\">Pipelines</a><a href=\"/repositories\">Repositories</a><a href=\"/build-information\">Build</a><a href=\"/admin\">Admin</a></nav></header><main>{body}</main></body></html>", escape_html(title)))
+        .body(format!("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{} · Robine</title><link rel=\"stylesheet\" href=\"/assets/app.css\"><script defer src=\"/assets/app.js\"></script></head><body><header class=\"topbar\"><a href=\"/\"><strong>Robine CI</strong></a><nav><a href=\"/pipelines\">Pipelines</a><a href=\"/repositories\">Repositories</a><a href=\"/build-information\">Build</a><a href=\"/admin\">Admin</a></nav></header><main>{body}<footer class=\"build-footer\"><a href=\"/build-information\">Robine {} · {}</a></footer></main></body></html>", escape_html(title), escape_html(version), escape_html(reference)))
 }
 
 async fn application_js() -> HttpResponse {
@@ -1060,14 +1076,14 @@ async fn browser_pipeline(
                 let id = job.get("id").and_then(serde_json::Value::as_str).unwrap_or("");
                 let key = job.get("key").and_then(serde_json::Value::as_str).unwrap_or("job");
                 let status = job.get("status").and_then(serde_json::Value::as_str).unwrap_or("unknown");
-                let _ = write!(output, "<a class=\"surface-panel pipeline-row\" href=\"/pipelines/{}/jobs/{}\"><strong>{}</strong><span>{}</span></a>", pipeline_id, escape_html(id), escape_html(key), escape_html(status));
+                let _ = write!(output, "<a class=\"surface-panel pipeline-row\" data-job-id=\"{}\" href=\"/pipelines/{}/jobs/{}\"><strong>{}</strong><span data-job-status>{}</span></a>", escape_html(id), pipeline_id, escape_html(id), escape_html(key), escape_html(status));
                 output
             })
         });
     html_page(
         "Pipeline",
         &format!(
-            "<section id=\"pipeline-detail\" data-live-pipeline data-events-url=\"/pipelines/{pipeline_id}/events\"><p class=\"eyebrow\">Pipeline</p><h1>{}</h1><dl><dt>Status</dt><dd>{}</dd><dt>Commit</dt><dd><code>{}</code></dd><dt>Source</dt><dd>{}</dd><dt>Trigger</dt><dd>{}</dd></dl><p><a href=\"/pipelines/{pipeline_id}/workflow\">Workflow revision</a></p><h2>Jobs</h2><div id=\"pipeline-jobs\">{jobs}</div></section>",
+            "<section id=\"pipeline-detail\" data-live-pipeline data-events-url=\"/pipelines/{pipeline_id}/events\"><p class=\"eyebrow\">Pipeline</p><h1>{}</h1><p id=\"pipeline-live-state\" role=\"status\" aria-live=\"polite\">Live updates connected.</p><dl><dt>Status</dt><dd id=\"pipeline-status\">{}</dd><dt>Commit</dt><dd><code>{}</code></dd><dt>Source</dt><dd>{}</dd><dt>Trigger</dt><dd>{}</dd></dl><p><a href=\"/pipelines/{pipeline_id}/workflow\">Workflow revision</a></p><h2>Jobs</h2><div id=\"pipeline-jobs\">{jobs}</div></section>",
             escape_html(text("workflow_name")),
             escape_html(text("status")),
             escape_html(text("commit_sha")),
@@ -1321,7 +1337,7 @@ async fn browser_repositories(request: HttpRequest, state: web::Data<AppState>) 
     });
     let connection = if user.role == Role::Administrator {
         let token = session_token(&request).unwrap_or_default();
-        github_connection_panel(&csrf_token(&token), "")
+        github_connection_panel(&state.public_url, &csrf_token(&token), "")
     } else {
         String::new()
     };
@@ -1333,9 +1349,11 @@ async fn browser_repositories(request: HttpRequest, state: web::Data<AppState>) 
     )
 }
 
-fn github_connection_panel(csrf: &str, candidates: &str) -> String {
+fn github_connection_panel(public_url: &str, csrf: &str, candidates: &str) -> String {
     format!(
-        "<details id=\"github-app-assistant\" class=\"surface-panel\" open><summary>Connect a GitHub repository</summary><ol><li><strong>1. Create the GitHub App in GitHub.</strong> Set Homepage URL to this Robine instance and Webhook URL to <code>/api/github/webhooks</code>.</li><li><strong>2. Apply least privilege in GitHub.</strong> Repository permissions: Metadata read, Contents read, Pull requests read, Checks write. Subscribe to Push and Pull request events.</li><li><strong>3. Configure Robine.</strong> Set the non-secret <code>GITHUB_APP_ID</code>. Store the private key and webhook secret below; values are encrypted, write-only, and take effect after restart.</li><li><strong>4. Install and select.</strong> Install the App on the intended repositories, then discover them below.</li></ol><div class=\"config-grid\"><form id=\"github-private-key-form\" method=\"post\" action=\"/admin/github/credentials\"><input type=\"hidden\" name=\"csrf_token\" value=\"{}\"><input type=\"hidden\" name=\"name\" value=\"GITHUB_APP_PRIVATE_KEY\"><label>GitHub App private key<textarea name=\"value\" required minlength=\"8\" maxlength=\"65536\" autocomplete=\"off\"></textarea></label><button type=\"submit\">Store write-only private key</button></form><form id=\"github-webhook-secret-form\" method=\"post\" action=\"/admin/github/credentials\"><input type=\"hidden\" name=\"csrf_token\" value=\"{}\"><input type=\"hidden\" name=\"name\" value=\"GITHUB_WEBHOOK_SECRET\"><label>Webhook secret<input type=\"password\" name=\"value\" required minlength=\"8\" maxlength=\"65536\" autocomplete=\"off\"></label><button type=\"submit\">Store write-only webhook secret</button></form></div><form id=\"github-discovery-form\" method=\"post\" action=\"/repositories/github/discover\"><input type=\"hidden\" name=\"csrf_token\" value=\"{}\"><button class=\"primary\" type=\"submit\">Verify connection and discover repositories</button></form><div id=\"github-discovery-results\">{candidates}</div></details>",
+        "<details id=\"github-app-assistant\" class=\"surface-panel\" open><summary>Connect a GitHub repository</summary><ol><li><strong>1. Create the GitHub App in GitHub.</strong> In GitHub, set Homepage URL to <code>{}</code> and Webhook URL to <code>{}/api/github/webhooks</code>.</li><li><strong>2. Apply least privilege in GitHub.</strong> Repository permissions: Metadata read, Contents read, Pull requests read, Checks write. Subscribe to Push and Pull request events.</li><li><strong>3. Configure Robine.</strong> In Robine, set the non-secret <code>GITHUB_APP_ID</code>. Store the private key and webhook secret below; values are encrypted, write-only, and take effect after restart.</li><li><strong>4. Install and select.</strong> In GitHub, install the App on the intended repositories; in Robine, discover them below.</li></ol><div class=\"config-grid\"><form id=\"github-private-key-form\" method=\"post\" action=\"/admin/github/credentials\"><input type=\"hidden\" name=\"csrf_token\" value=\"{}\"><input type=\"hidden\" name=\"name\" value=\"GITHUB_APP_PRIVATE_KEY\"><label>GitHub App private key<textarea name=\"value\" required minlength=\"8\" maxlength=\"65536\" autocomplete=\"off\"></textarea></label><button type=\"submit\">Store write-only private key</button></form><form id=\"github-webhook-secret-form\" method=\"post\" action=\"/admin/github/credentials\"><input type=\"hidden\" name=\"csrf_token\" value=\"{}\"><input type=\"hidden\" name=\"name\" value=\"GITHUB_WEBHOOK_SECRET\"><label>Webhook secret<input type=\"password\" name=\"value\" required minlength=\"8\" maxlength=\"65536\" autocomplete=\"off\"></label><button type=\"submit\">Store write-only webhook secret</button></form></div><form id=\"github-discovery-form\" method=\"post\" action=\"/repositories/github/discover\"><input type=\"hidden\" name=\"csrf_token\" value=\"{}\"><button class=\"primary\" type=\"submit\">Verify connection and discover repositories</button></form><div id=\"github-discovery-results\">{candidates}</div></details>",
+        escape_html(public_url),
+        escape_html(public_url),
         escape_html(csrf),
         escape_html(csrf),
         escape_html(csrf)
@@ -1410,6 +1428,7 @@ async fn discover_github_repositories(
             return html_page(
                 "GitHub connection unavailable",
                 &github_connection_panel(
+                    &state.public_url,
                     &csrf_token(&token),
                     "<p role=\"alert\">GitHub could not verify the App. Check the App ID, private key, installation, and network access.</p>",
                 ),
@@ -1428,7 +1447,7 @@ async fn discover_github_repositories(
     };
     html_page(
         "Discover GitHub repositories",
-        &github_connection_panel(&csrf_token(&token), &candidates),
+        &github_connection_panel(&state.public_url, &csrf_token(&token), &candidates),
     )
 }
 
@@ -1513,6 +1532,21 @@ async fn browser_repository(
             "<a id=\"repository-secrets\" href=\"/repositories/{repository_id}/secrets\">Manage encrypted secrets</a>"
         )
     };
+    let webhook_activity = state
+        .control_plane
+        .repository_integration_activity(&user, *repository_id)
+        .await
+        .map_or_else(
+            |_| "<p role=\"alert\">Webhook activity is temporarily unavailable.</p>".into(),
+            |activity| match (activity.last_webhook_at, activity.last_webhook_status) {
+                (Some(received_at), Some(status)) => format!(
+                    "<p id=\"repository-webhook-activity\" role=\"status\">Last authenticated webhook: {} ({})</p>",
+                    escape_html(&received_at.to_rfc3339()),
+                    escape_html(&status)
+                ),
+                _ => "<p id=\"repository-webhook-activity\" role=\"status\">No authenticated webhook has been received for this repository yet.</p>".into(),
+            },
+        );
     let integration_health = if repository.provider == robine_source::Provider::GitHub
         && user.role != Role::Viewer
     {
@@ -1537,7 +1571,7 @@ async fn browser_repository(
     html_page(
         "Repository",
         &format!(
-            "<section id=\"repository-detail\"><p class=\"eyebrow\">{provider} repository</p><h1>{}</h1><dl><dt>Provider instance</dt><dd>{}</dd><dt>Installation</dt><dd>{}</dd></dl>{integration_health}<p>{secrets_link}</p><div class=\"config-grid\"><form id=\"manual-discovery-form\" method=\"get\" action=\"/repositories/{repository_id}/workflows/manual\"><label>Branch (optional)<input name=\"branch\" maxlength=\"255\"></label><button type=\"submit\">Discover manual workflows</button></form><a id=\"scheduled-workflows-link\" href=\"/repositories/{repository_id}/workflows/scheduled\">Inspect scheduled workflows</a></div><h2>Recent pipelines</h2><div id=\"repository-pipelines\">{rows}</div></section>",
+            "<section id=\"repository-detail\"><p class=\"eyebrow\">{provider} repository</p><h1>{}</h1><dl><dt>Provider instance</dt><dd>{}</dd><dt>Installation</dt><dd>{}</dd></dl>{webhook_activity}{integration_health}<p>{secrets_link}</p><div class=\"config-grid\"><form id=\"manual-discovery-form\" method=\"get\" action=\"/repositories/{repository_id}/workflows/manual\"><label>Branch (optional)<input name=\"branch\" maxlength=\"255\"></label><button type=\"submit\">Discover manual workflows</button></form><a id=\"scheduled-workflows-link\" href=\"/repositories/{repository_id}/workflows/scheduled\">Inspect scheduled workflows</a></div><h2>Recent pipelines</h2><div id=\"repository-pipelines\">{rows}</div></section>",
             escape_html(&repository.full_name),
             escape_html(&repository.provider_instance),
             repository.installation_id
@@ -1787,12 +1821,20 @@ async fn store_repository_secret(
 async fn build_information() -> HttpResponse {
     let version = env!("CARGO_PKG_VERSION");
     let sha = option_env!("ROBINE_BUILD_COMMIT_SHA").unwrap_or("development");
+    let source_ref = option_env!("ROBINE_BUILD_SOURCE_REF").unwrap_or("development");
+    let built_at = option_env!("ROBINE_BUILD_TIMESTAMP").unwrap_or("development");
+    let pipeline_id = option_env!("ROBINE_BUILD_PIPELINE_ID").unwrap_or("development");
+    let trigger = option_env!("ROBINE_BUILD_TRIGGER").unwrap_or("development");
     html_page(
         "Build information",
         &format!(
-            "<section><p class=\"eyebrow\">Made traceable</p><h1>Build information</h1><dl id=\"build-provenance\"><dt>Version</dt><dd>{}</dd><dt>Commit SHA</dt><dd><code>{}</code></dd></dl></section>",
+            "<section><p class=\"eyebrow\">Made traceable</p><h1>Build information</h1><dl id=\"build-provenance\"><dt>Version</dt><dd>{}</dd><dt>Commit SHA</dt><dd><code>{}</code></dd><dt>Source reference</dt><dd>{}</dd><dt>Build timestamp</dt><dd>{}</dd><dt>Pipeline ID</dt><dd>{}</dd><dt>Trigger</dt><dd>{}</dd></dl></section>",
             escape_html(version),
-            escape_html(sha)
+            escape_html(sha),
+            escape_html(source_ref),
+            escape_html(built_at),
+            escape_html(pipeline_id),
+            escape_html(trigger)
         ),
     )
 }
@@ -1815,16 +1857,34 @@ async fn browser_admin(request: HttpRequest, state: web::Data<AppState>) -> Http
         .operational_metrics()
         .await
         .unwrap_or_else(|_| serde_json::json!({}));
+    let github = state.control_plane.github_api_health(&actor).await.ok();
+    let github_health = github.map_or_else(
+        || "<p role=\"status\">GitHub is not assembled.</p>".into(),
+        |health| {
+            let outcome = health.outcome.as_deref().unwrap_or("not_checked");
+            let operation = health.operation.as_deref().unwrap_or("none");
+            let remaining = health
+                .rate_limit_remaining
+                .map_or_else(|| "unknown".into(), |value| value.to_string());
+            let limit = health
+                .rate_limit_limit
+                .map_or_else(|| "unknown".into(), |value| value.to_string());
+            let checked = health
+                .checked_at
+                .map_or_else(|| "Never".into(), |value| value.to_rfc3339());
+            format!("<dl id=\"github-api-health\"><dt>Configuration</dt><dd>{}</dd><dt>Health</dt><dd>{}</dd><dt>Last operation</dt><dd>{}</dd><dt>Last outcome</dt><dd>{}</dd><dt>Rate limit remaining</dt><dd>{remaining} / {limit}</dd><dt>Last checked</dt><dd>{}</dd></dl>", if health.configured { "configured" } else { "missing credentials" }, if health.healthy { "healthy" } else { "degraded" }, escape_html(operation), escape_html(outcome), escape_html(&checked))
+        },
+    );
     let csrf = csrf_token(&token);
     let rows = users.iter().fold(String::new(), |mut output, user| {
         let selected = |role| if user.role == role { " selected" } else { "" };
-        let _ = write!(output, "<tr id=\"user-{}\"><td>{}</td><td>{}</td><td>{}</td><td><form method=\"post\" action=\"/admin/users/{}/role\"><input type=\"hidden\" name=\"csrf_token\" value=\"{}\"><select name=\"role\"><option value=\"viewer\"{}>Viewer</option><option value=\"maintainer\"{}>Maintainer</option><option value=\"administrator\"{}>Administrator</option></select><button type=\"submit\">Save role</button></form></td></tr>", user.id, escape_html(&user.email), role_label(user.role), if user.disabled { "disabled" } else { "active" }, user.id, csrf, selected(Role::Viewer), selected(Role::Maintainer), selected(Role::Administrator));
+        let _ = write!(output, "<tr id=\"user-{}\"><td>{}</td><td>{}</td><td>{}</td><td><form method=\"post\" action=\"/admin/users/{}/role\"><input type=\"hidden\" name=\"csrf_token\" value=\"{}\"><select name=\"role\" aria-label=\"Role for {}\"><option value=\"viewer\"{}>Viewer</option><option value=\"maintainer\"{}>Maintainer</option><option value=\"administrator\"{}>Administrator</option></select><button type=\"submit\">Save role</button></form></td></tr>", user.id, escape_html(&user.email), role_label(user.role), if user.disabled { "disabled" } else { "active" }, user.id, csrf, escape_html(&user.email), selected(Role::Viewer), selected(Role::Maintainer), selected(Role::Administrator));
         output
     });
     html_page(
         "Administration",
         &format!(
-            "<section id=\"admin-dashboard\"><p class=\"eyebrow\">Instance administration</p><h1>Health and identities</h1><p><a class=\"primary\" href=\"/admin/runners\">Operate runner fleet</a></p><dl id=\"admin-health\"><dt>Queued pipelines</dt><dd>{}</dd><dt>Running pipelines</dt><dd>{}</dd><dt>Pending outbox</dt><dd>{}</dd><dt>Available durable jobs</dt><dd>{}</dd><dt>Online runners</dt><dd>{}</dd></dl><h2>Users</h2><table><thead><tr><th>Email</th><th>Role</th><th>State</th><th>Change role</th></tr></thead><tbody>{rows}</tbody></table></section>",
+            "<section id=\"admin-dashboard\"><p class=\"eyebrow\">Instance administration</p><h1>Health and identities</h1><p><a class=\"primary\" href=\"/admin/runners\">Operate runner fleet</a></p><dl id=\"admin-health\"><dt>Queued pipelines</dt><dd>{}</dd><dt>Running pipelines</dt><dd>{}</dd><dt>Pending outbox</dt><dd>{}</dd><dt>Available durable jobs</dt><dd>{}</dd><dt>Online runners</dt><dd>{}</dd></dl><h2>GitHub API</h2>{github_health}<h2>Users</h2><table><thead><tr><th>Email</th><th>Role</th><th>State</th><th>Change role</th></tr></thead><tbody>{rows}</tbody></table></section>",
             metric_value(&metrics, "pipelines_queued"),
             metric_value(&metrics, "pipelines_running"),
             metric_value(&metrics, "outbox_pending"),
@@ -1909,7 +1969,7 @@ async fn metrics(request: HttpRequest, state: web::Data<AppState>) -> HttpRespon
             .and_then(serde_json::Value::as_i64)
             .unwrap_or(0)
     };
-    let body = format!(
+    let mut body = format!(
         "# HELP robine_up Whether the Rust control plane is serving.\n# TYPE robine_up gauge\nrobine_up 1\n# HELP robine_pipelines Current pipelines by lifecycle bucket.\n# TYPE robine_pipelines gauge\nrobine_pipelines{{status=\"created\"}} {}\nrobine_pipelines{{status=\"queued\"}} {}\nrobine_pipelines{{status=\"running\"}} {}\n# HELP robine_outbox_events Durable outbox events by state.\n# TYPE robine_outbox_events gauge\nrobine_outbox_events{{status=\"pending\"}} {}\nrobine_outbox_events{{status=\"dead_lettered\"}} {}\n# HELP robine_durable_jobs Durable jobs by state.\n# TYPE robine_durable_jobs gauge\nrobine_durable_jobs{{status=\"available\"}} {}\nrobine_durable_jobs{{status=\"executing\"}} {}\nrobine_durable_jobs{{status=\"discarded\"}} {}\n# HELP robine_github_projection_jobs GitHub status projection jobs by state.\n# TYPE robine_github_projection_jobs gauge\nrobine_github_projection_jobs{{status=\"pending\"}} {}\nrobine_github_projection_jobs{{status=\"discarded\"}} {}\n# HELP robine_schedule_last_scan Last native scheduler scan measurements.\n# TYPE robine_schedule_last_scan gauge\nrobine_schedule_last_scan{{measure=\"duration_ms\"}} {}\nrobine_schedule_last_scan{{measure=\"scanned_minutes\"}} {}\nrobine_schedule_last_scan{{measure=\"due_occurrences\"}} {}\nrobine_schedule_last_scan{{measure=\"pipelines\"}} {}\nrobine_schedule_last_scan{{measure=\"truncated_minutes\"}} {}\nrobine_schedule_last_scan{{measure=\"failed\"}} {}\n# HELP robine_schedule_cursor_age_seconds Age of the durable UTC scheduler cursor.\n# TYPE robine_schedule_cursor_age_seconds gauge\nrobine_schedule_cursor_age_seconds {}\n# HELP robine_secret_rotation Secret key version and pending rotation records.\n# TYPE robine_secret_rotation gauge\nrobine_secret_rotation{{measure=\"target_version\"}} {}\nrobine_secret_rotation{{measure=\"pending\"}} {}\n# HELP robine_runners Remote runners by connectivity.\n# TYPE robine_runners gauge\nrobine_runners{{connectivity=\"online\"}} {}\nrobine_runners{{connectivity=\"offline\"}} {}\n",
         value("pipelines_created"),
         value("pipelines_queued"),
@@ -1933,10 +1993,44 @@ async fn metrics(request: HttpRequest, state: web::Data<AppState>) -> HttpRespon
         value("runners_online"),
         value("runners_offline")
     );
+    if let Some(github) = state.control_plane.github_api_metrics().await {
+        body.push_str(&github_metrics_body(&github));
+    }
     HttpResponse::Ok()
         .insert_header((header::CACHE_CONTROL, "no-store"))
         .content_type("text/plain; version=0.0.4; charset=utf-8")
         .body(body)
+}
+
+fn github_metrics_body(github: &robine_source::GitHubApiHealth) -> String {
+    let mut body = String::new();
+    let configured = i32::from(github.configured);
+    let healthy = i32::from(github.healthy);
+    let remaining = github.rate_limit_remaining.unwrap_or(-1);
+    let limit = github.rate_limit_limit.unwrap_or(-1);
+    let reset = github.rate_limit_reset.unwrap_or(0);
+    let _ = write!(
+        body,
+        "# HELP robine_github_api_health Sanitized GitHub API configuration and health.\n# TYPE robine_github_api_health gauge\nrobine_github_api_health{{measure=\"configured\"}} {configured}\nrobine_github_api_health{{measure=\"healthy\"}} {healthy}\n# HELP robine_github_rate_limit Latest GitHub API primary rate-limit snapshot.\n# TYPE robine_github_rate_limit gauge\nrobine_github_rate_limit{{measure=\"remaining\"}} {remaining}\nrobine_github_rate_limit{{measure=\"limit\"}} {limit}\nrobine_github_rate_limit{{measure=\"reset_unix\"}} {reset}\n# HELP robine_github_api_requests GitHub API requests by bounded operation and outcome.\n# TYPE robine_github_api_requests counter\n# HELP robine_github_api_duration_milliseconds Accumulated GitHub API request duration.\n# TYPE robine_github_api_duration_milliseconds counter\n"
+    );
+    for metric in &github.operations {
+        let operation = prometheus_label(&metric.operation);
+        let outcome = prometheus_label(&metric.outcome);
+        let _ = write!(
+            body,
+            "robine_github_api_requests{{operation=\"{operation}\",outcome=\"{outcome}\"}} {}\nrobine_github_api_duration_milliseconds{{operation=\"{operation}\",outcome=\"{outcome}\"}} {}\n",
+            metric.requests, metric.duration_ms
+        );
+    }
+    body
+}
+
+fn prometheus_label(value: &str) -> &str {
+    match value {
+        "token" | "discovery" | "source" | "checks" | "success" | "error" | "rate_limited"
+        | "unavailable" => value,
+        _ => "invalid",
+    }
 }
 
 fn badge_response(label: &str, message: &str, color: &str, max_age: u32) -> HttpResponse {
@@ -3828,6 +3922,26 @@ mod tests {
                 }],
             })
         }
+
+        async fn api_health(&self) -> robine_source::GitHubApiHealth {
+            robine_source::GitHubApiHealth {
+                configured: true,
+                healthy: true,
+                checked_at: Some(Utc::now()),
+                operation: Some("discovery".into()),
+                outcome: Some("success".into()),
+                status_class: Some(2),
+                rate_limit_remaining: Some(4_999),
+                rate_limit_limit: Some(5_000),
+                rate_limit_reset: Some(Utc::now().timestamp() + 3_600),
+                operations: vec![robine_source::GitHubOperationMetric {
+                    operation: "discovery".into(),
+                    outcome: "success".into(),
+                    requests: 2,
+                    duration_ms: 12,
+                }],
+            }
+        }
     }
 
     #[async_trait]
@@ -4845,11 +4959,11 @@ mod tests {
             test::TestRequest::get().uri("/assets/app.js").to_request(),
         )
         .await;
-        assert!(
-            std::str::from_utf8(&script)
-                .expect("JavaScript")
-                .contains("EventSource")
-        );
+        let script = std::str::from_utf8(&script).expect("JavaScript");
+        assert!(script.contains("EventSource"));
+        assert!(script.contains("pipelineStatus.textContent"));
+        assert!(script.contains("reconnecting automatically"));
+        assert!(!script.contains("window.location.reload"));
     }
 
     #[actix_web::test]
@@ -4960,11 +5074,10 @@ mod tests {
         let response = test::call_service(&admin, request).await;
         assert_eq!(response.status(), StatusCode::OK);
         let body = test::read_body(response).await;
-        assert!(
-            std::str::from_utf8(&body)
-                .expect("HTML")
-                .contains("admin-dashboard")
-        );
+        let html = std::str::from_utf8(&body).expect("HTML");
+        assert!(html.contains("admin-dashboard"));
+        assert!(html.contains("github-api-health"));
+        assert!(html.contains("4999 / 5000"));
 
         let request = test::TestRequest::post()
             .uri(&format!("/admin/users/{}/role", Uuid::nil()))
@@ -4991,6 +5104,18 @@ mod tests {
         let repository_id = Uuid::nil();
         let viewer =
             test::init_service(App::new().app_data(state(true)).configure(configure)).await;
+        let detail = test::TestRequest::get()
+            .uri(&format!("/repositories/{repository_id}"))
+            .insert_header((header::COOKIE, "robine_session=session"))
+            .to_request();
+        let response = test::call_service(&viewer, detail).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = test::read_body(response).await;
+        assert!(
+            std::str::from_utf8(&body)
+                .expect("HTML")
+                .contains("repository-webhook-activity")
+        );
         for (uri, marker) in [
             (
                 format!("/repositories/{repository_id}/workflows/manual?branch=release"),
@@ -5134,11 +5259,128 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn every_legacy_production_route_is_registered_with_its_original_method() {
+        use actix_web::http::Method;
+
+        let app = test::init_service(
+            App::new()
+                .app_data(state_with_role(true, Role::Administrator))
+                .configure(configure),
+        )
+        .await;
+        let id = Uuid::nil();
+        let routes = vec![
+            (Method::GET, "/".into()),
+            (Method::GET, "/sign-in".into()),
+            (Method::POST, "/sign-in".into()),
+            (Method::DELETE, "/sign-out".into()),
+            (Method::GET, "/auth/oidc".into()),
+            (Method::GET, "/auth/oidc/callback".into()),
+            (Method::GET, "/setup".into()),
+            (Method::POST, "/setup".into()),
+            (Method::GET, "/pipelines".into()),
+            (Method::GET, format!("/pipelines/{id}")),
+            (Method::GET, format!("/pipelines/{id}/workflow")),
+            (Method::GET, format!("/pipelines/{id}/jobs/{id}")),
+            (Method::GET, format!("/pipelines/{id}/jobs/{id}/logs")),
+            (
+                Method::GET,
+                format!("/pipelines/{id}/jobs/{id}/artifacts/build"),
+            ),
+            (Method::GET, "/repositories".into()),
+            (Method::GET, format!("/repositories/{id}")),
+            (Method::GET, format!("/repositories/{id}/secrets")),
+            (Method::GET, "/build-information".into()),
+            (Method::GET, "/admin".into()),
+            (Method::POST, "/api/github/webhooks".into()),
+            (Method::POST, "/api/gitlab/webhooks".into()),
+            (Method::POST, "/api/forgejo/webhooks".into()),
+            (Method::POST, "/api/v1/runners/enroll".into()),
+            (Method::GET, format!("/api/v1/runners/attempts/{id}/source")),
+            (
+                Method::GET,
+                format!("/api/v1/runners/attempts/{id}/secrets"),
+            ),
+            (Method::GET, format!("/api/v1/runners/attempts/{id}/cache")),
+            (Method::PUT, format!("/api/v1/runners/attempts/{id}/cache")),
+            (
+                Method::GET,
+                format!("/api/v1/runners/attempts/{id}/artifacts"),
+            ),
+            (
+                Method::PUT,
+                format!("/api/v1/runners/attempts/{id}/artifacts"),
+            ),
+            (Method::GET, "/health/live".into()),
+            (Method::GET, "/health/ready".into()),
+            (
+                Method::GET,
+                "/badges/github/robine/fixture/coverage.svg".into(),
+            ),
+            (
+                Method::GET,
+                "/badges/github/robine/fixture/build.svg".into(),
+            ),
+            (Method::GET, "/metrics".into()),
+        ];
+        for (method, path) in routes {
+            let request = test::TestRequest::default()
+                .method(method.clone())
+                .uri(&path)
+                .insert_header(("authorization", "Bearer administrator-session"))
+                .to_request();
+            let status = test::call_service(&app, request).await.status();
+            if matches!(path.as_str(), "/auth/oidc" | "/metrics") {
+                assert_eq!(status, StatusCode::NOT_FOUND, "concealed route contract");
+                continue;
+            }
+            assert_ne!(
+                status,
+                StatusCode::NOT_FOUND,
+                "unregistered {method} {path}"
+            );
+            assert_ne!(
+                status,
+                StatusCode::METHOD_NOT_ALLOWED,
+                "wrong method for {method} {path}"
+            );
+        }
+    }
+
+    #[actix_web::test]
     async fn metrics_are_disabled_without_an_operator_token() {
         let app = test::init_service(App::new().app_data(state(true)).configure(configure)).await;
         let response =
             test::call_service(&app, test::TestRequest::get().uri("/metrics").to_request()).await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[actix_web::test]
+    async fn github_metrics_use_only_bounded_labels_and_sanitized_rate_state() {
+        let mut health = robine_source::GitHubApiHealth {
+            configured: true,
+            healthy: false,
+            checked_at: Some(Utc::now()),
+            operation: Some("checks".into()),
+            outcome: Some("rate_limited".into()),
+            status_class: Some(4),
+            rate_limit_remaining: Some(0),
+            rate_limit_limit: Some(5_000),
+            rate_limit_reset: Some(1_800_000_000),
+            operations: vec![robine_source::GitHubOperationMetric {
+                operation: "checks".into(),
+                outcome: "rate_limited".into(),
+                requests: 3,
+                duration_ms: 25,
+            }],
+        };
+        let body = github_metrics_body(&health);
+        assert!(body.contains("measure=\"remaining\"} 0"));
+        assert!(body.contains("operation=\"checks\",outcome=\"rate_limited\"} 3"));
+        health.operations[0].operation = "https://github.example/private/repository".into();
+        let body = github_metrics_body(&health);
+        assert!(body.contains("operation=\"invalid\""));
+        assert!(!body.contains("github.example"));
     }
 
     #[actix_web::test]

@@ -177,7 +177,9 @@ async fn main() -> io::Result<()> {
         std::env::var("FORGEJO_URL").ok(),
     );
     let state = web::Data::new(
-        AppState::new(database, control_plane.clone()).with_webhooks(webhook_configuration),
+        AppState::new(database, control_plane.clone())
+            .with_webhooks(webhook_configuration)
+            .with_public_url(&public_url),
     );
 
     let (shutdown_sender, shutdown_receiver) = watch::channel(false);

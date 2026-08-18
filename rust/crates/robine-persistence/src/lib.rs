@@ -16,7 +16,9 @@ use robine_core::{
     ports::{IdentityRepository, PipelineRepository, PortError},
 };
 use robine_secrets::{EncryptedSecret, SecretError, SecretRepository, SecretScope};
-use robine_source::{AvailableRepository, Provider, Repository, RepositoryStore, SourceError};
+use robine_source::{
+    AvailableRepository, IntegrationActivity, Provider, Repository, RepositoryStore, SourceError,
+};
 use robine_storage::{
     Artifact, CacheEntry, InventoryObject, MetadataRepository, RetentionRepository, RetentionStage,
     StorageError, StorageQuotas, StoredObject,
@@ -1110,6 +1112,57 @@ impl RepositoryStore for Database {
             owner: row.owner,
             name: row.name,
             full_name: row.full_name,
+        })
+    }
+
+    async fn integration_activity(
+        &self,
+        tenant_id: &str,
+        repository: &Repository,
+    ) -> Result<IntegrationActivity, SourceError> {
+        let provider = match repository.provider {
+            Provider::GitHub => "github",
+            Provider::GitLab => "gitlab",
+            Provider::Forgejo => "forgejo",
+        };
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| SourceError::RepositoryUnavailable)?;
+        let row = sqlx::query_as::<_, (NaiveDateTime, String)>(
+            "SELECT received_at, status FROM github_deliveries \
+             WHERE tenant_id = $1 AND provider = $2 AND provider_instance = $3 \
+               AND payload #>> '{repository,full_name}' = $4 \
+             ORDER BY received_at DESC, id DESC LIMIT 1",
+        )
+        .bind(tenant_id)
+        .bind(provider)
+        .bind(&repository.provider_instance)
+        .bind(&repository.full_name)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| SourceError::RepositoryUnavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| SourceError::RepositoryUnavailable)?;
+        Ok(match row {
+            Some((received_at, status)) => IntegrationActivity {
+                last_webhook_at: Some(received_at.and_utc()),
+                last_webhook_status: Some(
+                    match status.as_str() {
+                        "pending" | "processing" | "processed" | "ignored" | "failed" => {
+                            status.as_str()
+                        }
+                        _ => "unknown",
+                    }
+                    .into(),
+                ),
+            },
+            None => IntegrationActivity {
+                last_webhook_at: None,
+                last_webhook_status: None,
+            },
         })
     }
 }
