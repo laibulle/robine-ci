@@ -1,6 +1,9 @@
 //! Framework-independent orchestration for Robine use cases.
 
-use std::sync::{Arc, LazyLock};
+use std::{
+    collections::BTreeSet,
+    sync::{Arc, LazyLock},
+};
 
 use argon2::{
     Argon2,
@@ -8,10 +11,15 @@ use argon2::{
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
+use hmac::{Hmac, Mac};
 use robine_core::{
     execution_context::{Actor, ActorKind, Capability, ExecutionContext},
     identity::{OidcAuthorization, Role, User},
-    pipelines::PipelineProjection,
+    pipelines::{
+        AttemptProjection, CreatePipelineInput, JobState, NewJob, NewPipeline, NewWorkflowRevision,
+        PipelineProjection, RecordAttemptEvent, RecordRemoteAttemptEvent, RetryProjection,
+        RunnerLeaseHeartbeat, RunnerReconciliation, SchedulerClaim, source_digest,
+    },
     ports::{IdentityRepository, OidcProvider, PipelineRepository, PortError},
 };
 use sha2::{Digest, Sha256};
@@ -33,6 +41,7 @@ pub struct ControlPlane {
     pipelines: Arc<dyn PipelineRepository>,
     bootstrap: Option<BootstrapConfig>,
     oidc: Option<Arc<dyn OidcProvider>>,
+    runner_credential_key: Option<[u8; 32]>,
 }
 
 struct BootstrapConfig {
@@ -72,6 +81,26 @@ pub enum ApplicationError {
     PipelineNotFound,
     #[error("pipeline cannot be cancelled from its current state")]
     PipelineNotCancellable,
+    #[error("pipeline cannot be queued from its current state")]
+    PipelineNotQueueable,
+    #[error("job or pipeline cannot be retried from its current state")]
+    JobNotRetryable,
+    #[error("job dependencies are unavailable: {0:?}")]
+    RetryDependenciesUnavailable(Vec<String>),
+    #[error("retained artifact inputs are unavailable: {0:?}")]
+    RetryInputsUnavailable(Vec<String>),
+    #[error("pipeline creation input is invalid")]
+    InvalidPipelineInput,
+    #[error("idempotency key conflicts with an existing pipeline")]
+    IdempotencyConflict,
+    #[error("scheduler capacity is exhausted")]
+    SchedulerCapacity,
+    #[error("no eligible work is queued")]
+    NoWork,
+    #[error("attempt event sequence gap: expected {expected}, got {actual}")]
+    EventSequenceGap { expected: i32, actual: i32 },
+    #[error("attempt event is invalid")]
+    InvalidAttemptEvent,
     #[error("application dependency is unavailable")]
     Unavailable,
 }
@@ -94,7 +123,22 @@ impl ControlPlane {
             pipelines,
             bootstrap: None,
             oidc: None,
+            runner_credential_key: None,
         }
+    }
+
+    #[must_use]
+    /// Configures compatibility verification for existing remote-runner credentials.
+    ///
+    /// # Panics
+    ///
+    /// HMAC-SHA256 accepts arbitrary key lengths, so construction cannot panic for this input.
+    pub fn with_runner_secret_key_base(mut self, secret_key_base: &str) -> Self {
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret_key_base.as_bytes())
+            .expect("HMAC accepts keys of any length");
+        mac.update(b"robine:runner-credential:v1");
+        self.runner_credential_key = Some(mac.finalize().into_bytes().into());
+        self
     }
 
     #[must_use]
@@ -271,6 +315,16 @@ impl ControlPlane {
                 | PortError::LastAdministrator
                 | PortError::OidcEmailCollision
                 | PortError::InvalidTransition
+                | PortError::RetryDependenciesUnavailable(_)
+                | PortError::RetryInputsUnavailable(_)
+                | PortError::IdempotencyConflict
+                | PortError::Capacity
+                | PortError::NoWork
+                | PortError::EventGap { .. }
+                | PortError::InvalidAttemptEvent
+                | PortError::MessageIdConflict
+                | PortError::AttemptNotAssigned
+                | PortError::StaleEvent { .. }
                 | PortError::Unavailable,
             ) => {
                 return Err(ApplicationError::Unavailable);
@@ -394,6 +448,50 @@ impl ControlPlane {
             .map_err(|_| ApplicationError::Unavailable)
     }
 
+    /// Validates and atomically persists a pipeline, immutable revision, job graph, and event.
+    ///
+    /// # Errors
+    ///
+    /// Returns forbidden for viewers, invalid input for malformed metadata/graphs/revisions,
+    /// conflict when an idempotency key is reused differently, or unavailable on storage failure.
+    pub async fn create_pipeline(
+        &self,
+        user: &User,
+        input: CreatePipelineInput,
+    ) -> Result<PipelineProjection, ApplicationError> {
+        if user.role == Role::Viewer {
+            return Err(ApplicationError::Forbidden);
+        }
+        input
+            .validate()
+            .map_err(|_| ApplicationError::InvalidPipelineInput)?;
+        let context = ExecutionContext::embedded(
+            Actor {
+                id: user.id.to_string(),
+                kind: ActorKind::User,
+            },
+            "standalone",
+            [Capability::new("pipelines:create")],
+            Uuid::new_v4(),
+        )
+        .map_err(|_| ApplicationError::Forbidden)?;
+        let pipeline_id = match &input.idempotency_key {
+            Some(key) if (1..=512).contains(&key.len()) => deterministic_uuid(key),
+            Some(_) => return Err(ApplicationError::InvalidPipelineInput),
+            None => Uuid::new_v4(),
+        };
+        let now = Utc::now();
+        let pipeline = build_new_pipeline(input, pipeline_id, user, context.correlation_id, now)?;
+        self.pipelines
+            .create(&context.tenant_id, &pipeline)
+            .await
+            .map_err(|error| match error {
+                PortError::IdempotencyConflict => ApplicationError::IdempotencyConflict,
+                PortError::InvalidData => ApplicationError::InvalidPipelineInput,
+                _ => ApplicationError::Unavailable,
+            })
+    }
+
     /// Cancels queued work immediately and marks active work for cancellation atomically.
     ///
     /// # Errors
@@ -428,6 +526,405 @@ impl ControlPlane {
                 _ => ApplicationError::Unavailable,
             })
     }
+
+    /// Queues a created pipeline, idempotently accepting already queued/running work.
+    ///
+    /// # Errors
+    ///
+    /// Returns forbidden for viewers, not found for an unknown tenant-visible pipeline,
+    /// conflict for a cancelling/terminal pipeline, or unavailable for storage failures.
+    pub async fn queue_pipeline(
+        &self,
+        user: &User,
+        pipeline_id: Uuid,
+    ) -> Result<PipelineProjection, ApplicationError> {
+        if user.role == Role::Viewer {
+            return Err(ApplicationError::Forbidden);
+        }
+        let context = ExecutionContext::embedded(
+            Actor {
+                id: user.id.to_string(),
+                kind: ActorKind::User,
+            },
+            "standalone",
+            [Capability::new("pipelines:queue")],
+            Uuid::new_v4(),
+        )
+        .map_err(|_| ApplicationError::Forbidden)?;
+        self.pipelines
+            .queue(&context.tenant_id, pipeline_id)
+            .await
+            .map_err(|error| match error {
+                PortError::NotFound => ApplicationError::PipelineNotFound,
+                PortError::InvalidTransition => ApplicationError::PipelineNotQueueable,
+                _ => ApplicationError::Unavailable,
+            })
+    }
+
+    /// Requeues a failed or cancelled job after validating dependencies and retained inputs.
+    ///
+    /// # Errors
+    ///
+    /// Returns forbidden for viewers, not found for an unknown tenant-visible job, conflict
+    /// errors for invalid state or unavailable prerequisites, and unavailable for storage errors.
+    pub async fn retry_job(
+        &self,
+        user: &User,
+        job_id: Uuid,
+    ) -> Result<RetryProjection, ApplicationError> {
+        if user.role == Role::Viewer {
+            return Err(ApplicationError::Forbidden);
+        }
+        let context = ExecutionContext::embedded(
+            Actor {
+                id: user.id.to_string(),
+                kind: ActorKind::User,
+            },
+            "standalone",
+            [Capability::new("pipelines:retry")],
+            Uuid::new_v4(),
+        )
+        .map_err(|_| ApplicationError::Forbidden)?;
+        self.pipelines
+            .retry_job(&context.tenant_id, job_id, Uuid::new_v4(), Utc::now())
+            .await
+            .map_err(|error| match error {
+                PortError::NotFound => ApplicationError::PipelineNotFound,
+                PortError::InvalidTransition => ApplicationError::JobNotRetryable,
+                PortError::RetryDependenciesUnavailable(keys) => {
+                    ApplicationError::RetryDependenciesUnavailable(keys)
+                }
+                PortError::RetryInputsUnavailable(inputs) => {
+                    ApplicationError::RetryInputsUnavailable(inputs)
+                }
+                _ => ApplicationError::Unavailable,
+            })
+    }
+
+    /// Atomically claims one fair ready job and creates a leased execution attempt.
+    ///
+    /// # Errors
+    ///
+    /// Returns forbidden outside administrator-owned scheduler delivery, capacity when an
+    /// active limit is reached, no work when nothing is eligible, or unavailable on failure.
+    pub async fn claim_next_job(
+        &self,
+        user: &User,
+        global_limit: i64,
+        repository_limit: i64,
+        lease_seconds: i64,
+        runner_id: Option<Uuid>,
+    ) -> Result<AttemptProjection, ApplicationError> {
+        if user.role != Role::Administrator {
+            return Err(ApplicationError::Forbidden);
+        }
+        let context = ExecutionContext::embedded(
+            Actor {
+                id: user.id.to_string(),
+                kind: ActorKind::System,
+            },
+            "standalone",
+            [Capability::new("scheduler:claim")],
+            Uuid::new_v4(),
+        )
+        .map_err(|_| ApplicationError::Forbidden)?;
+        let claim = SchedulerClaim {
+            global_limit: global_limit.clamp(1, 1_024),
+            repository_limit: repository_limit.clamp(1, 1_024),
+            lease_seconds: lease_seconds.clamp(1, 86_400),
+            attempt_id: Uuid::new_v4(),
+            idempotency_token: Uuid::new_v4(),
+            event_id: Uuid::new_v4(),
+            now: Utc::now(),
+            runner_id,
+        };
+        self.pipelines
+            .claim_next_job(&context.tenant_id, &claim)
+            .await
+            .map_err(|error| match error {
+                PortError::Capacity => ApplicationError::SchedulerCapacity,
+                PortError::NoWork => ApplicationError::NoWork,
+                _ => ApplicationError::Unavailable,
+            })
+    }
+
+    /// Records one ordered local-runner event and reconciles the durable job graph.
+    ///
+    /// # Errors
+    ///
+    /// Returns forbidden outside administrator-owned delivery, a sequence/validation error
+    /// for invalid events, unauthenticated for unknown attempts, or unavailable on failure.
+    pub async fn record_attempt_event(
+        &self,
+        user: &User,
+        event: RecordAttemptEvent,
+    ) -> Result<AttemptProjection, ApplicationError> {
+        if user.role != Role::Administrator {
+            return Err(ApplicationError::Forbidden);
+        }
+        let context = ExecutionContext::embedded(
+            Actor {
+                id: user.id.to_string(),
+                kind: ActorKind::System,
+            },
+            "standalone",
+            [Capability::new("attempts:record")],
+            Uuid::new_v4(),
+        )
+        .map_err(|_| ApplicationError::Forbidden)?;
+        self.pipelines
+            .record_attempt_event(&context.tenant_id, Uuid::new_v4(), &event, Utc::now())
+            .await
+            .map_err(|error| match error {
+                PortError::NotFound => ApplicationError::Unauthenticated,
+                PortError::EventGap { expected, actual } => {
+                    ApplicationError::EventSequenceGap { expected, actual }
+                }
+                PortError::InvalidAttemptEvent | PortError::InvalidTransition => {
+                    ApplicationError::InvalidAttemptEvent
+                }
+                _ => ApplicationError::Unavailable,
+            })
+    }
+
+    /// Renews one active local attempt lease without advancing its event sequence.
+    ///
+    /// # Errors
+    ///
+    /// Returns forbidden for non-administrators, unauthenticated for an unknown token,
+    /// invalid-event for a terminal attempt, or unavailable on persistence failure.
+    pub async fn heartbeat_attempt(
+        &self,
+        user: &User,
+        idempotency_token: Uuid,
+        lease_seconds: i64,
+    ) -> Result<AttemptProjection, ApplicationError> {
+        if user.role != Role::Administrator {
+            return Err(ApplicationError::Forbidden);
+        }
+        self.pipelines
+            .heartbeat_attempt(
+                "standalone",
+                idempotency_token,
+                lease_seconds.clamp(1, 86_400),
+                Utc::now(),
+            )
+            .await
+            .map_err(|error| match error {
+                PortError::NotFound => ApplicationError::Unauthenticated,
+                PortError::InvalidTransition => ApplicationError::InvalidAttemptEvent,
+                _ => ApplicationError::Unavailable,
+            })
+    }
+
+    /// Fails expired active attempts as `runner_lost` and reconciles their graphs.
+    ///
+    /// # Errors
+    ///
+    /// Returns forbidden for non-administrators or unavailable on persistence failure.
+    pub async fn reconcile_expired_attempts(
+        &self,
+        user: &User,
+        limit: i64,
+    ) -> Result<u64, ApplicationError> {
+        if user.role != Role::Administrator {
+            return Err(ApplicationError::Forbidden);
+        }
+        self.pipelines
+            .reconcile_expired_attempts("standalone", limit.clamp(1, 1_000), Utc::now())
+            .await
+            .map_err(|_| ApplicationError::Unavailable)
+    }
+
+    /// Authenticates a remote runner and renews every active attempt it owns.
+    ///
+    /// # Errors
+    ///
+    /// Returns unauthenticated for missing/invalid/revoked machine credentials or unavailable
+    /// when durable runner state cannot be loaded or updated.
+    ///
+    /// # Panics
+    ///
+    /// HMAC-SHA256 accepts the fixed 32-byte derived key, so construction cannot panic.
+    pub async fn heartbeat_runner_attempts(
+        &self,
+        tenant_id: &str,
+        runner_id: Uuid,
+        credential: &str,
+        lease_seconds: i64,
+    ) -> Result<RunnerLeaseHeartbeat, ApplicationError> {
+        let now = Utc::now();
+        self.authenticate_runner(tenant_id, runner_id, credential, now)
+            .await?;
+        self.pipelines
+            .heartbeat_runner_attempts(tenant_id, runner_id, lease_seconds.clamp(1, 86_400), now)
+            .await
+            .map_err(|_| ApplicationError::Unavailable)
+    }
+
+    /// Reconciles a reconnecting runner's reported work with durable active ownership.
+    ///
+    /// # Errors
+    ///
+    /// Returns invalid-event for more than 64 reported attempts, unauthenticated for invalid
+    /// machine credentials, or unavailable when durable state cannot be reconciled.
+    ///
+    /// # Panics
+    ///
+    /// HMAC-SHA256 accepts the fixed 32-byte derived key, so construction cannot panic.
+    pub async fn reconcile_runner_attempts(
+        &self,
+        tenant_id: &str,
+        runner_id: Uuid,
+        credential: &str,
+        reported_attempt_ids: Vec<Uuid>,
+    ) -> Result<RunnerReconciliation, ApplicationError> {
+        if reported_attempt_ids.len() > 64 {
+            return Err(ApplicationError::InvalidAttemptEvent);
+        }
+        let now = Utc::now();
+        self.authenticate_runner(tenant_id, runner_id, credential, now)
+            .await?;
+        let resume = self
+            .pipelines
+            .reconcile_runner_attempts(tenant_id, runner_id, now)
+            .await
+            .map_err(|error| match error {
+                PortError::NotFound => ApplicationError::Unauthenticated,
+                _ => ApplicationError::Unavailable,
+            })?;
+        let assigned = resume
+            .iter()
+            .map(|item| item.attempt_id)
+            .collect::<BTreeSet<_>>();
+        let reported = reported_attempt_ids.into_iter().collect::<BTreeSet<_>>();
+        Ok(RunnerReconciliation {
+            resume,
+            lease_lost: reported.difference(&assigned).copied().collect(),
+        })
+    }
+
+    /// Authenticates and durably records one idempotent ordered remote-runner event.
+    ///
+    /// # Errors
+    ///
+    /// Returns unauthenticated for invalid machine credentials, forbidden for an unowned
+    /// attempt, conflict for message reuse or sequence gaps, invalid-event for invalid state,
+    /// or unavailable on persistence failure.
+    ///
+    /// # Panics
+    ///
+    /// HMAC-SHA256 accepts the fixed 32-byte derived key, so construction cannot panic.
+    pub async fn record_remote_attempt_event(
+        &self,
+        tenant_id: &str,
+        runner_id: Uuid,
+        credential: &str,
+        event: RecordRemoteAttemptEvent,
+    ) -> Result<AttemptProjection, ApplicationError> {
+        let now = Utc::now();
+        self.authenticate_runner(tenant_id, runner_id, credential, now)
+            .await?;
+        self.pipelines
+            .record_remote_attempt_event(
+                tenant_id,
+                runner_id,
+                Uuid::new_v4(),
+                Uuid::new_v4(),
+                &event,
+                now,
+            )
+            .await
+            .map_err(|error| match error {
+                PortError::NotFound => ApplicationError::Unauthenticated,
+                PortError::AttemptNotAssigned => ApplicationError::Forbidden,
+                PortError::MessageIdConflict => ApplicationError::IdempotencyConflict,
+                PortError::EventGap { expected, actual } => {
+                    ApplicationError::EventSequenceGap { expected, actual }
+                }
+                PortError::StaleEvent { last, actual } => ApplicationError::EventSequenceGap {
+                    expected: last + 1,
+                    actual,
+                },
+                PortError::InvalidAttemptEvent | PortError::InvalidTransition => {
+                    ApplicationError::InvalidAttemptEvent
+                }
+                _ => ApplicationError::Unavailable,
+            })
+    }
+
+    /// Returns a claimed execution offer only to its authenticated owning runner.
+    ///
+    /// # Errors
+    ///
+    /// Returns unauthenticated for invalid machine credentials, forbidden for a claim owned by
+    /// another runner, not-found for an unknown attempt, or unavailable on persistence failure.
+    ///
+    /// # Panics
+    ///
+    /// HMAC-SHA256 accepts the fixed 32-byte derived key, so construction cannot panic.
+    pub async fn remote_job_offer(
+        &self,
+        tenant_id: &str,
+        runner_id: Uuid,
+        credential: &str,
+        attempt_id: Uuid,
+    ) -> Result<serde_json::Value, ApplicationError> {
+        self.authenticate_runner(tenant_id, runner_id, credential, Utc::now())
+            .await?;
+        self.pipelines
+            .remote_job_offer(tenant_id, runner_id, attempt_id)
+            .await
+            .map_err(|error| match error {
+                PortError::NotFound => ApplicationError::PipelineNotFound,
+                PortError::AttemptNotAssigned => ApplicationError::Forbidden,
+                _ => ApplicationError::Unavailable,
+            })
+    }
+
+    async fn authenticate_runner(
+        &self,
+        tenant_id: &str,
+        runner_id: Uuid,
+        credential: &str,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<(), ApplicationError> {
+        let key = self
+            .runner_credential_key
+            .ok_or(ApplicationError::Unauthenticated)?;
+        if !credential.starts_with("rrc_") || credential.len() < 47 {
+            return Err(ApplicationError::Unauthenticated);
+        }
+        let material = self
+            .pipelines
+            .runner_authentication_material(tenant_id, runner_id, now)
+            .await;
+        let (known_and_enabled, credential_digests) = match material {
+            Ok(material) => (
+                material.admin_state != "revoked",
+                material.credential_digests,
+            ),
+            Err(PortError::NotFound) => {
+                let mut dummy =
+                    Hmac::<Sha256>::new_from_slice(&key).expect("fixed HMAC key is valid");
+                dummy.update(b"invalid-runner-credential-sentinel");
+                (false, vec![dummy.finalize().into_bytes().to_vec()])
+            }
+            Err(_) => return Err(ApplicationError::Unavailable),
+        };
+        let mut mac = Hmac::<Sha256>::new_from_slice(&key).expect("fixed HMAC key is valid");
+        mac.update(credential.as_bytes());
+        let actual = mac.finalize().into_bytes();
+        let authenticated = credential_digests.iter().fold(false, |matched, digest| {
+            let equal =
+                digest.len() == actual.len() && actual.as_slice().ct_eq(digest.as_slice()).into();
+            matched | equal
+        });
+        if !known_and_enabled || !authenticated {
+            return Err(ApplicationError::Unauthenticated);
+        }
+        Ok(())
+    }
 }
 
 fn authentication_error(error: &PortError) -> ApplicationError {
@@ -437,8 +934,106 @@ fn authentication_error(error: &PortError) -> ApplicationError {
         | PortError::LastAdministrator
         | PortError::OidcEmailCollision
         | PortError::InvalidTransition
+        | PortError::RetryDependenciesUnavailable(_)
+        | PortError::RetryInputsUnavailable(_)
+        | PortError::IdempotencyConflict
+        | PortError::Capacity
+        | PortError::NoWork
+        | PortError::EventGap { .. }
+        | PortError::InvalidAttemptEvent
+        | PortError::MessageIdConflict
+        | PortError::AttemptNotAssigned
+        | PortError::StaleEvent { .. }
         | PortError::Unavailable => ApplicationError::Unavailable,
     }
+}
+
+fn deterministic_uuid(key: &str) -> Uuid {
+    let digest = Sha256::digest(key.as_bytes());
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    Uuid::from_bytes(bytes)
+}
+
+fn build_new_pipeline(
+    input: CreatePipelineInput,
+    id: Uuid,
+    user: &User,
+    correlation_id: Uuid,
+    now: chrono::DateTime<Utc>,
+) -> Result<NewPipeline, ApplicationError> {
+    let mut graph_jobs = serde_json::Map::new();
+    let mut jobs = Vec::with_capacity(input.jobs.len());
+    for (position, (key, definition)) in input.jobs.iter().enumerate() {
+        let mut execution = definition
+            .execution
+            .as_object()
+            .cloned()
+            .unwrap_or_default();
+        execution
+            .entry("base_id")
+            .or_insert_with(|| serde_json::Value::String(key.clone()));
+        let mut graph_job = execution.clone();
+        graph_job.insert("needs".into(), serde_json::json!(definition.needs));
+        graph_jobs.insert(key.clone(), serde_json::Value::Object(graph_job));
+        jobs.push(NewJob {
+            id: Uuid::new_v4(),
+            key: key.clone(),
+            status: if definition.needs.is_empty() {
+                JobState::Queued
+            } else {
+                JobState::Blocked
+            },
+            needs: definition.needs.clone(),
+            position: i32::try_from(position)
+                .map_err(|_| ApplicationError::InvalidPipelineInput)?,
+            execution: serde_json::Value::Object(execution),
+        });
+    }
+    let normalized_graph = serde_json::json!({"jobs": graph_jobs});
+    let revision_input = input.workflow_revision.unwrap_or_else(|| {
+        let source = serde_json::to_string(&normalized_graph).unwrap_or_else(|_| "{}".into());
+        robine_core::pipelines::CreateWorkflowRevisionInput {
+            path: format!("generated://pipeline/{id}"),
+            source,
+            sources: std::collections::BTreeMap::new(),
+        }
+    });
+    let included_sources = serde_json::Value::Object(
+        revision_input
+            .sources
+            .iter()
+            .map(|(path, source)| {
+                (
+                    path.clone(),
+                    serde_json::json!({"source": source, "digest": source_digest(source)}),
+                )
+            })
+            .collect(),
+    );
+    Ok(NewPipeline {
+        id,
+        repository_id: input.repository_id,
+        workflow_name: input.workflow_name,
+        commit_sha: input.commit_sha,
+        source_ref: input.source_ref,
+        trigger: input.trigger,
+        actor: user.id.to_string(),
+        correlation_id,
+        inserted_at: now,
+        scheduled_for: input.scheduled_for,
+        inputs: input.inputs,
+        revision: NewWorkflowRevision {
+            id: Uuid::new_v4(),
+            path: revision_input.path,
+            digest: source_digest(&revision_input.source),
+            source: revision_input.source,
+            normalized_graph,
+            included_sources,
+        },
+        jobs,
+        event_id: Uuid::new_v4(),
+    })
 }
 
 fn valid_email(email: &str) -> bool {

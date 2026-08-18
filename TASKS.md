@@ -29,7 +29,7 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - **Spec:** [PLAT-004](docs/specs/platform/plat-004-rust-actix-migration.md)
 - **Depends on:** RUST-001
 - [~] Port database access, transactions, tenant isolation, identity, and sessions. (SQLx tenant transactions, first-admin bootstrap, compatible local sign-in, session lifecycle, OIDC discovery/PKCE/callback validation with collision-safe provisioning, administrator-only role administration with last-admin protection, and authenticated pipeline reads are implemented; browser-cookie delivery, OIDC key-rotation recovery, audit/rate limiting, and remaining repositories remain.)
-- [ ] Port workflows, pipeline lifecycle, scheduling, durable jobs, and outbox delivery.
+- [~] Port workflows, pipeline lifecycle, scheduling, durable jobs, and outbox delivery. (Tenant-scoped creation and lifecycle commands persist compatible graphs/events; local scheduling and remote placement enforce fair global/repository/runner capacity, runner freshness/protocol/capability labels, and leased ownership; authenticated remote events have durable replay receipts and stable graph reconciliation; heartbeats/reconnect report cancellation or lease loss; owning runners can fetch normalized provenance-rich offers. Workflow parsing, offer push transport and attempt transfer delivery, dependency reruns, and outbox delivery remain.)
 - [ ] Port source-control providers, runner protocol, execution adapters, secrets, and storage.
 - [ ] Replace LiveView with an accessible real-time Actix-delivered browser experience.
 - [ ] Port CLI, release packaging, configuration, telemetry, and operational tooling.

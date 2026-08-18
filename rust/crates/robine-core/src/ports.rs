@@ -5,7 +5,11 @@ use uuid::Uuid;
 
 use crate::{
     identity::{LocalIdentity, OidcAuthorization, OidcClaims, Role, User},
-    pipelines::PipelineProjection,
+    pipelines::{
+        AttemptProjection, NewPipeline, PipelineProjection, RecordAttemptEvent,
+        RecordRemoteAttemptEvent, RetryProjection, RunnerAuthenticationMaterial,
+        RunnerLeaseHeartbeat, RunnerResume, SchedulerClaim,
+    },
 };
 
 #[derive(Debug, Error)]
@@ -22,6 +26,26 @@ pub enum PortError {
     InvalidData,
     #[error("the requested state transition is not allowed")]
     InvalidTransition,
+    #[error("job dependencies are not available: {0:?}")]
+    RetryDependenciesUnavailable(Vec<String>),
+    #[error("retained artifact inputs are not available: {0:?}")]
+    RetryInputsUnavailable(Vec<String>),
+    #[error("an idempotent creation key was reused with different input")]
+    IdempotencyConflict,
+    #[error("scheduler capacity is exhausted")]
+    Capacity,
+    #[error("no eligible work is queued")]
+    NoWork,
+    #[error("attempt event sequence gap: expected {expected}, got {actual}")]
+    EventGap { expected: i32, actual: i32 },
+    #[error("attempt event is invalid")]
+    InvalidAttemptEvent,
+    #[error("runner message id conflicts with a different event")]
+    MessageIdConflict,
+    #[error("attempt is not assigned to the authenticated runner")]
+    AttemptNotAssigned,
+    #[error("runner event sequence is stale: last {last}, got {actual}")]
+    StaleEvent { last: i32, actual: i32 },
     #[error("persistence operation failed")]
     Unavailable,
 }
@@ -80,12 +104,24 @@ pub trait OidcProvider: Send + Sync {
 
 #[async_trait]
 pub trait PipelineRepository: Send + Sync {
+    async fn create(
+        &self,
+        tenant_id: &str,
+        pipeline: &NewPipeline,
+    ) -> Result<PipelineProjection, PortError>;
+
     async fn list_recent(
         &self,
         tenant_id: &str,
         repository_id: Option<Uuid>,
         limit: i64,
     ) -> Result<Vec<PipelineProjection>, PortError>;
+
+    async fn queue(
+        &self,
+        tenant_id: &str,
+        pipeline_id: Uuid,
+    ) -> Result<PipelineProjection, PortError>;
 
     async fn cancel(
         &self,
@@ -94,4 +130,80 @@ pub trait PipelineRepository: Send + Sync {
         event_id: Uuid,
         now: DateTime<Utc>,
     ) -> Result<PipelineProjection, PortError>;
+
+    async fn retry_job(
+        &self,
+        tenant_id: &str,
+        job_id: Uuid,
+        event_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<RetryProjection, PortError>;
+
+    async fn claim_next_job(
+        &self,
+        tenant_id: &str,
+        claim: &SchedulerClaim,
+    ) -> Result<AttemptProjection, PortError>;
+
+    async fn record_attempt_event(
+        &self,
+        tenant_id: &str,
+        event_id: Uuid,
+        event: &RecordAttemptEvent,
+        now: DateTime<Utc>,
+    ) -> Result<AttemptProjection, PortError>;
+
+    async fn heartbeat_attempt(
+        &self,
+        tenant_id: &str,
+        idempotency_token: Uuid,
+        lease_seconds: i64,
+        now: DateTime<Utc>,
+    ) -> Result<AttemptProjection, PortError>;
+
+    async fn reconcile_expired_attempts(
+        &self,
+        tenant_id: &str,
+        limit: i64,
+        now: DateTime<Utc>,
+    ) -> Result<u64, PortError>;
+
+    async fn runner_authentication_material(
+        &self,
+        tenant_id: &str,
+        runner_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<RunnerAuthenticationMaterial, PortError>;
+
+    async fn heartbeat_runner_attempts(
+        &self,
+        tenant_id: &str,
+        runner_id: Uuid,
+        lease_seconds: i64,
+        now: DateTime<Utc>,
+    ) -> Result<RunnerLeaseHeartbeat, PortError>;
+
+    async fn reconcile_runner_attempts(
+        &self,
+        tenant_id: &str,
+        runner_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<RunnerResume>, PortError>;
+
+    async fn record_remote_attempt_event(
+        &self,
+        tenant_id: &str,
+        runner_id: Uuid,
+        receipt_id: Uuid,
+        outbox_event_id: Uuid,
+        event: &RecordRemoteAttemptEvent,
+        now: DateTime<Utc>,
+    ) -> Result<AttemptProjection, PortError>;
+
+    async fn remote_job_offer(
+        &self,
+        tenant_id: &str,
+        runner_id: Uuid,
+        attempt_id: Uuid,
+    ) -> Result<serde_json::Value, PortError>;
 }

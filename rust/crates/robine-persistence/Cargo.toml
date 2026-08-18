@@ -17,6 +17,7 @@ uuid.workspace = true
 
 [dev-dependencies]
 argon2.workspace = true
+hmac.workspace = true
 robine-application = { path = "../robine-application" }
 sha2.workspace = true
 tokio.workspace = true

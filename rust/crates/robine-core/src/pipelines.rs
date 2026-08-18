@@ -1,5 +1,8 @@
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -11,6 +14,236 @@ pub struct PipelineProjection {
     pub commit_sha: String,
     pub status: String,
     pub inserted_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct CreatePipelineInput {
+    pub repository_id: Uuid,
+    pub workflow_name: String,
+    pub commit_sha: String,
+    #[serde(default)]
+    pub source_ref: Option<String>,
+    #[serde(default = "default_trigger")]
+    pub trigger: String,
+    #[serde(default)]
+    pub inputs: BTreeMap<String, String>,
+    #[serde(default)]
+    pub scheduled_for: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
+    #[serde(default)]
+    pub jobs: BTreeMap<String, CreateJobInput>,
+    pub workflow_revision: Option<CreateWorkflowRevisionInput>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct CreateJobInput {
+    #[serde(default)]
+    pub needs: Vec<String>,
+    #[serde(default)]
+    pub execution: serde_json::Value,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct CreateWorkflowRevisionInput {
+    pub path: String,
+    pub source: String,
+    #[serde(default)]
+    pub sources: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct NewPipeline {
+    pub id: Uuid,
+    pub repository_id: Uuid,
+    pub workflow_name: String,
+    pub commit_sha: String,
+    pub source_ref: Option<String>,
+    pub trigger: String,
+    pub actor: String,
+    pub correlation_id: Uuid,
+    pub inserted_at: DateTime<Utc>,
+    pub scheduled_for: Option<DateTime<Utc>>,
+    pub inputs: BTreeMap<String, String>,
+    pub revision: NewWorkflowRevision,
+    pub jobs: Vec<NewJob>,
+    pub event_id: Uuid,
+}
+
+#[derive(Clone, Debug)]
+pub struct NewWorkflowRevision {
+    pub id: Uuid,
+    pub path: String,
+    pub source: String,
+    pub digest: String,
+    pub normalized_graph: serde_json::Value,
+    pub included_sources: serde_json::Value,
+}
+
+#[derive(Clone, Debug)]
+pub struct NewJob {
+    pub id: Uuid,
+    pub key: String,
+    pub status: JobState,
+    pub needs: Vec<String>,
+    pub position: i32,
+    pub execution: serde_json::Value,
+}
+
+fn default_trigger() -> String {
+    "manual".into()
+}
+
+#[derive(Debug, Error, Eq, PartialEq)]
+pub enum InvalidPipelineInput {
+    #[error("workflow name is required")]
+    WorkflowName,
+    #[error("commit SHA must contain 40 lowercase hexadecimal characters")]
+    CommitSha,
+    #[error("pipeline metadata exceeds its bound")]
+    Metadata,
+    #[error("manual inputs violate their bounds")]
+    Inputs,
+    #[error("pipeline must contain at most 64 jobs")]
+    JobLimit,
+    #[error("job identifier is invalid")]
+    JobIdentifier,
+    #[error("job dependency is invalid")]
+    JobDependency,
+    #[error("job graph contains a cycle")]
+    JobCycle,
+    #[error("workflow revision is invalid")]
+    WorkflowRevision,
+}
+
+impl CreatePipelineInput {
+    /// Validates delivery-independent pipeline creation bounds and graph invariants.
+    ///
+    /// # Errors
+    ///
+    /// Returns a stable [`InvalidPipelineInput`] category for malformed metadata,
+    /// jobs, dependencies, cycles, inputs, or immutable revision sources.
+    pub fn validate(&self) -> Result<(), InvalidPipelineInput> {
+        if self.workflow_name.is_empty() || self.workflow_name.len() > 255 {
+            return Err(InvalidPipelineInput::WorkflowName);
+        }
+        if self.commit_sha.len() != 40
+            || !self
+                .commit_sha
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(InvalidPipelineInput::CommitSha);
+        }
+        if self.trigger.is_empty()
+            || self.trigger.len() > 255
+            || self
+                .source_ref
+                .as_ref()
+                .is_some_and(|value| value.len() > 255)
+        {
+            return Err(InvalidPipelineInput::Metadata);
+        }
+        if self.inputs.len() > 16
+            || self
+                .inputs
+                .iter()
+                .any(|(key, value)| key.len() > 31 || value.len() > 1_024)
+        {
+            return Err(InvalidPipelineInput::Inputs);
+        }
+        validate_jobs(&self.jobs)?;
+        if let Some(revision) = &self.workflow_revision {
+            validate_revision(revision)?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_jobs(jobs: &BTreeMap<String, CreateJobInput>) -> Result<(), InvalidPipelineInput> {
+    if jobs.len() > 64 {
+        return Err(InvalidPipelineInput::JobLimit);
+    }
+    for (key, job) in jobs {
+        if !valid_job_key(key) {
+            return Err(InvalidPipelineInput::JobIdentifier);
+        }
+        let unique = job.needs.iter().collect::<HashSet<_>>();
+        if unique.len() != job.needs.len()
+            || job
+                .needs
+                .iter()
+                .any(|dependency| dependency == key || !jobs.contains_key(dependency.as_str()))
+        {
+            return Err(InvalidPipelineInput::JobDependency);
+        }
+        if !job.execution.is_null() && !job.execution.is_object() {
+            return Err(InvalidPipelineInput::JobDependency);
+        }
+        let condition = job
+            .execution
+            .get("condition")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("success");
+        if !matches!(condition, "success" | "failure" | "always")
+            || (condition == "failure" && job.needs.is_empty())
+        {
+            return Err(InvalidPipelineInput::JobDependency);
+        }
+    }
+    let mut marks = HashMap::new();
+    for key in jobs.keys() {
+        visit_job(key, jobs, &mut marks)?;
+    }
+    Ok(())
+}
+
+fn visit_job<'a>(
+    key: &'a str,
+    jobs: &'a BTreeMap<String, CreateJobInput>,
+    marks: &mut HashMap<&'a str, u8>,
+) -> Result<(), InvalidPipelineInput> {
+    match marks.get(key) {
+        Some(1) => return Err(InvalidPipelineInput::JobCycle),
+        Some(2) => return Ok(()),
+        _ => {}
+    }
+    marks.insert(key, 1);
+    for dependency in &jobs[key].needs {
+        visit_job(dependency, jobs, marks)?;
+    }
+    marks.insert(key, 2);
+    Ok(())
+}
+
+fn valid_job_key(key: &str) -> bool {
+    (1..=63).contains(&key.len())
+        && key.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
+        && key
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_-".contains(&byte))
+}
+
+fn validate_revision(revision: &CreateWorkflowRevisionInput) -> Result<(), InvalidPipelineInput> {
+    if revision.path.is_empty()
+        || revision.path.len() > 255
+        || revision.source.len() > 262_144
+        || revision.sources.len() > 16
+        || revision
+            .sources
+            .iter()
+            .any(|(path, source)| path.is_empty() || path.len() > 256 || source.len() > 262_144)
+        || revision.sources.values().map(String::len).sum::<usize>() > 4_194_304
+    {
+        Err(InvalidPipelineInput::WorkflowRevision)
+    } else {
+        Ok(())
+    }
+}
+
+#[must_use]
+pub fn source_digest(source: &str) -> String {
+    format!("{:x}", Sha256::digest(source.as_bytes()))
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -26,6 +259,22 @@ pub enum PipelineState {
 }
 
 impl PipelineState {
+    /// Queues a created pipeline and treats already dispatched states idempotently.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidTransition`] for cancelling or terminal pipelines.
+    pub fn queue(self) -> Result<Self, InvalidTransition> {
+        match self {
+            Self::Created => Ok(Self::Queued),
+            Self::Queued | Self::Running => Ok(self),
+            state => Err(InvalidTransition {
+                state,
+                event: PipelineEvent::Queue,
+            }),
+        }
+    }
+
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
@@ -99,7 +348,7 @@ impl PipelineState {
             (State::Queued | State::Running, Event::RequestCancellation) => Ok(State::Cancelling),
             (State::Running, Event::Succeed) => Ok(State::Succeeded),
             (State::Running, Event::Fail) => Ok(State::Failed),
-            (State::Cancelling, Event::Cancel) => Ok(State::Cancelled),
+            (State::Running | State::Cancelling, Event::Cancel) => Ok(State::Cancelled),
             _ => Err(InvalidTransition { state: self, event }),
         }
     }
@@ -112,13 +361,57 @@ impl PipelineState {
     pub fn request_cancellation(self) -> Result<Self, InvalidTransition> {
         match self {
             Self::Created | Self::Queued => Ok(Self::Cancelled),
-            Self::Running => Ok(Self::Cancelling),
-            Self::Cancelling => Ok(Self::Cancelling),
+            Self::Running | Self::Cancelling => Ok(Self::Cancelling),
             terminal => Err(InvalidTransition {
                 state: terminal,
                 event: PipelineEvent::RequestCancellation,
             }),
         }
+    }
+
+    /// Reopens only a failed or cancelled pipeline for a deliberate retry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidTransition`] for every non-retryable state.
+    pub fn reopen_for_retry(self) -> Result<Self, InvalidTransition> {
+        match self {
+            Self::Failed | Self::Cancelled => Ok(Self::Running),
+            state => Err(InvalidTransition {
+                state,
+                event: PipelineEvent::Start,
+            }),
+        }
+    }
+
+    /// Derives the terminal pipeline result once every job is terminal.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidTransition`] only when the derived transition is inconsistent.
+    pub fn complete_from_jobs(self, jobs: &[JobState]) -> Result<Self, InvalidTransition> {
+        if !matches!(self, Self::Running | Self::Cancelling)
+            || jobs.is_empty()
+            || jobs.iter().any(|state| !state.terminal())
+        {
+            return Ok(self);
+        }
+        let target = if self == Self::Cancelling {
+            Self::Cancelled
+        } else if jobs.contains(&JobState::Failed) {
+            Self::Failed
+        } else if jobs.contains(&JobState::Cancelled) {
+            Self::Cancelled
+        } else {
+            Self::Succeeded
+        };
+        let event = match target {
+            Self::Succeeded => PipelineEvent::Succeed,
+            Self::Failed => PipelineEvent::Fail,
+            Self::Cancelled => PipelineEvent::Cancel,
+            _ => unreachable!("terminal aggregate has a terminal target"),
+        };
+        self.transition(event)
     }
 }
 
@@ -136,6 +429,20 @@ pub enum JobState {
 
 impl JobState {
     #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Blocked => "blocked",
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Cancelling => "cancelling",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Skipped => "skipped",
+        }
+    }
+
+    #[must_use]
     pub const fn cancellation_target(self) -> Option<Self> {
         match self {
             Self::Blocked | Self::Queued => Some(Self::Cancelled),
@@ -144,6 +451,292 @@ impl JobState {
                 None
             }
         }
+    }
+
+    /// Requeues only failed or cancelled jobs.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UnknownJobState`] with the current state when retry is not allowed.
+    pub fn retry(self) -> Result<Self, UnknownJobState> {
+        match self {
+            Self::Failed | Self::Cancelled => Ok(Self::Queued),
+            state => Err(UnknownJobState(state.as_str().into())),
+        }
+    }
+
+    #[must_use]
+    pub const fn terminal(self) -> bool {
+        matches!(
+            self,
+            Self::Succeeded | Self::Failed | Self::Cancelled | Self::Skipped
+        )
+    }
+
+    /// Resolves a blocked job against a terminal dependency snapshot.
+    #[must_use]
+    pub fn release(self, condition: &str, dependencies: &[Self]) -> Self {
+        if self != Self::Blocked || dependencies.iter().any(|state| !state.terminal()) {
+            return self;
+        }
+        if dependencies.contains(&Self::Cancelled) {
+            return Self::Skipped;
+        }
+        match condition {
+            "success" if dependencies.iter().all(|state| *state == Self::Succeeded) => Self::Queued,
+            "failure" if dependencies.contains(&Self::Failed) => Self::Queued,
+            "always" => Self::Queued,
+            "success" | "failure" => Self::Skipped,
+            _ => self,
+        }
+    }
+}
+
+impl TryFrom<&str> for JobState {
+    type Error = UnknownJobState;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "blocked" => Ok(Self::Blocked),
+            "queued" => Ok(Self::Queued),
+            "running" => Ok(Self::Running),
+            "cancelling" => Ok(Self::Cancelling),
+            "succeeded" => Ok(Self::Succeeded),
+            "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
+            "skipped" => Ok(Self::Skipped),
+            unknown => Err(UnknownJobState(unknown.into())),
+        }
+    }
+}
+
+#[derive(Debug, Error, Eq, PartialEq)]
+#[error("unknown or non-retryable job state: {0}")]
+pub struct UnknownJobState(String);
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RetryProjection {
+    pub pipeline_id: Uuid,
+    pub job_id: Uuid,
+    pub status: String,
+    pub rerun_jobs: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct AttemptProjection {
+    pub id: Uuid,
+    pub job_id: Uuid,
+    pub number: i32,
+    pub idempotency_token: Uuid,
+    pub status: String,
+    pub lease_expires_at: DateTime<Utc>,
+    pub last_sequence: i32,
+    pub result_reason: Option<String>,
+}
+
+impl AttemptProjection {
+    /// Extends an active attempt lease monotonically.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AttemptHeartbeatError`] for a terminal/unknown state or invalid duration.
+    pub fn heartbeat(
+        &self,
+        now: DateTime<Utc>,
+        lease_seconds: i64,
+    ) -> Result<DateTime<Utc>, AttemptHeartbeatError> {
+        let state =
+            AttemptState::try_from(self.status.as_str()).map_err(|_| AttemptHeartbeatError)?;
+        if state.terminal() || lease_seconds <= 0 {
+            return Err(AttemptHeartbeatError);
+        }
+        Ok(self
+            .lease_expires_at
+            .max(now + chrono::Duration::seconds(lease_seconds)))
+    }
+}
+
+#[derive(Debug, Error, Eq, PartialEq)]
+#[error("attempt lease cannot be renewed")]
+pub struct AttemptHeartbeatError;
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RunnerLeaseHeartbeat {
+    pub renewed_attempts: u64,
+    pub cancellation_requested_attempt_ids: Vec<Uuid>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RunnerAuthenticationMaterial {
+    pub id: Uuid,
+    pub name: String,
+    pub admin_state: String,
+    pub credential_digests: Vec<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RunnerResume {
+    pub attempt_id: Uuid,
+    pub acknowledged_sequence: i32,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RunnerReconciliation {
+    pub resume: Vec<RunnerResume>,
+    pub lease_lost: Vec<Uuid>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SchedulerClaim {
+    pub global_limit: i64,
+    pub repository_limit: i64,
+    pub lease_seconds: i64,
+    pub attempt_id: Uuid,
+    pub idempotency_token: Uuid,
+    pub event_id: Uuid,
+    pub now: DateTime<Utc>,
+    pub runner_id: Option<Uuid>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct RecordAttemptEvent {
+    pub idempotency_token: Uuid,
+    pub sequence: i32,
+    pub status: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct RecordRemoteAttemptEvent {
+    pub idempotency_token: Uuid,
+    pub message_id: String,
+    pub sequence: i32,
+    pub status: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+impl RecordRemoteAttemptEvent {
+    #[must_use]
+    pub fn attempt_event(&self) -> RecordAttemptEvent {
+        RecordAttemptEvent {
+            idempotency_token: self.idempotency_token,
+            sequence: self.sequence,
+            status: self.status.clone(),
+            reason: self.reason.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AttemptState {
+    Queued,
+    Preparing,
+    Running,
+    Cancelling,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+impl AttemptState {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Preparing => "preparing",
+            Self::Running => "running",
+            Self::Cancelling => "cancelling",
+            Self::Succeeded => "succeeded",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    #[must_use]
+    pub const fn terminal(self) -> bool {
+        matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled)
+    }
+
+    /// Applies one ordered runner event, returning `None` for an already-seen sequence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AttemptEventError`] for a sequence gap, invalid reason, or transition.
+    pub fn apply(
+        self,
+        last_sequence: i32,
+        event: &RecordAttemptEvent,
+    ) -> Result<Option<Self>, AttemptEventError> {
+        if event.sequence <= last_sequence {
+            return Ok(None);
+        }
+        if event.sequence != last_sequence + 1 {
+            return Err(AttemptEventError::Gap {
+                expected: last_sequence + 1,
+                actual: event.sequence,
+            });
+        }
+        let target = Self::try_from(event.status.as_str())
+            .map_err(|_| AttemptEventError::InvalidTransition)?;
+        if !valid_attempt_reason(target, event.reason.as_deref()) {
+            return Err(AttemptEventError::InvalidReason);
+        }
+        let allowed = match self {
+            Self::Queued => matches!(target, Self::Preparing | Self::Cancelled | Self::Failed),
+            Self::Preparing => matches!(
+                target,
+                Self::Running | Self::Cancelling | Self::Cancelled | Self::Failed
+            ),
+            Self::Running => matches!(
+                target,
+                Self::Cancelling | Self::Succeeded | Self::Failed | Self::Cancelled
+            ),
+            Self::Cancelling => matches!(target, Self::Cancelled | Self::Failed),
+            Self::Succeeded | Self::Failed | Self::Cancelled => false,
+        };
+        allowed
+            .then_some(Some(target))
+            .ok_or(AttemptEventError::InvalidTransition)
+    }
+}
+
+impl TryFrom<&str> for AttemptState {
+    type Error = AttemptEventError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "queued" => Ok(Self::Queued),
+            "preparing" => Ok(Self::Preparing),
+            "running" => Ok(Self::Running),
+            "cancelling" => Ok(Self::Cancelling),
+            "succeeded" => Ok(Self::Succeeded),
+            "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
+            _ => Err(AttemptEventError::InvalidTransition),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+pub enum AttemptEventError {
+    #[error("attempt event sequence gap: expected {expected}, got {actual}")]
+    Gap { expected: i32, actual: i32 },
+    #[error("attempt event transition is invalid")]
+    InvalidTransition,
+    #[error("attempt result reason is invalid")]
+    InvalidReason,
+}
+
+fn valid_attempt_reason(state: AttemptState, reason: Option<&str>) -> bool {
+    match (state, reason) {
+        (AttemptState::Failed, Some(reason)) => matches!(
+            reason,
+            "command_failed" | "timeout" | "runner_lost" | "service_unavailable" | "system_failure"
+        ),
+        (AttemptState::Cancelled, Some("cancelled")) | (_, None) => true,
+        _ => false,
     }
 }
 
@@ -216,5 +809,133 @@ mod tests {
             Some(JobState::Cancelling)
         );
         assert_eq!(JobState::Succeeded.cancellation_target(), None);
+    }
+
+    #[test]
+    fn retry_reopens_only_failed_or_cancelled_work() {
+        assert_eq!(
+            PipelineState::Failed.reopen_for_retry(),
+            Ok(PipelineState::Running)
+        );
+        assert!(PipelineState::Succeeded.reopen_for_retry().is_err());
+        assert_eq!(JobState::Cancelled.retry(), Ok(JobState::Queued));
+        assert!(JobState::Succeeded.retry().is_err());
+    }
+
+    #[test]
+    fn queue_is_idempotent_after_dispatch_but_rejects_terminal_work() {
+        assert_eq!(PipelineState::Created.queue(), Ok(PipelineState::Queued));
+        assert_eq!(PipelineState::Queued.queue(), Ok(PipelineState::Queued));
+        assert_eq!(PipelineState::Running.queue(), Ok(PipelineState::Running));
+        assert!(PipelineState::Failed.queue().is_err());
+    }
+
+    #[test]
+    fn creation_validation_rejects_bad_sha_dependencies_and_cycles() {
+        let mut input: CreatePipelineInput = serde_json::from_value(serde_json::json!({
+            "repository_id": Uuid::nil(),
+            "workflow_name": "CI",
+            "commit_sha": "a".repeat(40),
+            "jobs": {
+                "build": {"execution": {}},
+                "test": {"needs": ["build"], "execution": {}}
+            }
+        }))
+        .expect("valid creation shape");
+        assert_eq!(input.validate(), Ok(()));
+
+        input.commit_sha = "ABC".into();
+        assert_eq!(input.validate(), Err(InvalidPipelineInput::CommitSha));
+        input.commit_sha = "a".repeat(40);
+        input.jobs.get_mut("build").expect("build").needs = vec!["test".into()];
+        assert_eq!(input.validate(), Err(InvalidPipelineInput::JobCycle));
+        input.jobs.get_mut("build").expect("build").needs = vec!["missing".into()];
+        assert_eq!(input.validate(), Err(InvalidPipelineInput::JobDependency));
+    }
+
+    #[test]
+    fn attempt_events_are_ordered_idempotent_and_reason_checked() {
+        let preparing = RecordAttemptEvent {
+            idempotency_token: Uuid::nil(),
+            sequence: 1,
+            status: "preparing".into(),
+            reason: None,
+        };
+        assert_eq!(
+            AttemptState::Queued.apply(0, &preparing),
+            Ok(Some(AttemptState::Preparing))
+        );
+        assert_eq!(AttemptState::Preparing.apply(1, &preparing), Ok(None));
+        let gap = RecordAttemptEvent {
+            sequence: 3,
+            status: "running".into(),
+            ..preparing.clone()
+        };
+        assert_eq!(
+            AttemptState::Preparing.apply(1, &gap),
+            Err(AttemptEventError::Gap {
+                expected: 2,
+                actual: 3
+            })
+        );
+        let failed = RecordAttemptEvent {
+            sequence: 2,
+            status: "failed".into(),
+            reason: Some("command_failed".into()),
+            ..preparing
+        };
+        assert_eq!(
+            AttemptState::Preparing.apply(1, &failed),
+            Ok(Some(AttemptState::Failed))
+        );
+    }
+
+    #[test]
+    fn dependency_release_and_pipeline_aggregation_match_terminal_outcomes() {
+        assert_eq!(
+            JobState::Blocked.release("success", &[JobState::Succeeded]),
+            JobState::Queued
+        );
+        assert_eq!(
+            JobState::Blocked.release("success", &[JobState::Failed]),
+            JobState::Skipped
+        );
+        assert_eq!(
+            JobState::Blocked.release("always", &[JobState::Cancelled]),
+            JobState::Skipped
+        );
+        assert_eq!(
+            PipelineState::Running.complete_from_jobs(&[JobState::Succeeded, JobState::Skipped]),
+            Ok(PipelineState::Succeeded)
+        );
+        assert_eq!(
+            PipelineState::Running.complete_from_jobs(&[JobState::Failed]),
+            Ok(PipelineState::Failed)
+        );
+    }
+
+    #[test]
+    fn heartbeat_is_monotonic_sequence_neutral_and_rejects_terminal_attempts() {
+        let now = Utc::now();
+        let attempt = AttemptProjection {
+            id: Uuid::new_v4(),
+            job_id: Uuid::new_v4(),
+            number: 1,
+            idempotency_token: Uuid::new_v4(),
+            status: "running".into(),
+            lease_expires_at: now + chrono::Duration::seconds(120),
+            last_sequence: 4,
+            result_reason: None,
+        };
+        assert_eq!(attempt.heartbeat(now, 60), Ok(attempt.lease_expires_at));
+        assert_eq!(
+            attempt.heartbeat(now, 180),
+            Ok(now + chrono::Duration::seconds(180))
+        );
+        let terminal = AttemptProjection {
+            status: "succeeded".into(),
+            ..attempt
+        };
+        assert_eq!(terminal.heartbeat(now, 60), Err(AttemptHeartbeatError));
     }
 }

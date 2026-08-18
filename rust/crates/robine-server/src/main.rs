@@ -22,6 +22,9 @@ async fn main() -> io::Result<()> {
         control_plane =
             control_plane.with_bootstrap_token(&token, Utc::now() + Duration::minutes(15));
     }
+    if let Ok(secret_key_base) = std::env::var("SECRET_KEY_BASE") {
+        control_plane = control_plane.with_runner_secret_key_base(&secret_key_base);
+    }
     if let (Ok(issuer), Ok(client_id), Ok(client_secret)) = (
         std::env::var("OIDC_ISSUER"),
         std::env::var("OIDC_CLIENT_ID"),

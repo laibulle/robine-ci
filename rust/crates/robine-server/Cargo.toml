@@ -20,6 +20,8 @@ uuid.workspace = true
 
 [dev-dependencies]
 actix-web.workspace = true
+hmac.workspace = true
+sha2.workspace = true
 sqlx.workspace = true
 
 [lints]
