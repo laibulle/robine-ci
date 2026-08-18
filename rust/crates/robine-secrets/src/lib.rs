@@ -51,6 +51,23 @@ pub enum SecretError {
 
 #[async_trait]
 pub trait SecretRepository: Send + Sync {
+    async fn find_instance(
+        &self,
+        _tenant_id: &str,
+        _name: &str,
+    ) -> Result<Option<EncryptedSecret>, SecretError> {
+        Err(SecretError::Unavailable)
+    }
+
+    async fn upsert_instance(
+        &self,
+        _tenant_id: &str,
+        _actor_id: Uuid,
+        _secret: &EncryptedSecret,
+    ) -> Result<(), SecretError> {
+        Err(SecretError::Unavailable)
+    }
+
     async fn find_authorized(
         &self,
         tenant_id: &str,
@@ -199,6 +216,42 @@ impl AesGcmKeyring {
             name,
             scope: SecretScope::Repository,
             repository_id: Some(repository_id),
+            allowed_repository_ids: Vec::new(),
+            ciphertext: plaintext.to_vec(),
+            nonce: Vec::new(),
+            tag: Vec::new(),
+            key_version,
+        };
+        let cipher =
+            Aes256Gcm::new_from_slice(key).map_err(|_| SecretError::InvalidConfiguration)?;
+        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let tag = cipher
+            .encrypt_in_place_detached(&nonce, &erlang_aad(&secret), &mut secret.ciphertext)
+            .map_err(|_| SecretError::AuthenticationFailed)?;
+        secret.nonce = nonce.to_vec();
+        secret.tag = tag.to_vec();
+        Ok(secret)
+    }
+
+    /// Encrypts a write-only instance credential using the current key version.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no encryption key is configured or encryption fails.
+    pub fn encrypt_instance(
+        &self,
+        name: String,
+        plaintext: &[u8],
+    ) -> Result<EncryptedSecret, SecretError> {
+        let (&key_version, key) = self
+            .keys
+            .last_key_value()
+            .ok_or(SecretError::KeyUnavailable)?;
+        let mut secret = EncryptedSecret {
+            id: Uuid::new_v4(),
+            name,
+            scope: SecretScope::Instance,
+            repository_id: None,
             allowed_repository_ids: Vec::new(),
             ciphertext: plaintext.to_vec(),
             nonce: Vec::new(),

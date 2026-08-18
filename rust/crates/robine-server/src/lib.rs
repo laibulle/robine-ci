@@ -19,6 +19,7 @@ use robine_core::{
     pipelines::{CreatePipelineInput, RecordAttemptEvent, SourceControlDelivery},
 };
 use robine_persistence::Readiness;
+use robine_source::AvailableRepository;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
@@ -1318,12 +1319,152 @@ async fn browser_repositories(request: HttpRequest, state: web::Data<AppState>) 
         let _ = write!(output, "<a class=\"surface-panel pipeline-row\" href=\"/repositories/{}\"><strong>{}</strong><span>{provider}</span><small>{}</small></a>", repository.id, escape_html(&repository.full_name), escape_html(&repository.provider_instance));
         output
     });
+    let connection = if user.role == Role::Administrator {
+        let token = session_token(&request).unwrap_or_default();
+        github_connection_panel(&csrf_token(&token), "")
+    } else {
+        String::new()
+    };
     html_page(
         "Repositories",
         &format!(
-            "<section><p class=\"eyebrow\">Source control</p><h1>Repositories</h1><p>Trusted GitHub, GitLab and Forgejo repositories.</p><div id=\"repositories\">{rows}</div></section>"
+            "<section><p class=\"eyebrow\">Source control</p><h1>Repositories</h1><p>Trusted GitHub repositories.</p><div id=\"repositories\">{rows}</div>{connection}</section>"
         ),
     )
+}
+
+fn github_connection_panel(csrf: &str, candidates: &str) -> String {
+    format!(
+        "<details id=\"github-app-assistant\" class=\"surface-panel\" open><summary>Connect a GitHub repository</summary><ol><li><strong>1. Create the GitHub App in GitHub.</strong> Set Homepage URL to this Robine instance and Webhook URL to <code>/api/github/webhooks</code>.</li><li><strong>2. Apply least privilege in GitHub.</strong> Repository permissions: Metadata read, Contents read, Pull requests read, Checks write. Subscribe to Push and Pull request events.</li><li><strong>3. Configure Robine.</strong> Set the non-secret <code>GITHUB_APP_ID</code>. Store the private key and webhook secret below; values are encrypted, write-only, and take effect after restart.</li><li><strong>4. Install and select.</strong> Install the App on the intended repositories, then discover them below.</li></ol><div class=\"config-grid\"><form id=\"github-private-key-form\" method=\"post\" action=\"/admin/github/credentials\"><input type=\"hidden\" name=\"csrf_token\" value=\"{}\"><input type=\"hidden\" name=\"name\" value=\"GITHUB_APP_PRIVATE_KEY\"><label>GitHub App private key<textarea name=\"value\" required minlength=\"8\" maxlength=\"65536\" autocomplete=\"off\"></textarea></label><button type=\"submit\">Store write-only private key</button></form><form id=\"github-webhook-secret-form\" method=\"post\" action=\"/admin/github/credentials\"><input type=\"hidden\" name=\"csrf_token\" value=\"{}\"><input type=\"hidden\" name=\"name\" value=\"GITHUB_WEBHOOK_SECRET\"><label>Webhook secret<input type=\"password\" name=\"value\" required minlength=\"8\" maxlength=\"65536\" autocomplete=\"off\"></label><button type=\"submit\">Store write-only webhook secret</button></form></div><form id=\"github-discovery-form\" method=\"post\" action=\"/repositories/github/discover\"><input type=\"hidden\" name=\"csrf_token\" value=\"{}\"><button class=\"primary\" type=\"submit\">Verify connection and discover repositories</button></form><div id=\"github-discovery-results\">{candidates}</div></details>",
+        escape_html(csrf),
+        escape_html(csrf),
+        escape_html(csrf)
+    )
+}
+
+#[derive(Deserialize)]
+struct GitHubDiscoveryForm {
+    csrf_token: String,
+}
+
+#[derive(Deserialize)]
+struct GitHubTrustForm {
+    csrf_token: String,
+    provider_id: i64,
+    installation_id: i64,
+    full_name: String,
+    private: bool,
+}
+
+#[derive(Deserialize)]
+struct GitHubCredentialForm {
+    csrf_token: String,
+    name: String,
+    value: String,
+}
+
+async fn store_github_credential(
+    request: HttpRequest,
+    input: web::Form<GitHubCredentialForm>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let Ok((actor, token)) = browser_administrator(&request, &state).await else {
+        return HttpResponse::Unauthorized().finish();
+    };
+    if !valid_csrf(&input.csrf_token, &token) {
+        return HttpResponse::Forbidden().finish();
+    }
+    match state
+        .control_plane
+        .store_instance_secret(&actor, input.name.clone(), input.value.as_bytes())
+        .await
+    {
+        Ok(()) => HttpResponse::SeeOther()
+            .insert_header((header::LOCATION, "/repositories"))
+            .finish(),
+        Err(ApplicationError::InvalidPipelineInput) => HttpResponse::UnprocessableEntity().finish(),
+        Err(ApplicationError::Forbidden) => HttpResponse::Forbidden().finish(),
+        Err(_) => HttpResponse::ServiceUnavailable().finish(),
+    }
+}
+
+async fn discover_github_repositories(
+    request: HttpRequest,
+    input: web::Form<GitHubDiscoveryForm>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let Ok((actor, token)) = browser_administrator(&request, &state).await else {
+        return HttpResponse::Unauthorized().finish();
+    };
+    if !valid_csrf(&input.csrf_token, &token) {
+        return HttpResponse::Forbidden().finish();
+    }
+    let repositories = match state
+        .control_plane
+        .discover_github_repositories(&actor)
+        .await
+    {
+        Ok(repositories) => repositories,
+        Err(ApplicationError::Forbidden) => return HttpResponse::Forbidden().finish(),
+        Err(_) => {
+            return html_page(
+                "GitHub connection unavailable",
+                &github_connection_panel(
+                    &csrf_token(&token),
+                    "<p role=\"alert\">GitHub could not verify the App. Check the App ID, private key, installation, and network access.</p>",
+                ),
+            );
+        }
+    };
+    let candidates = repositories.iter().fold(String::new(), |mut output, repository| {
+        let visibility = if repository.private { "Private" } else { "Public" };
+        let _ = write!(output, "<form class=\"pipeline-row\" method=\"post\" action=\"/repositories/github/trust\"><input type=\"hidden\" name=\"csrf_token\" value=\"{}\"><input type=\"hidden\" name=\"provider_id\" value=\"{}\"><input type=\"hidden\" name=\"installation_id\" value=\"{}\"><input type=\"hidden\" name=\"full_name\" value=\"{}\"><input type=\"hidden\" name=\"private\" value=\"{}\"><strong>{}</strong><small>{visibility}</small><button type=\"submit\">Trust and enable CI</button></form>", csrf_token(&token), repository.provider_id, repository.installation_id, escape_html(&repository.full_name), repository.private, escape_html(&repository.full_name));
+        output
+    });
+    let candidates = if candidates.is_empty() {
+        "<p>No active installation grants this App access to a repository.</p>".into()
+    } else {
+        candidates
+    };
+    html_page(
+        "Discover GitHub repositories",
+        &github_connection_panel(&csrf_token(&token), &candidates),
+    )
+}
+
+async fn trust_github_repository(
+    request: HttpRequest,
+    input: web::Form<GitHubTrustForm>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let Ok((actor, token)) = browser_administrator(&request, &state).await else {
+        return HttpResponse::Unauthorized().finish();
+    };
+    if !valid_csrf(&input.csrf_token, &token) {
+        return HttpResponse::Forbidden().finish();
+    }
+    if input.full_name.len() > 511 || input.provider_id <= 0 || input.installation_id <= 0 {
+        return HttpResponse::UnprocessableEntity().finish();
+    }
+    let selected = AvailableRepository {
+        provider_id: input.provider_id,
+        installation_id: input.installation_id,
+        full_name: input.full_name.clone(),
+        private: input.private,
+    };
+    match state
+        .control_plane
+        .trust_github_repository(&actor, &selected)
+        .await
+    {
+        Ok(repository) => HttpResponse::SeeOther()
+            .insert_header((header::LOCATION, format!("/repositories/{}", repository.id)))
+            .finish(),
+        Err(ApplicationError::Forbidden) => HttpResponse::Forbidden().finish(),
+        Err(ApplicationError::PipelineNotFound) => HttpResponse::Conflict()
+            .body("GitHub no longer grants the App access to that repository. Refresh and retry."),
+        Err(_) => HttpResponse::ServiceUnavailable().finish(),
+    }
 }
 
 async fn browser_repository(
@@ -1372,10 +1513,31 @@ async fn browser_repository(
             "<a id=\"repository-secrets\" href=\"/repositories/{repository_id}/secrets\">Manage encrypted secrets</a>"
         )
     };
+    let integration_health = if repository.provider == robine_source::Provider::GitHub
+        && user.role != Role::Viewer
+    {
+        match state
+            .control_plane
+            .github_repository_health(&user, *repository_id)
+            .await
+        {
+            Ok(health) => {
+                let rows = health.permissions.iter().fold(String::new(), |mut output, permission| {
+                    let corrective = if permission.healthy { "OK" } else { "Update the GitHub App permission and approve the change on this installation." };
+                    let _ = write!(output, "<li><strong>{}</strong>: current <code>{}</code>, required <code>{}</code> — {corrective}</li>", escape_html(&permission.name), escape_html(&permission.current), escape_html(&permission.required));
+                    output
+                });
+                format!("<section id=\"github-integration-health\" class=\"surface-panel\"><h2>GitHub integration health</h2><p role=\"status\">{}</p><ul>{rows}</ul></section>", if health.healthy { "Healthy" } else { "Action required" })
+            }
+            Err(_) => "<section id=\"github-integration-health\" class=\"surface-panel\"><h2>GitHub integration health</h2><p role=\"alert\">Unable to verify installation permissions. Check the App credentials and installation access.</p></section>".into(),
+        }
+    } else {
+        String::new()
+    };
     html_page(
         "Repository",
         &format!(
-            "<section id=\"repository-detail\"><p class=\"eyebrow\">{provider} repository</p><h1>{}</h1><dl><dt>Provider instance</dt><dd>{}</dd><dt>Installation</dt><dd>{}</dd></dl><p>{secrets_link}</p><div class=\"config-grid\"><form id=\"manual-discovery-form\" method=\"get\" action=\"/repositories/{repository_id}/workflows/manual\"><label>Branch (optional)<input name=\"branch\" maxlength=\"255\"></label><button type=\"submit\">Discover manual workflows</button></form><a id=\"scheduled-workflows-link\" href=\"/repositories/{repository_id}/workflows/scheduled\">Inspect scheduled workflows</a></div><h2>Recent pipelines</h2><div id=\"repository-pipelines\">{rows}</div></section>",
+            "<section id=\"repository-detail\"><p class=\"eyebrow\">{provider} repository</p><h1>{}</h1><dl><dt>Provider instance</dt><dd>{}</dd><dt>Installation</dt><dd>{}</dd></dl>{integration_health}<p>{secrets_link}</p><div class=\"config-grid\"><form id=\"manual-discovery-form\" method=\"get\" action=\"/repositories/{repository_id}/workflows/manual\"><label>Branch (optional)<input name=\"branch\" maxlength=\"255\"></label><button type=\"submit\">Discover manual workflows</button></form><a id=\"scheduled-workflows-link\" href=\"/repositories/{repository_id}/workflows/scheduled\">Inspect scheduled workflows</a></div><h2>Recent pipelines</h2><div id=\"repository-pipelines\">{rows}</div></section>",
             escape_html(&repository.full_name),
             escape_html(&repository.provider_instance),
             repository.installation_id
@@ -3378,6 +3540,18 @@ pub fn configure(config: &mut web::ServiceConfig) {
         )
         .route("/repositories", web::get().to(browser_repositories))
         .route(
+            "/repositories/github/discover",
+            web::post().to(discover_github_repositories),
+        )
+        .route(
+            "/repositories/github/trust",
+            web::post().to(trust_github_repository),
+        )
+        .route(
+            "/admin/github/credentials",
+            web::post().to(store_github_credential),
+        )
+        .route(
             "/repositories/{repository_id}",
             web::get().to(browser_repository),
         )
@@ -3618,10 +3792,55 @@ mod tests {
         ) -> Result<Repository, SourceError> {
             self.find_trusted(tenant_id, Uuid::nil()).await
         }
+
+        async fn trust_github(
+            &self,
+            tenant_id: &str,
+            _actor_id: Uuid,
+            _repository: &AvailableRepository,
+        ) -> Result<Repository, SourceError> {
+            self.find_trusted(tenant_id, Uuid::nil()).await
+        }
+    }
+
+    #[async_trait]
+    impl robine_source::GitHubDiscovery for StubSource {
+        async fn available_repositories(&self) -> Result<Vec<AvailableRepository>, SourceError> {
+            Ok(vec![AvailableRepository {
+                provider_id: 7,
+                installation_id: 9,
+                full_name: "robine/fixture".into(),
+                private: true,
+            }])
+        }
+
+        async fn installation_permissions(
+            &self,
+            _installation_id: i64,
+        ) -> Result<robine_source::GitHubPermissionHealth, SourceError> {
+            Ok(robine_source::GitHubPermissionHealth {
+                healthy: true,
+                permissions: vec![robine_source::GitHubPermission {
+                    name: "checks".into(),
+                    required: "write".into(),
+                    current: "write".into(),
+                    healthy: true,
+                }],
+            })
+        }
     }
 
     #[async_trait]
     impl SecretRepository for StubBackend {
+        async fn upsert_instance(
+            &self,
+            _tenant_id: &str,
+            _actor_id: Uuid,
+            _secret: &EncryptedSecret,
+        ) -> Result<(), SecretError> {
+            Ok(())
+        }
+
         async fn find_authorized(
             &self,
             _tenant_id: &str,
@@ -4412,7 +4631,8 @@ mod tests {
                 .with_runner_secret_key_base("runner-test-secret")
                 .with_secret_runtime(backend.clone(), Arc::new(keyring))
                 .with_source_runtime(Arc::new(StubSource), Arc::new(StubSource))
-                .with_source_inspector(Arc::new(StubSource)),
+                .with_source_inspector(Arc::new(StubSource))
+                .with_github_discovery(Arc::new(StubSource)),
         );
         web::Data::new(AppState::new(backend, control_plane))
     }
@@ -4823,6 +5043,93 @@ mod tests {
                 .get(header::LOCATION)
                 .and_then(|value| value.to_str().ok())
                 .is_some_and(|location| location.starts_with("/pipelines/"))
+        );
+    }
+
+    #[actix_web::test]
+    async fn github_repository_connection_is_admin_only_csrf_protected_and_revalidated() {
+        let viewer_app = test::init_service(
+            App::new()
+                .app_data(state_with_role(true, Role::Viewer))
+                .configure(configure),
+        )
+        .await;
+        let viewer = test::TestRequest::post()
+            .uri("/repositories/github/discover")
+            .insert_header(("authorization", "Bearer viewer-session"))
+            .set_form(serde_json::json!({"csrf_token": csrf_token("viewer-session")}))
+            .to_request();
+        assert_eq!(
+            test::call_service(&viewer_app, viewer).await.status(),
+            StatusCode::UNAUTHORIZED
+        );
+
+        let admin_app = test::init_service(
+            App::new()
+                .app_data(state_with_role(true, Role::Administrator))
+                .configure(configure),
+        )
+        .await;
+        let forged = test::TestRequest::post()
+            .uri("/repositories/github/discover")
+            .insert_header(("authorization", "Bearer administrator-session"))
+            .set_form(serde_json::json!({"csrf_token": "forged"}))
+            .to_request();
+        assert_eq!(
+            test::call_service(&admin_app, forged).await.status(),
+            StatusCode::FORBIDDEN
+        );
+        let discover = test::TestRequest::post()
+            .uri("/repositories/github/discover")
+            .insert_header(("authorization", "Bearer administrator-session"))
+            .set_form(serde_json::json!({"csrf_token": csrf_token("administrator-session")}))
+            .to_request();
+        let response = test::call_service(&admin_app, discover).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = String::from_utf8(test::read_body(response).await.to_vec()).expect("html");
+        assert!(body.contains("robine/fixture"));
+        assert!(body.contains("Metadata read"));
+        assert!(body.contains("github-private-key-form"));
+        assert!(!body.contains("super-secret-private-key"));
+
+        let credential = test::TestRequest::post()
+            .uri("/admin/github/credentials")
+            .insert_header(("authorization", "Bearer administrator-session"))
+            .set_form(serde_json::json!({
+                "csrf_token": csrf_token("administrator-session"),
+                "name": "GITHUB_APP_PRIVATE_KEY",
+                "value": "super-secret-private-key"
+            }))
+            .to_request();
+        let response = test::call_service(&admin_app, credential).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("/repositories")
+        );
+
+        let trust = test::TestRequest::post()
+            .uri("/repositories/github/trust")
+            .insert_header(("authorization", "Bearer administrator-session"))
+            .set_form(serde_json::json!({
+                "csrf_token": csrf_token("administrator-session"),
+                "provider_id": 7,
+                "installation_id": 9,
+                "full_name": "robine/fixture",
+                "private": true
+            }))
+            .to_request();
+        let response = test::call_service(&admin_app, trust).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("/repositories/00000000-0000-0000-0000-000000000000")
         );
     }
 

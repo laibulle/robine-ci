@@ -49,6 +49,14 @@ pub struct Repository {
     pub full_name: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct AvailableRepository {
+    pub provider_id: i64,
+    pub installation_id: i64,
+    pub full_name: String,
+    pub private: bool,
+}
+
 #[async_trait]
 pub trait RepositoryStore: Send + Sync {
     async fn list_trusted(&self, tenant_id: &str) -> Result<Vec<Repository>, SourceError>;
@@ -66,6 +74,44 @@ pub trait RepositoryStore: Send + Sync {
         provider_instance: &str,
         provider_id: i64,
     ) -> Result<Repository, SourceError>;
+
+    async fn trust_github(
+        &self,
+        _tenant_id: &str,
+        _actor_id: Uuid,
+        _repository: &AvailableRepository,
+    ) -> Result<Repository, SourceError> {
+        Err(SourceError::RepositoryUnavailable)
+    }
+}
+
+#[async_trait]
+pub trait GitHubDiscovery: Send + Sync {
+    async fn available_repositories(&self) -> Result<Vec<AvailableRepository>, SourceError>;
+    async fn installation_permissions(
+        &self,
+        installation_id: i64,
+    ) -> Result<GitHubPermissionHealth, SourceError>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct GitHubPermissionHealth {
+    pub healthy: bool,
+    pub permissions: Vec<GitHubPermission>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct GitHubPermission {
+    pub name: String,
+    pub required: String,
+    pub current: String,
+    pub healthy: bool,
+}
+
+struct CachedGitHubToken {
+    token: String,
+    expires_at: chrono::DateTime<chrono::Utc>,
+    permissions: std::collections::HashMap<String, String>,
 }
 
 #[async_trait]
@@ -120,14 +166,15 @@ pub struct HttpArchiveFetcher {
     github_app_id: Option<String>,
     github_private_key: Option<Zeroizing<String>>,
     public_url: String,
-    github_tokens:
-        tokio::sync::Mutex<std::collections::HashMap<i64, (String, chrono::DateTime<chrono::Utc>)>>,
+    github_tokens: tokio::sync::Mutex<std::collections::HashMap<i64, CachedGitHubToken>>,
     gitlab_origin: Option<String>,
     gitlab_token: Option<Zeroizing<String>>,
     forgejo_origin: Option<String>,
     forgejo_token: Option<Zeroizing<String>>,
     #[cfg(test)]
     github_token_override: Option<String>,
+    #[cfg(test)]
+    github_permission_override: Option<std::collections::HashMap<String, String>>,
 }
 
 impl HttpArchiveFetcher {
@@ -165,6 +212,8 @@ impl HttpArchiveFetcher {
             forgejo_token: forgejo_token.map(Zeroizing::new),
             #[cfg(test)]
             github_token_override: None,
+            #[cfg(test)]
+            github_permission_override: None,
         })
     }
 
@@ -180,36 +229,16 @@ impl HttpArchiveFetcher {
         if let Some(token) = &self.github_token_override {
             return Ok(token.clone());
         }
-        if let Some((token, _expires_at)) = self
+        if let Some(cached) = self
             .github_tokens
             .lock()
             .await
             .get(&installation_id)
-            .filter(|(_, expires_at)| {
-                *expires_at > chrono::Utc::now() + chrono::Duration::minutes(1)
-            })
+            .filter(|cached| cached.expires_at > chrono::Utc::now() + chrono::Duration::minutes(1))
         {
-            return Ok(token.clone());
+            return Ok(cached.token.clone());
         }
-        let app_id = self
-            .github_app_id
-            .as_deref()
-            .filter(|value| !value.is_empty())
-            .ok_or(SourceError::ProviderUnavailable)?;
-        let private_key = self
-            .github_private_key
-            .as_deref()
-            .ok_or(SourceError::ProviderUnavailable)?;
-        let now = chrono::Utc::now().timestamp() - 60;
-        let claims = GitHubClaims {
-            iat: now,
-            exp: now + 540,
-            iss: app_id,
-        };
-        let key = EncodingKey::from_rsa_pem(private_key.as_bytes())
-            .map_err(|_| SourceError::ProviderUnavailable)?;
-        let jwt = encode(&Header::new(Algorithm::RS256), &claims, &key)
-            .map_err(|_| SourceError::ProviderUnavailable)?;
+        let jwt = self.github_app_jwt()?;
         let response = self
             .client
             .post(format!(
@@ -228,11 +257,37 @@ impl HttpArchiveFetcher {
         let token = self
             .bounded_json_response::<GitHubToken>(response, 65_536)
             .await?;
-        self.github_tokens
-            .lock()
-            .await
-            .insert(installation_id, (token.token.clone(), token.expires_at));
+        self.github_tokens.lock().await.insert(
+            installation_id,
+            CachedGitHubToken {
+                token: token.token.clone(),
+                expires_at: token.expires_at,
+                permissions: token.permissions,
+            },
+        );
         Ok(token.token)
+    }
+
+    fn github_app_jwt(&self) -> Result<String, SourceError> {
+        let app_id = self
+            .github_app_id
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .ok_or(SourceError::ProviderUnavailable)?;
+        let private_key = self
+            .github_private_key
+            .as_deref()
+            .ok_or(SourceError::ProviderUnavailable)?;
+        let now = chrono::Utc::now().timestamp() - 60;
+        let claims = GitHubClaims {
+            iat: now,
+            exp: now + 540,
+            iss: app_id,
+        };
+        let key = EncodingKey::from_rsa_pem(private_key.as_bytes())
+            .map_err(|_| SourceError::ProviderUnavailable)?;
+        encode(&Header::new(Algorithm::RS256), &claims, &key)
+            .map_err(|_| SourceError::ProviderUnavailable)
     }
 
     async fn bounded_body(&self, mut response: reqwest::Response) -> Result<Vec<u8>, SourceError> {
@@ -359,6 +414,163 @@ struct GitHubCheckRuns {
 struct GitHubCheckRun {
     id: i64,
     external_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GitHubInstallation {
+    id: i64,
+    suspended_at: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct GitHubInstallationRepositories {
+    repositories: Vec<GitHubAvailableRepository>,
+}
+
+#[derive(Deserialize)]
+struct GitHubAvailableRepository {
+    id: i64,
+    full_name: String,
+    private: bool,
+}
+
+#[async_trait]
+impl GitHubDiscovery for HttpArchiveFetcher {
+    async fn available_repositories(&self) -> Result<Vec<AvailableRepository>, SourceError> {
+        #[cfg(test)]
+        let app_token = match &self.github_token_override {
+            Some(token) => token.clone(),
+            None => self.github_app_jwt()?,
+        };
+        #[cfg(not(test))]
+        let app_token = self.github_app_jwt()?;
+        let mut installations = Vec::new();
+        for page in 1..=100 {
+            let response = self
+                .client
+                .get(format!("{}/app/installations", self.github_api_origin))
+                .bearer_auth(&app_token)
+                .header("accept", "application/vnd.github+json")
+                .header("x-github-api-version", "2022-11-28")
+                .query(&[("per_page", 100), ("page", page)])
+                .send()
+                .await
+                .map_err(|_| SourceError::ProviderUnavailable)?;
+            if !response.status().is_success() {
+                return Err(SourceError::ProviderUnavailable);
+            }
+            let values = self
+                .bounded_json_response::<Vec<GitHubInstallation>>(response, 1_048_576)
+                .await?;
+            let complete = values.len() < 100;
+            installations.extend(
+                values
+                    .into_iter()
+                    .filter(|value| value.suspended_at.is_none()),
+            );
+            if complete {
+                break;
+            }
+            if page == 100 {
+                return Err(SourceError::ProviderUnavailable);
+            }
+        }
+        let mut repositories = Vec::new();
+        for installation in installations {
+            let token = self.github_token(installation.id).await?;
+            for page in 1..=100 {
+                let response = self
+                    .client
+                    .get(format!(
+                        "{}/installation/repositories",
+                        self.github_api_origin
+                    ))
+                    .bearer_auth(&token)
+                    .header("accept", "application/vnd.github+json")
+                    .header("x-github-api-version", "2022-11-28")
+                    .query(&[("per_page", 100), ("page", page)])
+                    .send()
+                    .await
+                    .map_err(|_| SourceError::ProviderUnavailable)?;
+                if !response.status().is_success() {
+                    return Err(SourceError::ProviderUnavailable);
+                }
+                let page_values = self
+                    .bounded_json_response::<GitHubInstallationRepositories>(response, 4_194_304)
+                    .await?
+                    .repositories;
+                let complete = page_values.len() < 100;
+                repositories.extend(page_values.into_iter().map(|repository| {
+                    AvailableRepository {
+                        provider_id: repository.id,
+                        installation_id: installation.id,
+                        full_name: repository.full_name,
+                        private: repository.private,
+                    }
+                }));
+                if complete {
+                    break;
+                }
+                if page == 100 {
+                    return Err(SourceError::ProviderUnavailable);
+                }
+            }
+        }
+        repositories.sort_by_key(|repository| repository.full_name.to_ascii_lowercase());
+        Ok(repositories)
+    }
+
+    async fn installation_permissions(
+        &self,
+        installation_id: i64,
+    ) -> Result<GitHubPermissionHealth, SourceError> {
+        if installation_id <= 0 {
+            return Err(SourceError::ProviderUnavailable);
+        }
+        #[cfg(test)]
+        if let Some(permissions) = &self.github_permission_override {
+            return Ok(evaluate_github_permissions(permissions));
+        }
+        self.github_tokens.lock().await.remove(&installation_id);
+        let _ = self.github_token(installation_id).await?;
+        let tokens = self.github_tokens.lock().await;
+        let permissions = &tokens
+            .get(&installation_id)
+            .ok_or(SourceError::ProviderUnavailable)?
+            .permissions;
+        Ok(evaluate_github_permissions(permissions))
+    }
+}
+
+fn evaluate_github_permissions(
+    permissions: &std::collections::HashMap<String, String>,
+) -> GitHubPermissionHealth {
+    let required = [
+        ("metadata", "read"),
+        ("contents", "read"),
+        ("pull_requests", "read"),
+        ("checks", "write"),
+    ];
+    let permissions = required
+        .into_iter()
+        .map(|(name, required)| {
+            let current = permissions
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| "missing".into());
+            let healthy = current == required || (required == "read" && current == "write");
+            GitHubPermission {
+                name: name.into(),
+                required: required.into(),
+                current,
+                healthy,
+            }
+        })
+        .collect::<Vec<_>>();
+    GitHubPermissionHealth {
+        healthy: permissions.iter().all(|permission| permission.healthy),
+        permissions,
+    }
 }
 
 #[async_trait]
@@ -728,6 +940,8 @@ struct GitHubClaims<'a> {
 struct GitHubToken {
     token: String,
     expires_at: chrono::DateTime<chrono::Utc>,
+    #[serde(default)]
+    permissions: std::collections::HashMap<String, String>,
 }
 
 fn segment(value: &str) -> impl std::fmt::Display + '_ {
@@ -1137,8 +1351,65 @@ mod tests {
     use flate2::{Compression, write::GzEncoder};
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
-        matchers::{body_partial_json, header, method, path},
+        matchers::{body_partial_json, header, method, path, query_param},
     };
+
+    #[tokio::test]
+    async fn github_discovery_excludes_suspended_installations_and_lists_granted_repositories() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/app/installations"))
+            .and(query_param("per_page", "100"))
+            .and(query_param("page", "1"))
+            .and(header("authorization", "Bearer test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": 9, "suspended_at": null},
+                {"id": 10, "suspended_at": "2026-01-01T00:00:00Z"}
+            ])))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/installation/repositories"))
+            .and(query_param("per_page", "100"))
+            .and(query_param("page", "1"))
+            .and(header("authorization", "Bearer test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "repositories": [
+                    {"id": 2, "full_name": "Zulu/private", "private": true},
+                    {"id": 1, "full_name": "acme/public", "private": false}
+                ]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let client =
+            HttpArchiveFetcher::new(None, None, None, None, None, None, "http://localhost:4000")
+                .expect("client")
+                .with_github_test_endpoint(server.uri(), "test-token");
+
+        let repositories = client.available_repositories().await.expect("discovery");
+
+        assert_eq!(repositories.len(), 2);
+        assert_eq!(repositories[0].full_name, "acme/public");
+        assert_eq!(repositories[0].installation_id, 9);
+        assert!(repositories[1].private);
+    }
+
+    #[test]
+    fn github_permission_health_names_every_corrective_requirement() {
+        let health = evaluate_github_permissions(&std::collections::HashMap::from([
+            ("metadata".into(), "read".into()),
+            ("contents".into(), "write".into()),
+            ("pull_requests".into(), "read".into()),
+            ("checks".into(), "read".into()),
+        ]));
+        assert!(!health.healthy);
+        assert_eq!(health.permissions.len(), 4);
+        assert_eq!(health.permissions[3].name, "checks");
+        assert_eq!(health.permissions[3].required, "write");
+        assert!(!health.permissions[3].healthy);
+    }
 
     #[tokio::test]
     async fn github_projection_recovers_an_existing_external_key_and_patches_it() {

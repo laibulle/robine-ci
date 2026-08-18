@@ -6,7 +6,7 @@ use robine_application::{ControlPlane, RetentionConfig};
 use robine_execution::{DockerCli, DockerConfig};
 use robine_oidc::OidcClient;
 use robine_persistence::Database;
-use robine_secrets::AesGcmKeyring;
+use robine_secrets::{AesGcmKeyring, SecretRepository};
 use robine_server::{AppState, WebhookConfiguration};
 use robine_source::HttpArchiveFetcher;
 use robine_storage::{
@@ -43,24 +43,6 @@ async fn main() -> io::Result<()> {
         max_total_steps: environment_usize("ROBINE_WORKFLOW_MAX_TOTAL_STEPS", 512)?,
         max_graph_depth: environment_usize("ROBINE_WORKFLOW_MAX_GRAPH_DEPTH", 16)?,
     });
-    let source_fetcher = Arc::new(
-        HttpArchiveFetcher::new(
-            std::env::var("GITHUB_APP_ID").ok(),
-            std::env::var("GITHUB_APP_PRIVATE_KEY")
-                .ok()
-                .map(|value| value.replace("\\n", "\n")),
-            std::env::var("GITLAB_URL").ok(),
-            std::env::var("GITLAB_TOKEN").ok(),
-            std::env::var("FORGEJO_URL").ok(),
-            std::env::var("FORGEJO_TOKEN").ok(),
-            &public_url,
-        )
-        .map_err(io::Error::other)?,
-    );
-    control_plane = control_plane
-        .with_source_runtime(database.clone(), source_fetcher.clone())
-        .with_source_inspector(source_fetcher.clone())
-        .with_status_projector(source_fetcher);
     let configured_storage_root =
         std::env::var("ROBINE_STORAGE_ROOT").unwrap_or_else(|_| "var/storage".into());
     let storage_path = std::path::PathBuf::from(configured_storage_root);
@@ -111,6 +93,7 @@ async fn main() -> io::Result<()> {
     })));
     let single_secret_key = std::env::var("ROBINE_CI_SECRET_KEY").ok();
     let secret_keys = std::env::var("ROBINE_CI_SECRET_KEYS").ok();
+    let mut runtime_keyring = None;
     if single_secret_key.is_some() || secret_keys.is_some() {
         let key_version = std::env::var("ROBINE_CI_SECRET_KEY_VERSION")
             .ok()
@@ -122,8 +105,46 @@ async fn main() -> io::Result<()> {
             key_version,
         )
         .map_err(io::Error::other)?;
-        control_plane = control_plane.with_secret_runtime(database.clone(), Arc::new(keyring));
+        let keyring = Arc::new(keyring);
+        control_plane = control_plane.with_secret_runtime(database.clone(), keyring.clone());
+        runtime_keyring = Some(keyring);
     }
+    let stored_private_key = load_instance_secret(
+        database.as_ref(),
+        runtime_keyring.as_deref(),
+        "GITHUB_APP_PRIVATE_KEY",
+    )
+    .await?;
+    let stored_webhook_secret = load_instance_secret(
+        database.as_ref(),
+        runtime_keyring.as_deref(),
+        "GITHUB_WEBHOOK_SECRET",
+    )
+    .await?;
+    let github_private_key = stored_private_key.or_else(|| {
+        std::env::var("GITHUB_APP_PRIVATE_KEY")
+            .ok()
+            .map(|value| value.replace("\\n", "\n"))
+    });
+    let github_webhook_secret =
+        stored_webhook_secret.or_else(|| std::env::var("GITHUB_WEBHOOK_SECRET").ok());
+    let source_fetcher = Arc::new(
+        HttpArchiveFetcher::new(
+            std::env::var("GITHUB_APP_ID").ok(),
+            github_private_key,
+            std::env::var("GITLAB_URL").ok(),
+            std::env::var("GITLAB_TOKEN").ok(),
+            std::env::var("FORGEJO_URL").ok(),
+            std::env::var("FORGEJO_TOKEN").ok(),
+            &public_url,
+        )
+        .map_err(io::Error::other)?,
+    );
+    control_plane = control_plane
+        .with_source_runtime(database.clone(), source_fetcher.clone())
+        .with_source_inspector(source_fetcher.clone())
+        .with_github_discovery(source_fetcher.clone())
+        .with_status_projector(source_fetcher);
     if let Ok(token) = std::env::var("ROBINE_BOOTSTRAP_TOKEN") {
         control_plane =
             control_plane.with_bootstrap_token(&token, Utc::now() + Duration::minutes(15));
@@ -147,7 +168,7 @@ async fn main() -> io::Result<()> {
     }
     let control_plane = Arc::new(control_plane);
     let webhook_configuration = WebhookConfiguration::new(
-        std::env::var("GITHUB_WEBHOOK_SECRET").ok(),
+        github_webhook_secret,
         std::env::var("GITLAB_WEBHOOK_SECRET").ok(),
         std::env::var("FORGEJO_WEBHOOK_SECRET").ok(),
     )
@@ -278,6 +299,27 @@ async fn configure_blob_store(
         }
         _ => Err(invalid_environment("ROBINE_BLOB_STORE")),
     }
+}
+
+async fn load_instance_secret(
+    database: &Database,
+    keyring: Option<&AesGcmKeyring>,
+    name: &str,
+) -> io::Result<Option<String>> {
+    let Some(keyring) = keyring else {
+        return Ok(None);
+    };
+    let Some(secret) = database
+        .find_instance("standalone", name)
+        .await
+        .map_err(io::Error::other)?
+    else {
+        return Ok(None);
+    };
+    let plaintext = keyring.decrypt(&secret).map_err(io::Error::other)?;
+    String::from_utf8(plaintext.to_vec())
+        .map(Some)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "instance secret is not UTF-8"))
 }
 
 fn storage_namespace_digest(locator: &str) -> String {

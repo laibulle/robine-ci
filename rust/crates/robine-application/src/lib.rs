@@ -33,8 +33,8 @@ use robine_execution::{
 };
 use robine_secrets::{AesGcmKeyring, SecretDecryptor, SecretRepository};
 use robine_source::{
-    ArchiveFetcher, ArchiveLimits, Provider, RepositoryStore, SourceInspector, StatusProjection,
-    StatusProjector, extract_tar_gz, valid_commit_sha,
+    ArchiveFetcher, ArchiveLimits, AvailableRepository, GitHubDiscovery, Provider, RepositoryStore,
+    SourceInspector, StatusProjection, StatusProjector, extract_tar_gz, valid_commit_sha,
 };
 use robine_storage::{
     Artifact, BlobStore, CacheEntry, MetadataRepository, RetentionRepository, RetentionResult,
@@ -67,6 +67,7 @@ pub struct ControlPlane {
     source_repositories: Option<Arc<dyn RepositoryStore>>,
     source_fetcher: Option<Arc<dyn ArchiveFetcher>>,
     source_inspector: Option<Arc<dyn SourceInspector>>,
+    github_discovery: Option<Arc<dyn GitHubDiscovery>>,
     status_projector: Option<Arc<dyn StatusProjector>>,
     storage_repository: Option<Arc<dyn MetadataRepository>>,
     retention_repository: Option<Arc<dyn RetentionRepository>>,
@@ -480,6 +481,7 @@ impl ControlPlane {
             source_repositories: None,
             source_fetcher: None,
             source_inspector: None,
+            github_discovery: None,
             status_projector: None,
             storage_repository: None,
             retention_repository: None,
@@ -525,6 +527,12 @@ impl ControlPlane {
     #[must_use]
     pub fn with_source_inspector(mut self, inspector: Arc<dyn SourceInspector>) -> Self {
         self.source_inspector = Some(inspector);
+        self
+    }
+
+    #[must_use]
+    pub fn with_github_discovery(mut self, discovery: Arc<dyn GitHubDiscovery>) -> Self {
+        self.github_discovery = Some(discovery);
         self
     }
 
@@ -902,6 +910,88 @@ impl ControlPlane {
             .as_ref()
             .ok_or(ApplicationError::Unavailable)?
             .list_trusted(tenant_id)
+            .await
+            .map_err(|_| ApplicationError::Unavailable)
+    }
+
+    /// Discovers repositories currently granted to the configured GitHub App.
+    ///
+    /// # Errors
+    ///
+    /// Returns forbidden for non-administrators and unavailable for provider failures.
+    pub async fn discover_github_repositories(
+        &self,
+        user: &User,
+    ) -> Result<Vec<AvailableRepository>, ApplicationError> {
+        if user.disabled || user.role != Role::Administrator {
+            return Err(ApplicationError::Forbidden);
+        }
+        self.github_discovery
+            .as_ref()
+            .ok_or(ApplicationError::Unavailable)?
+            .available_repositories()
+            .await
+            .map_err(|_| ApplicationError::Unavailable)
+    }
+
+    /// Trusts a GitHub repository only after revalidating current App access.
+    ///
+    /// # Errors
+    ///
+    /// Returns forbidden for non-administrators, not-found when access was revoked, and
+    /// unavailable for provider or persistence failures.
+    pub async fn trust_github_repository(
+        &self,
+        user: &User,
+        selected: &AvailableRepository,
+    ) -> Result<robine_source::Repository, ApplicationError> {
+        if user.disabled || user.role != Role::Administrator {
+            return Err(ApplicationError::Forbidden);
+        }
+        let available = self.discover_github_repositories(user).await?;
+        let live = available
+            .iter()
+            .find(|repository| {
+                repository.provider_id == selected.provider_id
+                    && repository.installation_id == selected.installation_id
+                    && repository.full_name == selected.full_name
+            })
+            .ok_or(ApplicationError::PipelineNotFound)?;
+        self.source_repositories
+            .as_ref()
+            .ok_or(ApplicationError::Unavailable)?
+            .trust_github("standalone", user.id, live)
+            .await
+            .map_err(|_| ApplicationError::Unavailable)
+    }
+
+    /// Refreshes and evaluates effective GitHub App permissions for one trusted repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns forbidden outside maintainer roles and unavailable for provider failures.
+    pub async fn github_repository_health(
+        &self,
+        user: &User,
+        repository_id: Uuid,
+    ) -> Result<robine_source::GitHubPermissionHealth, ApplicationError> {
+        if user.disabled || user.role == Role::Viewer {
+            return Err(ApplicationError::Forbidden);
+        }
+        let repository = self
+            .source_repositories
+            .as_ref()
+            .ok_or(ApplicationError::Unavailable)?
+            .find_trusted("standalone", repository_id)
+            .await
+            .map_err(|_| ApplicationError::PipelineNotFound)?;
+        if repository.provider != Provider::GitHub {
+            return Err(ApplicationError::Unavailable);
+        }
+        self.github_discovery
+            .as_ref()
+            .ok_or(ApplicationError::Unavailable)?
+            .installation_permissions(repository.installation_id)
             .await
             .map_err(|_| ApplicationError::Unavailable)
     }
@@ -1497,6 +1587,39 @@ impl ControlPlane {
             .as_ref()
             .ok_or(ApplicationError::Unavailable)?
             .upsert_repository("standalone", user.id, &secret)
+            .await
+            .map_err(|_| ApplicationError::Unavailable)
+    }
+
+    /// Encrypts and atomically audits an administrator-owned write-only instance credential.
+    ///
+    /// # Errors
+    ///
+    /// Returns forbidden for non-administrators, invalid input for unsupported names or values,
+    /// and unavailable when encryption or persistence is not configured.
+    pub async fn store_instance_secret(
+        &self,
+        user: &User,
+        name: String,
+        value: &[u8],
+    ) -> Result<(), ApplicationError> {
+        const ALLOWED: [&str; 2] = ["GITHUB_APP_PRIVATE_KEY", "GITHUB_WEBHOOK_SECRET"];
+        if user.disabled || user.role != Role::Administrator {
+            return Err(ApplicationError::Forbidden);
+        }
+        if !ALLOWED.contains(&name.as_str()) || !(8..=65_536).contains(&value.len()) {
+            return Err(ApplicationError::InvalidPipelineInput);
+        }
+        let secret = self
+            .secret_encryptor
+            .as_ref()
+            .ok_or(ApplicationError::Unavailable)?
+            .encrypt_instance(name, value)
+            .map_err(|_| ApplicationError::Unavailable)?;
+        self.secret_repository
+            .as_ref()
+            .ok_or(ApplicationError::Unavailable)?
+            .upsert_instance("standalone", user.id, &secret)
             .await
             .map_err(|_| ApplicationError::Unavailable)
     }

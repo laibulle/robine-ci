@@ -16,7 +16,7 @@ use robine_core::{
     ports::{IdentityRepository, PipelineRepository, PortError},
 };
 use robine_secrets::{EncryptedSecret, SecretError, SecretRepository, SecretScope};
-use robine_source::{Provider, Repository, RepositoryStore, SourceError};
+use robine_source::{AvailableRepository, Provider, Repository, RepositoryStore, SourceError};
 use robine_storage::{
     Artifact, CacheEntry, InventoryObject, MetadataRepository, RetentionRepository, RetentionStage,
     StorageError, StorageQuotas, StoredObject,
@@ -573,6 +573,99 @@ impl IdentityRepository for Database {
 
 #[async_trait]
 impl SecretRepository for Database {
+    async fn find_instance(
+        &self,
+        tenant_id: &str,
+        name: &str,
+    ) -> Result<Option<EncryptedSecret>, SecretError> {
+        if name.is_empty() || name.len() > 128 {
+            return Err(SecretError::InvalidConfiguration);
+        }
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| SecretError::Unavailable)?;
+        let row = sqlx::query_as::<_, SecretRow>(
+            "SELECT id, name, scope, repository_id, allowed_repository_ids, ciphertext, nonce, tag, key_version \
+             FROM secrets WHERE tenant_id = $1 AND scope = 'instance' AND name = $2",
+        )
+        .bind(tenant_id)
+        .bind(name)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| SecretError::Unavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| SecretError::Unavailable)?;
+        Ok(row.map(|row| EncryptedSecret {
+            id: row.id,
+            name: row.name,
+            scope: SecretScope::Instance,
+            repository_id: None,
+            allowed_repository_ids: row.allowed_repository_ids,
+            ciphertext: row.ciphertext,
+            nonce: row.nonce,
+            tag: row.tag,
+            key_version: row.key_version,
+        }))
+    }
+
+    async fn upsert_instance(
+        &self,
+        tenant_id: &str,
+        actor_id: Uuid,
+        secret: &EncryptedSecret,
+    ) -> Result<(), SecretError> {
+        if secret.scope != SecretScope::Instance
+            || secret.repository_id.is_some()
+            || secret.name.is_empty()
+            || secret.name.len() > 128
+        {
+            return Err(SecretError::InvalidConfiguration);
+        }
+        let now = Utc::now();
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| SecretError::Unavailable)?;
+        sqlx::query(
+            "INSERT INTO secrets (id, name, scope, repository_id, allowed_repository_ids, ciphertext, nonce, tag, key_version, inserted_at, tenant_id) \
+             VALUES ($1, $2, 'instance', NULL, '{}', $3, $4, $5, $6, $7, $8) \
+             ON CONFLICT (tenant_id, scope, repository_id, name) DO UPDATE SET id = EXCLUDED.id, \
+               ciphertext = EXCLUDED.ciphertext, nonce = EXCLUDED.nonce, tag = EXCLUDED.tag, \
+               key_version = EXCLUDED.key_version, inserted_at = EXCLUDED.inserted_at",
+        )
+        .bind(secret.id)
+        .bind(&secret.name)
+        .bind(&secret.ciphertext)
+        .bind(&secret.nonce)
+        .bind(&secret.tag)
+        .bind(secret.key_version)
+        .bind(now)
+        .bind(tenant_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| SecretError::Unavailable)?;
+        sqlx::query(
+            "INSERT INTO audit_events (id, actor_id, action, target_type, target_id, metadata, occurred_at, tenant_id) \
+             VALUES ($1, $2, 'secret.stored', 'instance_secret', $3, $4, $5, $6)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(actor_id.to_string())
+        .bind(secret.id)
+        .bind(serde_json::json!({"name": secret.name, "scope": "instance"}))
+        .bind(now)
+        .bind(tenant_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| SecretError::Unavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| SecretError::Unavailable)
+    }
+
     async fn find_authorized(
         &self,
         tenant_id: &str,
@@ -932,6 +1025,86 @@ impl RepositoryStore for Database {
                 "forgejo" => Provider::Forgejo,
                 _ => return Err(SourceError::RepositoryUnavailable),
             },
+            provider_instance: row.provider_instance,
+            installation_id: row.installation_id,
+            owner: row.owner,
+            name: row.name,
+            full_name: row.full_name,
+        })
+    }
+
+    async fn trust_github(
+        &self,
+        tenant_id: &str,
+        actor_id: Uuid,
+        repository: &AvailableRepository,
+    ) -> Result<Repository, SourceError> {
+        let (owner, name) = repository
+            .full_name
+            .split_once('/')
+            .filter(|(owner, name)| {
+                !owner.is_empty()
+                    && !name.is_empty()
+                    && !name.contains('/')
+                    && owner.len() <= 255
+                    && name.len() <= 255
+            })
+            .ok_or(SourceError::RepositoryUnavailable)?;
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| SourceError::RepositoryUnavailable)?;
+        let id = Uuid::new_v4();
+        let now = Utc::now().naive_utc();
+        let row = sqlx::query_as::<_, SourceRepositoryRow>(
+            "INSERT INTO github_repositories \
+             (id, provider_id, installation_id, owner, name, full_name, trusted, inserted_at, \
+              provider, provider_instance, tenant_id) \
+             VALUES ($1, $2, $3, $4, $5, $6, TRUE, $7, 'github', 'https://github.com', $8) \
+             ON CONFLICT (tenant_id, provider, provider_instance, provider_id) DO UPDATE SET \
+               installation_id = EXCLUDED.installation_id, owner = EXCLUDED.owner, \
+               name = EXCLUDED.name, full_name = EXCLUDED.full_name, trusted = TRUE \
+             RETURNING id, provider::text AS provider, provider_instance, installation_id, \
+                       owner, name, full_name",
+        )
+        .bind(id)
+        .bind(repository.provider_id)
+        .bind(repository.installation_id)
+        .bind(owner)
+        .bind(name)
+        .bind(&repository.full_name)
+        .bind(now)
+        .bind(tenant_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| SourceError::RepositoryUnavailable)?;
+        sqlx::query(
+            "INSERT INTO audit_events \
+             (id, actor_id, action, target_type, target_id, metadata, occurred_at, tenant_id) \
+             VALUES ($1, $2, 'repository.trusted', 'repository', $3, $4, $5, $6)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(actor_id.to_string())
+        .bind(row.id)
+        .bind(serde_json::json!({
+            "provider": "github",
+            "provider_id": repository.provider_id,
+            "installation_id": repository.installation_id,
+            "full_name": repository.full_name,
+            "private": repository.private
+        }))
+        .bind(now)
+        .bind(tenant_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| SourceError::RepositoryUnavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| SourceError::RepositoryUnavailable)?;
+        Ok(Repository {
+            id: row.id,
+            provider: Provider::GitHub,
             provider_instance: row.provider_instance,
             installation_id: row.installation_id,
             owner: row.owner,

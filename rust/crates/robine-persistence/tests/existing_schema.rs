@@ -23,8 +23,9 @@ use robine_core::{
 use robine_persistence::{Database, PersistenceError, Readiness, storage_transition_ack};
 use robine_secrets::{AesGcmKeyring, SecretRepository};
 use robine_source::{
-    ArchiveFetcher, ArchiveLimits, BranchHead, Provider, Repository, RepositoryStore, SourceError,
-    SourceFile, SourceInspector, StatusProjection, StatusProjector, create_source_tar_gz,
+    ArchiveFetcher, ArchiveLimits, AvailableRepository, BranchHead, Provider, Repository,
+    RepositoryStore, SourceError, SourceFile, SourceInspector, StatusProjection, StatusProjector,
+    create_source_tar_gz,
 };
 use robine_storage::{
     Artifact, BlobStore, CacheEntry, LocalBlobStore, MetadataRepository, StorageError,
@@ -43,6 +44,115 @@ struct WorkflowArchive(Vec<u8>);
 
 #[derive(Default)]
 struct RecordingStatusProjector(AtomicI64);
+
+#[tokio::test]
+async fn instance_github_credentials_are_encrypted_write_only_and_replaceable() {
+    let Ok(database_url) = std::env::var("ROBINE_DATABASE_INTEGRATION_URL") else {
+        return;
+    };
+    let pool = PgPool::connect(&database_url).await.expect("database");
+    let database = Database::from_pool(pool.clone());
+    let tenant = format!("instance-secret-{}", Uuid::new_v4());
+    let actor = Uuid::new_v4();
+    let keyring = AesGcmKeyring::from_encoded(
+        Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="),
+        None,
+        1,
+    )
+    .expect("keyring");
+    for value in [b"first-private-key".as_slice(), b"replacement-private-key"] {
+        let secret = keyring
+            .encrypt_instance("GITHUB_APP_PRIVATE_KEY".into(), value)
+            .expect("encrypt instance secret");
+        database
+            .upsert_instance(&tenant, actor, &secret)
+            .await
+            .expect("store instance secret");
+    }
+    let stored = database
+        .find_instance(&tenant, "GITHUB_APP_PRIVATE_KEY")
+        .await
+        .expect("load instance secret")
+        .expect("stored instance secret");
+    assert_ne!(stored.ciphertext, b"replacement-private-key");
+    assert_eq!(
+        keyring.decrypt(&stored).expect("decrypt").as_slice(),
+        b"replacement-private-key"
+    );
+    let count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM secrets WHERE tenant_id = $1 AND scope = 'instance'",
+    )
+    .bind(&tenant)
+    .fetch_one(&pool)
+    .await
+    .expect("instance secret count");
+    assert_eq!(count, 1);
+    sqlx::query("DELETE FROM audit_events WHERE tenant_id = $1")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("cleanup audit");
+    sqlx::query("DELETE FROM secrets WHERE tenant_id = $1")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("cleanup secret");
+}
+
+#[tokio::test]
+async fn trusting_a_rediscovered_github_repository_is_idempotent_and_audited() {
+    let Ok(database_url) = std::env::var("ROBINE_DATABASE_INTEGRATION_URL") else {
+        return;
+    };
+    let pool = PgPool::connect(&database_url).await.expect("database");
+    let database = Database::from_pool(pool.clone());
+    let tenant = format!("github-discovery-{}", Uuid::new_v4());
+    let actor = Uuid::new_v4();
+    let available = AvailableRepository {
+        provider_id: Utc::now().timestamp_micros(),
+        installation_id: 42,
+        full_name: "acme/discovered".into(),
+        private: true,
+    };
+
+    let first = RepositoryStore::trust_github(&database, &tenant, actor, &available)
+        .await
+        .expect("trust repository");
+    let second = RepositoryStore::trust_github(&database, &tenant, actor, &available)
+        .await
+        .expect("repeat trust");
+
+    assert_eq!(first.id, second.id);
+    assert_eq!(first.full_name, "acme/discovered");
+    let repository_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM github_repositories WHERE tenant_id = $1 AND provider_id = $2",
+    )
+    .bind(&tenant)
+    .bind(available.provider_id)
+    .fetch_one(&pool)
+    .await
+    .expect("repository count");
+    let audit_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM audit_events WHERE tenant_id = $1 AND action = 'repository.trusted' AND target_id = $2",
+    )
+    .bind(&tenant)
+    .bind(first.id)
+    .fetch_one(&pool)
+    .await
+    .expect("audit count");
+    assert_eq!(repository_count, 1);
+    assert_eq!(audit_count, 2);
+    sqlx::query("DELETE FROM audit_events WHERE tenant_id = $1")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("cleanup audit");
+    sqlx::query("DELETE FROM github_repositories WHERE tenant_id = $1")
+        .bind(&tenant)
+        .execute(&pool)
+        .await
+        .expect("cleanup repository");
+}
 
 #[async_trait]
 impl StatusProjector for RecordingStatusProjector {
