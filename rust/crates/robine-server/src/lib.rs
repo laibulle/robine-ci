@@ -16,7 +16,9 @@ use hmac::{Hmac, Mac};
 use robine_application::{ApplicationError, ControlPlane};
 use robine_core::{
     identity::Role,
-    pipelines::{CreatePipelineInput, RecordAttemptEvent, SourceControlDelivery},
+    pipelines::{
+        CreatePipelineInput, PipelineProjection, RecordAttemptEvent, SourceControlDelivery,
+    },
 };
 use robine_persistence::Readiness;
 use robine_source::AvailableRepository;
@@ -1022,23 +1024,186 @@ async fn home_page(request: HttpRequest) -> HttpResponse {
     )
 }
 
-async fn browser_pipelines(request: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+#[derive(Debug, Default, Deserialize)]
+struct PipelineBrowserQuery {
+    #[serde(default)]
+    search: String,
+    #[serde(default)]
+    status: String,
+    #[serde(default)]
+    repository_id: String,
+}
+
+fn pipeline_status_options(selected_status: &str) -> String {
+    [
+        "",
+        "created",
+        "queued",
+        "running",
+        "succeeded",
+        "failed",
+        "cancelled",
+    ]
+    .iter()
+    .fold(String::new(), |mut output, status| {
+        let selected = if *status == selected_status {
+            " selected"
+        } else {
+            ""
+        };
+        let label = if status.is_empty() {
+            "All statuses"
+        } else {
+            status
+        };
+        let _ = write!(
+            output,
+            "<option value=\"{}\"{selected}>{}</option>",
+            escape_html(status),
+            escape_html(label)
+        );
+        output
+    })
+}
+
+fn pipeline_repository_options(
+    repositories: &[robine_source::Repository],
+    selected_repository: Option<Uuid>,
+) -> String {
+    repositories.iter().fold(
+        "<option value=\"\">All repositories</option>".to_owned(),
+        |mut output, repository| {
+            let selected = if Some(repository.id) == selected_repository {
+                " selected"
+            } else {
+                ""
+            };
+            let _ = write!(
+                output,
+                "<option value=\"{}\"{selected}>{}</option>",
+                repository.id,
+                escape_html(&repository.full_name)
+            );
+            output
+        },
+    )
+}
+
+fn render_pipeline_rows(
+    pipelines: &[&PipelineProjection],
+    repository_names: &HashMap<Uuid, &str>,
+) -> String {
+    pipelines.iter().fold(String::new(), |mut output, pipeline| {
+        let repository = repository_names
+            .get(&pipeline.repository_id)
+            .copied()
+            .unwrap_or("Unknown repository");
+        let short_sha = pipeline.commit_sha.get(..8).unwrap_or(&pipeline.commit_sha);
+        let _ = write!(output, "<a class=\"surface-panel pipeline-row\" href=\"/pipelines/{}\"><span><strong>{}</strong><small>{}</small></span><span class=\"status {}\">{}</span><code>{}</code><time datetime=\"{}\">{}</time></a>", pipeline.id, escape_html(&pipeline.workflow_name), escape_html(repository), escape_html(&pipeline.status), escape_html(&pipeline.status), escape_html(short_sha), pipeline.inserted_at.to_rfc3339(), pipeline.inserted_at.format("%Y-%m-%d %H:%M UTC"));
+        output
+    })
+}
+
+fn pipeline_needs_attention(pipeline: &PipelineProjection) -> bool {
+    matches!(
+        pipeline.status.as_str(),
+        "created" | "queued" | "running" | "cancelling"
+    ) || (pipeline.status == "failed"
+        && pipeline.inserted_at >= chrono::Utc::now() - chrono::Duration::hours(24))
+}
+
+fn duration_label(value: Option<i64>) -> String {
+    value.map_or_else(
+        || "Not started".into(),
+        |milliseconds| {
+            let seconds = milliseconds.max(0) / 1_000;
+            let hours = seconds / 3_600;
+            let minutes = seconds % 3_600 / 60;
+            let seconds = seconds % 60;
+            if hours > 0 {
+                format!("{hours}h {minutes}m {seconds}s")
+            } else if minutes > 0 {
+                format!("{minutes}m {seconds}s")
+            } else {
+                format!("{seconds}s")
+            }
+        },
+    )
+}
+
+async fn browser_pipelines(
+    request: HttpRequest,
+    query: web::Query<PipelineBrowserQuery>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
     let Ok(user) = authenticated_user(&request, &state).await else {
         return HttpResponse::SeeOther()
             .insert_header((header::LOCATION, "/sign-in"))
             .finish();
     };
-    let Ok(pipelines) = state.control_plane.list_pipelines(&user, None, 100).await else {
+    let Ok(pipelines) = state.control_plane.list_pipelines(&user, None, 50).await else {
         return HttpResponse::ServiceUnavailable().finish();
     };
-    let rows = pipelines.iter().fold(String::new(), |mut output, pipeline| {
-        let _ = write!(output, "<a class=\"surface-panel pipeline-row\" href=\"/pipelines/{}\"><strong>{}</strong><span>{}</span><code>{}</code></a>", pipeline.id, escape_html(&pipeline.workflow_name), escape_html(&pipeline.status), escape_html(&pipeline.commit_sha[..8]));
-        output
-    });
+    let repositories = state
+        .control_plane
+        .list_source_repositories(&user, "standalone")
+        .await
+        .unwrap_or_default();
+    let repository_names = repositories
+        .iter()
+        .map(|repository| (repository.id, repository.full_name.as_str()))
+        .collect::<HashMap<_, _>>();
+    let search = query.search.trim().chars().take(128).collect::<String>();
+    let normalized_search = search.to_lowercase();
+    let selected_status = query.status.trim();
+    let selected_repository = Uuid::parse_str(query.repository_id.trim()).ok();
+    let filtered = pipelines
+        .iter()
+        .filter(|pipeline| {
+            (normalized_search.is_empty()
+                || pipeline
+                    .workflow_name
+                    .to_lowercase()
+                    .contains(&normalized_search)
+                || pipeline
+                    .commit_sha
+                    .to_lowercase()
+                    .contains(&normalized_search)
+                || repository_names
+                    .get(&pipeline.repository_id)
+                    .is_some_and(|name| name.to_lowercase().contains(&normalized_search)))
+                && (selected_status.is_empty() || pipeline.status == selected_status)
+                && selected_repository.is_none_or(|id| pipeline.repository_id == id)
+        })
+        .collect::<Vec<_>>();
+    let (attention, history): (Vec<_>, Vec<_>) = filtered
+        .iter()
+        .copied()
+        .partition(|pipeline| pipeline_needs_attention(pipeline));
+    let attention_rows = render_pipeline_rows(&attention, &repository_names);
+    let history_rows = render_pipeline_rows(&history, &repository_names);
+    let status_options = pipeline_status_options(selected_status);
+    let repository_options = pipeline_repository_options(&repositories, selected_repository);
+    let result = if filtered.is_empty() {
+        "<div class=\"empty\" id=\"pipeline-filter-empty\">No pipelines match these filters. Clear one or more filters and try again.</div>".to_owned()
+    } else {
+        format!(
+            "{}<section id=\"pipeline-history\"><h2>History</h2>{history_rows}</section>",
+            if attention_rows.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "<section id=\"pipeline-watchlist\"><h2>Needs attention</h2>{attention_rows}</section>"
+                )
+            }
+        )
+    };
     html_page(
         "Pipelines",
         &format!(
-            "<section><p class=\"eyebrow\">Control plane</p><h1>Pipelines</h1><div id=\"pipelines\">{rows}</div></section>"
+            "<section><p class=\"eyebrow\">Control plane</p><h1>Pipelines</h1><form id=\"pipeline-filters\" class=\"filter-bar\" method=\"get\" action=\"/pipelines\"><label>Search<input type=\"search\" name=\"search\" value=\"{}\" maxlength=\"128\" placeholder=\"Workflow, repository or commit\"></label><label>Status<select name=\"status\">{status_options}</select></label><label>Repository<select name=\"repository_id\">{repository_options}</select></label><button type=\"submit\">Apply filters</button><a href=\"/pipelines\">Clear</a></form><p id=\"pipeline-result-feedback\" role=\"status\">Showing {} of the 50 most recent pipelines.</p><div id=\"pipelines\">{result}</div></section>",
+            escape_html(&search),
+            filtered.len()
         ),
     )
 }
@@ -1076,19 +1241,30 @@ async fn browser_pipeline(
                 let id = job.get("id").and_then(serde_json::Value::as_str).unwrap_or("");
                 let key = job.get("key").and_then(serde_json::Value::as_str).unwrap_or("job");
                 let status = job.get("status").and_then(serde_json::Value::as_str).unwrap_or("unknown");
-                let _ = write!(output, "<a class=\"surface-panel pipeline-row\" data-job-id=\"{}\" href=\"/pipelines/{}/jobs/{}\"><strong>{}</strong><span data-job-status>{}</span></a>", escape_html(id), pipeline_id, escape_html(id), escape_html(key), escape_html(status));
+                let needs = job.get("needs").and_then(serde_json::Value::as_array).map_or_else(|| "None".into(), |needs| needs.iter().filter_map(serde_json::Value::as_str).collect::<Vec<_>>().join(", "));
+                let phase = job.get("latest_phase").and_then(serde_json::Value::as_str).unwrap_or("Waiting");
+                let reason = job.get("terminal_reason").and_then(serde_json::Value::as_str).unwrap_or("None");
+                let duration = duration_label(job.get("duration_ms").and_then(serde_json::Value::as_i64));
+                let _ = write!(output, "<a class=\"surface-panel pipeline-row\" data-job-id=\"{}\" href=\"/pipelines/{}/jobs/{}\"><span><strong>{}</strong><small>Needs: {}</small></span><span data-job-status>{}</span><small>Phase: <span data-job-phase>{}</span></small><small>Duration: <span data-job-duration>{}</span></small><small>Reason: <span data-job-reason>{}</span></small></a>", escape_html(id), pipeline_id, escape_html(id), escape_html(key), escape_html(&needs), escape_html(status), escape_html(phase), escape_html(&duration), escape_html(reason));
                 output
             })
         });
+    let pipeline_duration = duration_label(
+        projection
+            .get("duration_ms")
+            .and_then(serde_json::Value::as_i64),
+    );
     html_page(
         "Pipeline",
         &format!(
-            "<section id=\"pipeline-detail\" data-live-pipeline data-events-url=\"/pipelines/{pipeline_id}/events\"><p class=\"eyebrow\">Pipeline</p><h1>{}</h1><p id=\"pipeline-live-state\" role=\"status\" aria-live=\"polite\">Live updates connected.</p><dl><dt>Status</dt><dd id=\"pipeline-status\">{}</dd><dt>Commit</dt><dd><code>{}</code></dd><dt>Source</dt><dd>{}</dd><dt>Trigger</dt><dd>{}</dd></dl><p><a href=\"/pipelines/{pipeline_id}/workflow\">Workflow revision</a></p><h2>Jobs</h2><div id=\"pipeline-jobs\">{jobs}</div></section>",
+            "<section id=\"pipeline-detail\" data-live-pipeline data-events-url=\"/pipelines/{pipeline_id}/events\"><p class=\"eyebrow\">Pipeline</p><h1>{}</h1><p id=\"pipeline-live-state\" role=\"status\" aria-live=\"polite\">Live updates connected.</p><dl><dt>Status</dt><dd id=\"pipeline-status\">{}</dd><dt>Commit</dt><dd><code>{}</code></dd><dt>Source</dt><dd>{}</dd><dt>Trigger</dt><dd>{}</dd><dt>Actor</dt><dd>{}</dd><dt>Duration</dt><dd id=\"pipeline-duration\">{}</dd></dl><p><a href=\"/pipelines/{pipeline_id}/workflow\">Workflow revision</a></p><h2>Dependency-ordered jobs</h2><div id=\"pipeline-jobs\">{jobs}</div></section>",
             escape_html(text("workflow_name")),
             escape_html(text("status")),
             escape_html(text("commit_sha")),
             escape_html(text("source_ref")),
             escape_html(text("trigger")),
+            escape_html(text("actor")),
+            escape_html(&pipeline_duration),
         ),
     )
 }
@@ -4342,7 +4518,7 @@ mod tests {
             pipeline_id: Uuid,
         ) -> Result<serde_json::Value, PortError> {
             Ok(
-                serde_json::json!({"id":pipeline_id,"repository_id":Uuid::nil(),"workflow_name":"CI","commit_sha":"a".repeat(40),"status":"succeeded","trigger":"push","source_ref":"main","jobs":[]}),
+                serde_json::json!({"id":pipeline_id,"repository_id":Uuid::nil(),"workflow_name":"CI","commit_sha":"a".repeat(40),"status":"succeeded","trigger":"push","source_ref":"main","actor":"system","duration_ms":1_000,"jobs":[]}),
             )
         }
 
@@ -4880,6 +5056,35 @@ mod tests {
                 test::call_service(&app, test::TestRequest::get().uri(uri).to_request()).await;
             assert_eq!(response.status(), StatusCode::SEE_OTHER, "{uri}");
         }
+    }
+
+    #[actix_web::test]
+    async fn pipeline_history_filters_are_url_persisted_bounded_and_accessible() {
+        let app = test::init_service(App::new().app_data(state(true)).configure(configure)).await;
+        let request = test::TestRequest::get()
+            .uri("/pipelines?search=CI&status=succeeded&repository_id=00000000-0000-0000-0000-000000000000")
+            .insert_header((header::COOKIE, "robine_session=session"))
+            .to_request();
+        let response = test::call_service(&app, request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = test::read_body(response).await;
+        let html = std::str::from_utf8(&body).expect("pipeline history HTML");
+        assert!(html.contains("id=\"pipeline-filters\""));
+        assert!(html.contains("name=\"search\" value=\"CI\""));
+        assert!(html.contains("value=\"succeeded\" selected"));
+        assert!(html.contains("value=\"00000000-0000-0000-0000-000000000000\" selected"));
+        assert!(html.contains("Showing 1 of the 50 most recent pipelines."));
+        assert!(html.contains("<time datetime="));
+
+        let request = test::TestRequest::get()
+            .uri("/pipelines?search=does-not-exist&status=failed")
+            .insert_header((header::COOKIE, "robine_session=session"))
+            .to_request();
+        let response = test::call_service(&app, request).await;
+        let body = test::read_body(response).await;
+        let html = std::str::from_utf8(&body).expect("filtered pipeline history HTML");
+        assert!(html.contains("id=\"pipeline-filter-empty\""));
+        assert!(html.contains("Showing 0 of the 50 most recent pipelines."));
     }
 
     #[actix_web::test]

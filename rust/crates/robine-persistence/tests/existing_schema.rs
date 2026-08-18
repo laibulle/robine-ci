@@ -2146,7 +2146,12 @@ async fn creation_persists_revision_graph_and_event_atomically() {
 
     assert_eq!(created.id, repeated.id);
     assert_eq!(browser_pipeline["workflow_name"], "Rust creation");
+    assert_eq!(browser_pipeline["actor"], maintainer.id.to_string());
+    assert!(browser_pipeline["duration_ms"].is_null());
     assert_eq!(browser_pipeline["jobs"].as_array().map(Vec::len), Some(2));
+    assert!(browser_pipeline["jobs"][0].get("latest_phase").is_some());
+    assert!(browser_pipeline["jobs"][0].get("terminal_reason").is_some());
+    assert!(browser_pipeline["jobs"][0].get("duration_ms").is_some());
     assert_eq!(browser_workflow["path"], ".robine-ci/workflows/ci.yml");
     assert!(browser_job["key"] == "build" || browser_job["key"] == "test");
     assert!(browser_log.is_empty());

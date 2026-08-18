@@ -9,7 +9,16 @@ code { overflow-wrap: anywhere; word-break: break-word; }
 table { display: block; max-width: 100%; overflow-x: auto; border-collapse: collapse; }
 th, td { padding: .65rem; text-align: left; border-bottom: 1px solid #263950; }
 a:focus-visible, button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, summary:focus-visible { outline: 3px solid #8ee9ca; outline-offset: 3px; }
+.filter-bar { display: grid; grid-template-columns: minmax(14rem, 2fr) repeat(2, minmax(10rem, 1fr)) auto auto; gap: .75rem; align-items: end; margin: 1.5rem 0; }
+.filter-bar label { display: grid; gap: .35rem; color: #aab8ca; font-size: .78rem; }
+.filter-bar input, .filter-bar select { width: 100%; min-height: 2.8rem; border: 1px solid #38516d; border-radius: .65rem; background: #081424; color: #edf6ff; padding: .7rem; }
+.filter-bar > a { min-height: 2.8rem; display: inline-flex; align-items: center; color: #bcd0e5; }
+.pipeline-row > span:first-child { display: grid; gap: .2rem; }
+.pipeline-row small, .pipeline-row time { color: #91a4ba; }
+.pipeline-row time { font-size: .78rem; }
 @media (max-width: 760px) {
   .topbar { align-items: flex-start; flex-direction: column; }
   .topbar nav { gap: .8rem; padding: .5rem 0 1.25rem; }
+  .filter-bar { grid-template-columns: 1fr; }
+  .filter-bar button, .filter-bar > a { width: 100%; justify-content: center; }
 }

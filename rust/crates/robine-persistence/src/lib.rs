@@ -1933,9 +1933,14 @@ impl PipelineRepository for Database {
         let projection = sqlx::query_scalar::<_, serde_json::Value>(
             "SELECT jsonb_build_object('id', p.id, 'repository_id', p.repository_id, \
              'workflow_name', p.workflow_name, 'commit_sha', p.commit_sha, 'status', p.status, \
-             'source_ref', p.source_ref, 'trigger', p.trigger, 'inserted_at', p.inserted_at, \
+             'source_ref', p.source_ref, 'trigger', p.trigger, 'actor', p.actor, \
+             'inserted_at', p.inserted_at, 'started_at', p.started_at, 'finished_at', p.finished_at, \
+             'duration_ms', CASE WHEN p.started_at IS NULL THEN NULL ELSE GREATEST(0, EXTRACT(EPOCH FROM (COALESCE(p.finished_at, NOW()) - p.started_at)) * 1000)::bigint END, \
              'jobs', COALESCE((SELECT jsonb_agg(jsonb_build_object('id', j.id, 'key', j.job_key, \
-             'status', j.status, 'needs', j.needs, 'position', j.position) ORDER BY j.position) \
+             'status', j.status, 'needs', j.needs, 'position', j.position, \
+             'terminal_reason', (SELECT a.result_reason FROM job_attempts a WHERE a.tenant_id = j.tenant_id AND a.job_id = j.id ORDER BY a.number DESC LIMIT 1), \
+             'latest_phase', (SELECT l.phase FROM job_attempts a JOIN log_chunks l ON l.tenant_id = a.tenant_id AND l.attempt_id = a.id WHERE a.tenant_id = j.tenant_id AND a.job_id = j.id ORDER BY a.number DESC, l.sequence DESC LIMIT 1), \
+             'duration_ms', (SELECT GREATEST(0, EXTRACT(EPOCH FROM (MAX(a.updated_at) - MIN(a.inserted_at))) * 1000)::bigint FROM job_attempts a WHERE a.tenant_id = j.tenant_id AND a.job_id = j.id)) ORDER BY j.position) \
              FROM pipeline_jobs j WHERE j.tenant_id = p.tenant_id AND j.pipeline_id = p.id), \
              '[]'::jsonb)) FROM pipelines p WHERE p.tenant_id = $1 AND p.id = $2",
         )
