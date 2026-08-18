@@ -19,6 +19,7 @@ pub struct PipelineProjection {
 #[derive(Clone, Debug, Deserialize)]
 pub struct CreatePipelineInput {
     pub repository_id: Uuid,
+    #[serde(default)]
     pub workflow_name: String,
     pub commit_sha: String,
     #[serde(default)]
@@ -217,11 +218,43 @@ fn visit_job<'a>(
 }
 
 fn valid_job_key(key: &str) -> bool {
+    let (base, matrix) = key
+        .strip_suffix(']')
+        .and_then(|key| key.split_once('['))
+        .map_or((key, None), |(base, matrix)| (base, Some(matrix)));
+    valid_base_job_key(base)
+        && key.len() <= 255
+        && matrix.is_none_or(|matrix| {
+            !matrix.is_empty()
+                && matrix.split(',').all(|entry| {
+                    entry.split_once('=').is_some_and(|(axis, value)| {
+                        valid_matrix_axis(axis) && valid_matrix_value(value)
+                    })
+                })
+        })
+}
+
+fn valid_base_job_key(key: &str) -> bool {
     (1..=63).contains(&key.len())
         && key.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
         && key
             .bytes()
             .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || b"_-".contains(&byte))
+}
+
+fn valid_matrix_axis(value: &str) -> bool {
+    (1..=31).contains(&value.len())
+        && value.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+fn valid_matrix_value(value: &str) -> bool {
+    (1..=64).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 fn validate_revision(revision: &CreateWorkflowRevisionInput) -> Result<(), InvalidPipelineInput> {
@@ -898,6 +931,15 @@ mod tests {
         assert_eq!(input.validate(), Err(InvalidPipelineInput::JobCycle));
         input.jobs.get_mut("build").expect("build").needs = vec!["missing".into()];
         assert_eq!(input.validate(), Err(InvalidPipelineInput::JobDependency));
+    }
+
+    #[test]
+    fn creation_validation_accepts_only_canonical_expanded_matrix_keys() {
+        assert!(valid_job_key("test[otp=27,elixir=1.18]"));
+        assert!(!valid_job_key("test[]"));
+        assert!(!valid_job_key("test[Bad=27]"));
+        assert!(!valid_job_key("test[otp=bad value]"));
+        assert!(!valid_job_key("test[otp=27"));
     }
 
     #[test]

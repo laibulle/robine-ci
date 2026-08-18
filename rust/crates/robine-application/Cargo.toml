@@ -17,6 +17,7 @@ robine-execution = { path = "../robine-execution" }
 robine-secrets = { path = "../robine-secrets" }
 robine-source = { path = "../robine-source" }
 robine-storage = { path = "../robine-storage" }
+robine-workflows = { path = "../robine-workflows" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

@@ -758,11 +758,12 @@ impl ControlPlane {
     pub async fn create_pipeline(
         &self,
         user: &User,
-        input: CreatePipelineInput,
+        mut input: CreatePipelineInput,
     ) -> Result<PipelineProjection, ApplicationError> {
         if user.role == Role::Viewer {
             return Err(ApplicationError::Forbidden);
         }
+        populate_jobs_from_workflow(&mut input)?;
         input
             .validate()
             .map_err(|_| ApplicationError::InvalidPipelineInput)?;
@@ -1826,6 +1827,41 @@ impl ControlPlane {
     }
 }
 
+fn populate_jobs_from_workflow(input: &mut CreatePipelineInput) -> Result<(), ApplicationError> {
+    if !input.jobs.is_empty() {
+        return Ok(());
+    }
+    let Some(revision) = input.workflow_revision.as_ref() else {
+        return Ok(());
+    };
+    if !robine_workflows::valid_workflow_path(&revision.path) {
+        return Err(ApplicationError::InvalidPipelineInput);
+    }
+    let workflow = robine_workflows::parse(
+        &revision.source,
+        &revision.path,
+        &robine_workflows::WorkflowLimits::default(),
+    )
+    .map_err(|_| ApplicationError::InvalidPipelineInput)?;
+    let jobs = workflow
+        .pipeline_jobs(&input.trigger, &input.inputs)
+        .map_err(|_| ApplicationError::InvalidPipelineInput)?;
+    input.workflow_name = workflow.name;
+    input.jobs = jobs
+        .into_iter()
+        .map(|(key, job)| {
+            (
+                key,
+                robine_core::pipelines::CreateJobInput {
+                    needs: job.needs,
+                    execution: job.execution,
+                },
+            )
+        })
+        .collect();
+    Ok(())
+}
+
 fn source_error(subject: &'static str) -> serde_json::Error {
     serde_json::Error::io(std::io::Error::new(
         std::io::ErrorKind::InvalidData,
@@ -2235,6 +2271,51 @@ mod tests {
     use std::{collections::BTreeMap, path::PathBuf};
 
     struct IncompleteBlobStore;
+
+    #[test]
+    fn workflow_revision_populates_the_durable_pipeline_graph() {
+        let mut input: CreatePipelineInput = serde_json::from_value(serde_json::json!({
+            "repository_id": Uuid::nil(),
+            "commit_sha": "a".repeat(40),
+            "trigger": "push",
+            "workflow_revision": {
+                "path": ".robine-ci/workflows/ci.yml",
+                "source": "version: 1\nname: CI\non: {push: {}}\njobs:\n  test:\n    image: alpine:3.22\n    steps:\n      - run: echo ok\n"
+            }
+        }))
+        .expect("source-backed pipeline input");
+
+        populate_jobs_from_workflow(&mut input).expect("valid workflow revision");
+
+        assert_eq!(input.workflow_name, "CI");
+        assert_eq!(input.jobs.len(), 1);
+        assert_eq!(input.jobs["test"].execution["image"], "alpine:3.22");
+        assert!(input.validate().is_ok());
+    }
+
+    #[test]
+    fn workflow_revision_rejects_noncanonical_paths_and_undeclared_triggers() {
+        let source = "version: 1\nname: CI\non: {push: {}}\njobs:\n  test:\n    image: alpine:3.22\n    steps: [{run: echo ok}]\n";
+        let mut input: CreatePipelineInput = serde_json::from_value(serde_json::json!({
+            "repository_id": Uuid::nil(),
+            "commit_sha": "a".repeat(40),
+            "trigger": "push",
+            "workflow_revision": {"path": "ci.yml", "source": source}
+        }))
+        .expect("pipeline input");
+        assert!(matches!(
+            populate_jobs_from_workflow(&mut input),
+            Err(ApplicationError::InvalidPipelineInput)
+        ));
+
+        input.workflow_revision.as_mut().expect("revision").path =
+            ".robine-ci/workflows/ci.yml".into();
+        input.trigger = "pull_request".into();
+        assert!(matches!(
+            populate_jobs_from_workflow(&mut input),
+            Err(ApplicationError::InvalidPipelineInput)
+        ));
+    }
 
     #[async_trait::async_trait]
     impl BlobStore for IncompleteBlobStore {

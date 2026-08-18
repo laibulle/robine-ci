@@ -120,6 +120,17 @@ impl ValidatedWorkflow {
         trigger: &str,
         inputs: &BTreeMap<String, String>,
     ) -> Result<BTreeMap<String, PipelineJob>, Diagnostic> {
+        let trigger_key = match trigger {
+            "manual" | "workflow_dispatch" => "workflow_dispatch",
+            other => other,
+        };
+        if self.triggers.get(trigger_key).is_none() {
+            return Err(unlocated_diagnostic(
+                "workflow.trigger",
+                "workflow does not declare the selected trigger",
+                vec!["on".into()],
+            ));
+        }
         let (declared, prefix) = match trigger {
             "manual" | "workflow_dispatch" => (&self.dispatch_inputs, "ROBINE_INPUT_"),
             "workflow_call" => (&self.call_inputs, "ROBINE_CALL_INPUT_"),
@@ -141,15 +152,24 @@ impl ValidatedWorkflow {
         }
         let mut jobs = self.jobs.clone();
         for job in jobs.values_mut() {
-            let execution = job
-                .execution
-                .as_object_mut()
-                .expect("validated execution map");
-            let environment = execution
+            let Some(execution) = job.execution.as_object_mut() else {
+                return Err(unlocated_diagnostic(
+                    "workflow.internal",
+                    "validated job execution is invalid",
+                    vec!["jobs".into()],
+                ));
+            };
+            let Some(environment) = execution
                 .entry("env")
                 .or_insert_with(|| json!({}))
                 .as_object_mut()
-                .expect("validated environment map");
+            else {
+                return Err(unlocated_diagnostic(
+                    "workflow.internal",
+                    "validated job environment is invalid",
+                    vec!["jobs".into()],
+                ));
+            };
             for (name, value) in inputs {
                 environment.insert(
                     format!("{prefix}{}", name.to_ascii_uppercase()),
@@ -159,6 +179,23 @@ impl ValidatedWorkflow {
         }
         Ok(jobs)
     }
+}
+
+/// Reports whether a path is a canonical, directly nested Robine workflow path.
+#[must_use]
+pub fn valid_workflow_path(path: &str) -> bool {
+    let Some(file_name) = path.strip_prefix(".robine-ci/workflows/") else {
+        return false;
+    };
+    !file_name.is_empty()
+        && file_name.len() <= 256 - ".robine-ci/workflows/".len()
+        && !file_name.contains(['/', '\\'])
+        && matches!(
+            std::path::Path::new(file_name)
+                .extension()
+                .and_then(std::ffi::OsStr::to_str),
+            Some("yml" | "yaml")
+        )
 }
 
 #[derive(Clone)]
@@ -213,6 +250,7 @@ pub fn parse(
     validate_document(&document, source_path, limits, &index)
 }
 
+#[allow(clippy::too_many_lines)]
 fn validate_document(
     document: &YamlValue,
     source_path: &str,
@@ -706,6 +744,7 @@ fn parse_runs_on(definition: &Mapping, id: &str) -> Result<Vec<String>, Vec<Diag
         .collect())
 }
 
+#[allow(clippy::too_many_lines)]
 fn parse_services(
     definition: &Mapping,
     job_id: &str,
@@ -789,18 +828,15 @@ fn parse_services(
                     append(&path, "command"),
                 )]
             })?;
-        let readiness = yaml_get(service, "readiness")
-            .map(|readiness| {
-                let readiness = readiness.as_mapping()?;
-                let tcp = yaml_u64(readiness, "tcp")
-                    .and_then(|value| u16::try_from(value).ok())
-                    .filter(|value| *value > 0)?;
-                let timeout = yaml_string(readiness, "timeout").unwrap_or("30s");
-                let timeout_ms = parse_service_timeout(timeout)?;
-                Some(json!({"tcp": tcp, "timeout_ms": timeout_ms}))
-            })
-            .transpose()
-            .flatten();
+        let readiness = yaml_get(service, "readiness").and_then(|readiness| {
+            let readiness = readiness.as_mapping()?;
+            let tcp = yaml_u64(readiness, "tcp")
+                .and_then(|value| u16::try_from(value).ok())
+                .filter(|value| *value > 0)?;
+            let timeout = yaml_string(readiness, "timeout").unwrap_or("30s");
+            let timeout_ms = parse_service_timeout(timeout)?;
+            Some(json!({"tcp": tcp, "timeout_ms": timeout_ms}))
+        });
         if yaml_get(service, "readiness").is_some() && readiness.is_none() {
             return Err(vec![unlocated_diagnostic(
                 "service.readiness",
@@ -898,9 +934,7 @@ fn parse_steps(
             }
         };
         let condition = parse_condition(step, &append(&step_path, "if"))?;
-        let with = yaml_get(step, "with")
-            .map(yaml_to_json)
-            .unwrap_or_else(|| json!({}));
+        let with = yaml_get(step, "with").map_or_else(|| json!({}), yaml_to_json);
         validate_step_options(kind, value, &with, &step_path)?;
         let name = yaml_string(step, "name").map_or_else(
             || {
@@ -1281,10 +1315,8 @@ fn parse_duration_ms(value: &str) -> Option<u64> {
         (value, 1_000)
     } else if let Some(value) = value.strip_suffix('m') {
         (value, 60_000)
-    } else if let Some(value) = value.strip_suffix('h') {
-        (value, 3_600_000)
     } else {
-        return None;
+        (value.strip_suffix('h')?, 3_600_000)
     };
     number
         .parse::<u64>()
