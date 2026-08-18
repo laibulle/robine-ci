@@ -103,6 +103,48 @@ impl PipelineState {
             _ => Err(InvalidTransition { state: self, event }),
         }
     }
+
+    /// Applies the idempotent user cancellation policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`InvalidTransition`] when the pipeline is already terminal.
+    pub fn request_cancellation(self) -> Result<Self, InvalidTransition> {
+        match self {
+            Self::Created | Self::Queued => Ok(Self::Cancelled),
+            Self::Running => Ok(Self::Cancelling),
+            Self::Cancelling => Ok(Self::Cancelling),
+            terminal => Err(InvalidTransition {
+                state: terminal,
+                event: PipelineEvent::RequestCancellation,
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum JobState {
+    Blocked,
+    Queued,
+    Running,
+    Cancelling,
+    Succeeded,
+    Failed,
+    Cancelled,
+    Skipped,
+}
+
+impl JobState {
+    #[must_use]
+    pub const fn cancellation_target(self) -> Option<Self> {
+        match self {
+            Self::Blocked | Self::Queued => Some(Self::Cancelled),
+            Self::Running => Some(Self::Cancelling),
+            Self::Cancelling | Self::Succeeded | Self::Failed | Self::Cancelled | Self::Skipped => {
+                None
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -144,5 +186,35 @@ mod tests {
         ] {
             assert_eq!(PipelineState::try_from(state.as_str()), Ok(state));
         }
+    }
+
+    #[test]
+    fn cancellation_is_immediate_before_dispatch_and_idempotent_while_cancelling() {
+        assert_eq!(
+            PipelineState::Queued.request_cancellation(),
+            Ok(PipelineState::Cancelled)
+        );
+        assert_eq!(
+            PipelineState::Running.request_cancellation(),
+            Ok(PipelineState::Cancelling)
+        );
+        assert_eq!(
+            PipelineState::Cancelling.request_cancellation(),
+            Ok(PipelineState::Cancelling)
+        );
+        assert!(PipelineState::Succeeded.request_cancellation().is_err());
+    }
+
+    #[test]
+    fn cancellation_targets_only_jobs_that_can_still_do_work() {
+        assert_eq!(
+            JobState::Blocked.cancellation_target(),
+            Some(JobState::Cancelled)
+        );
+        assert_eq!(
+            JobState::Running.cancellation_target(),
+            Some(JobState::Cancelling)
+        );
+        assert_eq!(JobState::Succeeded.cancellation_target(), None);
     }
 }

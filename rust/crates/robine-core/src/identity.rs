@@ -1,13 +1,25 @@
-use serde::Serialize;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     Administrator,
     Maintainer,
     Viewer,
+}
+
+impl Role {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Administrator => "administrator",
+            Self::Maintainer => "maintainer",
+            Self::Viewer => "viewer",
+        }
+    }
 }
 
 impl TryFrom<&str> for Role {
@@ -29,12 +41,27 @@ pub struct User {
     pub email: String,
     pub role: Role,
     pub disabled: bool,
+    pub inserted_at: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LocalIdentity {
     pub user: User,
     pub password_hash: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OidcClaims {
+    pub issuer: String,
+    pub subject: String,
+    pub email: String,
+    pub email_verified: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct OidcAuthorization {
+    pub url: String,
+    pub state: String,
 }
 
 #[derive(Debug, Error, Eq, PartialEq)]

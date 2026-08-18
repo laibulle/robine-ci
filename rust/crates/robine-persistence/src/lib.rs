@@ -1,9 +1,9 @@
 //! `PostgreSQL` adapters for the existing Robine schema.
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use robine_core::{
-    identity::{LocalIdentity, Role, User},
+    identity::{LocalIdentity, OidcClaims, Role, User},
     pipelines::{PipelineProjection, PipelineState, UnknownPipelineState},
     ports::{IdentityRepository, PipelineRepository, PortError},
 };
@@ -173,12 +173,13 @@ impl IdentityRepository for Database {
             email: email.into(),
             role: Role::Administrator,
             disabled: false,
+            inserted_at,
         })
     }
 
     async fn get_local_identity(&self, email: &str) -> Result<LocalIdentity, PortError> {
         let row = sqlx::query_as::<_, LocalIdentityRow>(
-            "SELECT users.id, users.email, users.role, users.disabled, \
+            "SELECT users.id, users.email, users.role, users.disabled, users.inserted_at, \
                     local_credentials.password_hash \
              FROM users \
              JOIN local_credentials ON local_credentials.user_id = users.id \
@@ -191,7 +192,7 @@ impl IdentityRepository for Database {
         .ok_or(PortError::NotFound)?;
 
         Ok(LocalIdentity {
-            user: user_from_parts(row.id, row.email, &row.role, row.disabled)?,
+            user: user_from_parts(row.id, row.email, &row.role, row.disabled, row.inserted_at)?,
             password_hash: row.password_hash,
         })
     }
@@ -202,7 +203,7 @@ impl IdentityRepository for Database {
         now: DateTime<Utc>,
     ) -> Result<User, PortError> {
         let row = sqlx::query_as::<_, UserRow>(
-            "SELECT users.id, users.email, users.role, users.disabled \
+            "SELECT users.id, users.email, users.role, users.disabled, users.inserted_at \
              FROM sessions \
              JOIN users ON users.id = sessions.user_id \
              WHERE sessions.token_digest = $1 \
@@ -217,7 +218,7 @@ impl IdentityRepository for Database {
         .map_err(|_| PortError::Unavailable)?
         .ok_or(PortError::NotFound)?;
 
-        user_from_parts(row.id, row.email, &row.role, row.disabled)
+        user_from_parts(row.id, row.email, &row.role, row.disabled, row.inserted_at)
     }
 
     async fn create_session(
@@ -265,6 +266,151 @@ impl IdentityRepository for Database {
             Ok(())
         }
     }
+
+    async fn list_users(&self) -> Result<Vec<User>, PortError> {
+        let rows = sqlx::query_as::<_, UserRow>(
+            "SELECT id, email, role, disabled, inserted_at FROM users ORDER BY email ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|_| PortError::Unavailable)?;
+
+        rows.into_iter()
+            .map(|row| user_from_parts(row.id, row.email, &row.role, row.disabled, row.inserted_at))
+            .collect()
+    }
+
+    async fn change_user_role(&self, user_id: Uuid, role: Role) -> Result<User, PortError> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        sqlx::query("LOCK TABLE users IN EXCLUSIVE MODE")
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        let row = sqlx::query_as::<_, UserRow>(
+            "SELECT id, email, role, disabled, inserted_at FROM users WHERE id = $1",
+        )
+        .bind(user_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| PortError::Unavailable)?
+        .ok_or(PortError::NotFound)?;
+        let current_role = Role::try_from(row.role.as_str()).map_err(|_| PortError::InvalidData)?;
+
+        if current_role == Role::Administrator && role != Role::Administrator {
+            let usable_administrators = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM users WHERE role = 'administrator' AND disabled = false",
+            )
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+            if usable_administrators <= 1 {
+                return Err(PortError::LastAdministrator);
+            }
+        }
+
+        sqlx::query("UPDATE users SET role = $2 WHERE id = $1")
+            .bind(user_id)
+            .bind(role.as_str())
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+
+        Ok(User {
+            id: row.id,
+            email: row.email,
+            role,
+            disabled: row.disabled,
+            inserted_at: row.inserted_at.and_utc(),
+        })
+    }
+
+    async fn find_or_provision_oidc_user(
+        &self,
+        claims: &OidcClaims,
+        user_id: Uuid,
+        inserted_at: DateTime<Utc>,
+    ) -> Result<User, PortError> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        let identity_key = format!("{}:{}", claims.issuer, claims.subject);
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+            .bind(identity_key)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+
+        let existing = sqlx::query_as::<_, UserRow>(
+            "SELECT users.id, users.email, users.role, users.disabled, users.inserted_at \
+             FROM oidc_identities \
+             JOIN users ON users.id = oidc_identities.user_id \
+             WHERE oidc_identities.issuer = $1 AND oidc_identities.subject = $2",
+        )
+        .bind(&claims.issuer)
+        .bind(&claims.subject)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| PortError::Unavailable)?;
+        if let Some(row) = existing {
+            return user_from_parts(row.id, row.email, &row.role, row.disabled, row.inserted_at);
+        }
+
+        let email = claims.email.to_lowercase();
+        let email_exists =
+            sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM users WHERE email = $1)")
+                .bind(&email)
+                .fetch_one(&mut *transaction)
+                .await
+                .map_err(|_| PortError::Unavailable)?;
+        if email_exists {
+            return Err(PortError::OidcEmailCollision);
+        }
+
+        sqlx::query(
+            "INSERT INTO users (id, email, role, disabled, inserted_at) \
+             VALUES ($1, $2, 'viewer', false, $3)",
+        )
+        .bind(user_id)
+        .bind(&email)
+        .bind(inserted_at)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| PortError::Unavailable)?;
+        sqlx::query(
+            "INSERT INTO oidc_identities (id, user_id, issuer, subject, inserted_at) \
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(user_id)
+        .bind(&claims.issuer)
+        .bind(&claims.subject)
+        .bind(inserted_at)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| PortError::Unavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+
+        Ok(User {
+            id: user_id,
+            email,
+            role: Role::Viewer,
+            disabled: false,
+            inserted_at,
+        })
+    }
 }
 
 #[async_trait]
@@ -279,6 +425,79 @@ impl PipelineRepository for Database {
             .await
             .map_err(|_| PortError::Unavailable)
     }
+
+    async fn cancel(
+        &self,
+        tenant_id: &str,
+        pipeline_id: Uuid,
+        event_id: Uuid,
+        now: DateTime<Utc>,
+    ) -> Result<PipelineProjection, PortError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        let pipeline = sqlx::query_as::<_, PipelineRecordRow>(
+            "SELECT id, repository_id, workflow_name, commit_sha, status, inserted_at \
+             FROM pipelines WHERE id = $1 FOR UPDATE",
+        )
+        .bind(pipeline_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| PortError::Unavailable)?
+        .ok_or(PortError::NotFound)?;
+        let current = PipelineState::try_from(pipeline.status.as_str())
+            .map_err(|_| PortError::InvalidData)?;
+        let target = current
+            .request_cancellation()
+            .map_err(|_| PortError::InvalidTransition)?;
+
+        sqlx::query(
+            "UPDATE pipeline_jobs SET status = CASE \
+               WHEN status IN ('blocked', 'queued') THEN 'cancelled' \
+               WHEN status = 'running' THEN 'cancelling' ELSE status END, \
+             updated_at = CASE WHEN status IN ('blocked', 'queued', 'running') THEN $2 ELSE updated_at END \
+             WHERE pipeline_id = $1",
+        )
+        .bind(pipeline_id)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| PortError::Unavailable)?;
+
+        let updated = sqlx::query_as::<_, PipelineRecordRow>(
+            "UPDATE pipelines SET status = $2, \
+               finished_at = CASE WHEN $2 = 'cancelled' THEN $3 ELSE finished_at END \
+             WHERE id = $1 \
+             RETURNING id, repository_id, workflow_name, commit_sha, status, inserted_at",
+        )
+        .bind(pipeline_id)
+        .bind(target.as_str())
+        .bind(now)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| PortError::Unavailable)?;
+
+        sqlx::query(
+            "INSERT INTO outbox_events \
+             (id, event_type, aggregate_id, payload, occurred_at, inserted_at, tenant_id) \
+             VALUES ($1, 'pipeline.projection_requested', $2, $3, $4, $4, $5)",
+        )
+        .bind(event_id)
+        .bind(pipeline_id)
+        .bind(serde_json::json!({"pipeline_id": pipeline_id, "dispatch": false}))
+        .bind(now)
+        .bind(tenant_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| PortError::Unavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+
+        updated.try_into().map_err(|_| PortError::InvalidData)
+    }
 }
 
 #[derive(sqlx::FromRow)]
@@ -288,7 +507,7 @@ struct PipelineRecordRow {
     workflow_name: String,
     commit_sha: String,
     status: String,
-    inserted_at: DateTime<Utc>,
+    inserted_at: NaiveDateTime,
 }
 
 #[derive(sqlx::FromRow)]
@@ -297,6 +516,7 @@ struct UserRow {
     email: String,
     role: String,
     disabled: bool,
+    inserted_at: NaiveDateTime,
 }
 
 #[derive(sqlx::FromRow)]
@@ -305,15 +525,23 @@ struct LocalIdentityRow {
     email: String,
     role: String,
     disabled: bool,
+    inserted_at: NaiveDateTime,
     password_hash: String,
 }
 
-fn user_from_parts(id: Uuid, email: String, role: &str, disabled: bool) -> Result<User, PortError> {
+fn user_from_parts(
+    id: Uuid,
+    email: String,
+    role: &str,
+    disabled: bool,
+    inserted_at: NaiveDateTime,
+) -> Result<User, PortError> {
     Ok(User {
         id,
         email,
         role: Role::try_from(role).map_err(|_| PortError::InvalidData)?,
         disabled,
+        inserted_at: inserted_at.and_utc(),
     })
 }
 
@@ -328,7 +556,7 @@ impl TryFrom<PipelineRecordRow> for PipelineProjection {
             workflow_name: row.workflow_name,
             commit_sha: row.commit_sha,
             status: status.as_str().into(),
-            inserted_at: row.inserted_at,
+            inserted_at: row.inserted_at.and_utc(),
         })
     }
 }
@@ -345,7 +573,7 @@ mod tests {
             workflow_name: "CI".into(),
             commit_sha: "0".repeat(40),
             status: "surprising".into(),
-            inserted_at: Utc::now(),
+            inserted_at: Utc::now().naive_utc(),
         };
 
         assert!(matches!(

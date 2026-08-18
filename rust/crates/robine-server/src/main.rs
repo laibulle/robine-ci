@@ -3,6 +3,7 @@ use std::{io, sync::Arc};
 use actix_web::{App, HttpServer, web};
 use chrono::{Duration, Utc};
 use robine_application::ControlPlane;
+use robine_oidc::OidcClient;
 use robine_persistence::Database;
 use robine_server::AppState;
 
@@ -20,6 +21,24 @@ async fn main() -> io::Result<()> {
     if let Ok(token) = std::env::var("ROBINE_BOOTSTRAP_TOKEN") {
         control_plane =
             control_plane.with_bootstrap_token(&token, Utc::now() + Duration::minutes(15));
+    }
+    if let (Ok(issuer), Ok(client_id), Ok(client_secret)) = (
+        std::env::var("OIDC_ISSUER"),
+        std::env::var("OIDC_CLIENT_ID"),
+        std::env::var("OIDC_CLIENT_SECRET"),
+    ) {
+        let public_url =
+            std::env::var("ROBINE_PUBLIC_URL").unwrap_or_else(|_| "http://localhost:4000".into());
+        if let Ok(provider) = OidcClient::discover(
+            &issuer,
+            client_id,
+            client_secret,
+            format!("{}/auth/oidc/callback", public_url.trim_end_matches('/')),
+        )
+        .await
+        {
+            control_plane = control_plane.with_oidc_provider(Arc::new(provider));
+        }
     }
     let control_plane = Arc::new(control_plane);
     let state = web::Data::new(AppState::new(database, control_plane));

@@ -11,6 +11,7 @@ async-trait.workspace = true
 chrono.workspace = true
 robine-application = { path = "../robine-application" }
 robine-core = { path = "../robine-core" }
+robine-oidc = { path = "../robine-oidc" }
 robine-persistence = { path = "../robine-persistence" }
 serde.workspace = true
 serde_json.workspace = true

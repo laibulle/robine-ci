@@ -97,6 +97,8 @@ The Rust runtime publishes compatible health and Prometheus endpoints, structure
 - [x] Rust resolves existing SHA-256 opaque session digests and serves an authenticated pipeline-list API through the application boundary.
 - [x] Rust verifies existing Argon2 local credentials and creates, resolves, and revokes compatible seven-day opaque sessions.
 - [x] Rust implements the expiring out-of-band first-administrator bootstrap with constant-time token verification and transactional one-user enforcement.
+- [x] Rust exposes administrator-only identity queries and transactional role changes that preserve the final usable administrator.
+- [x] Rust starts OIDC authorization with server-owned one-use state, nonce, and S256 PKCE, validates signed callback claims, provisions only by stable issuer/subject identity, and rejects verified-email collisions.
 - [ ] Every accepted domain contract has Rust unit and integration coverage.
 - [ ] Existing PostgreSQL migrations and records pass compatibility tests.
 - [ ] Every HTTP and runner route passes request/response parity tests.

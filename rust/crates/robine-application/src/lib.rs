@@ -10,9 +10,9 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::Utc;
 use robine_core::{
     execution_context::{Actor, ActorKind, Capability, ExecutionContext},
-    identity::User,
+    identity::{OidcAuthorization, Role, User},
     pipelines::PipelineProjection,
-    ports::{IdentityRepository, PipelineRepository, PortError},
+    ports::{IdentityRepository, OidcProvider, PipelineRepository, PortError},
 };
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
@@ -32,6 +32,7 @@ pub struct ControlPlane {
     identities: Arc<dyn IdentityRepository>,
     pipelines: Arc<dyn PipelineRepository>,
     bootstrap: Option<BootstrapConfig>,
+    oidc: Option<Arc<dyn OidcProvider>>,
 }
 
 struct BootstrapConfig {
@@ -53,10 +54,24 @@ pub enum ApplicationError {
     WeakPassword,
     #[error("the instance has already been bootstrapped")]
     AlreadyBootstrapped,
+    #[error("the last usable administrator cannot be demoted")]
+    LastAdministrator,
+    #[error("OpenID Connect is not configured")]
+    OidcNotConfigured,
+    #[error("OpenID Connect protocol validation failed")]
+    OidcProtocol,
+    #[error("OpenID Connect identity is incomplete or unverified")]
+    InvalidOidcIdentity,
+    #[error("the verified email belongs to another identity")]
+    OidcEmailCollision,
     #[error("authentication is required")]
     Unauthenticated,
     #[error("operation is forbidden")]
     Forbidden,
+    #[error("pipeline was not found")]
+    PipelineNotFound,
+    #[error("pipeline cannot be cancelled from its current state")]
+    PipelineNotCancellable,
     #[error("application dependency is unavailable")]
     Unavailable,
 }
@@ -78,6 +93,7 @@ impl ControlPlane {
             identities,
             pipelines,
             bootstrap: None,
+            oidc: None,
         }
     }
 
@@ -88,6 +104,66 @@ impl ControlPlane {
             expires_at,
         });
         self
+    }
+
+    #[must_use]
+    pub fn with_oidc_provider(mut self, oidc: Arc<dyn OidcProvider>) -> Self {
+        self.oidc = Some(oidc);
+        self
+    }
+
+    /// Starts an OIDC authorization-code flow with provider-owned transient state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApplicationError::OidcNotConfigured`] without a provider and
+    /// [`ApplicationError::OidcProtocol`] when discovery or authorization fails.
+    pub async fn start_oidc(&self) -> Result<OidcAuthorization, ApplicationError> {
+        self.oidc
+            .as_ref()
+            .ok_or(ApplicationError::OidcNotConfigured)?
+            .start()
+            .await
+            .map_err(|_| ApplicationError::OidcProtocol)
+    }
+
+    /// Completes OIDC, provisions only by issuer/subject, and creates a local session.
+    ///
+    /// # Errors
+    ///
+    /// Returns protocol/identity errors for invalid claims, collision for an email owned by
+    /// another identity, or unavailable when provisioning/session persistence fails.
+    pub async fn complete_oidc(
+        &self,
+        code: &str,
+        state: &str,
+    ) -> Result<IssuedSession, ApplicationError> {
+        let claims = self
+            .oidc
+            .as_ref()
+            .ok_or(ApplicationError::OidcNotConfigured)?
+            .complete(code, state)
+            .await
+            .map_err(|_| ApplicationError::OidcProtocol)?;
+        if claims.issuer.is_empty()
+            || claims.subject.is_empty()
+            || claims.email.is_empty()
+            || !claims.email_verified
+        {
+            return Err(ApplicationError::InvalidOidcIdentity);
+        }
+
+        let now = Utc::now();
+        let user = self
+            .identities
+            .find_or_provision_oidc_user(&claims, Uuid::new_v4(), now)
+            .await
+            .map_err(|error| match error {
+                PortError::OidcEmailCollision => ApplicationError::OidcEmailCollision,
+                PortError::InvalidData => ApplicationError::InvalidOidcIdentity,
+                _ => ApplicationError::Unavailable,
+            })?;
+        self.issue_session(user, now).await
     }
 
     /// Creates the first administrator under an expiring out-of-band token.
@@ -190,34 +266,19 @@ impl ControlPlane {
             Ok(_) | Err(PortError::NotFound | PortError::InvalidData) => {
                 return Err(ApplicationError::InvalidCredentials);
             }
-            Err(PortError::AlreadyBootstrapped | PortError::Unavailable) => {
+            Err(
+                PortError::AlreadyBootstrapped
+                | PortError::LastAdministrator
+                | PortError::OidcEmailCollision
+                | PortError::InvalidTransition
+                | PortError::Unavailable,
+            ) => {
                 return Err(ApplicationError::Unavailable);
             }
         };
 
-        let mut token_bytes = [0_u8; 32];
-        getrandom::fill(&mut token_bytes).map_err(|_| ApplicationError::Unavailable)?;
-        let token = URL_SAFE_NO_PAD.encode(token_bytes);
-        let digest = Sha256::digest(token.as_bytes());
         let now = Utc::now();
-        let expires_at = now + chrono::Duration::days(7);
-
-        self.identities
-            .create_session(
-                Uuid::new_v4(),
-                identity.user.id,
-                digest.as_slice(),
-                expires_at,
-                now,
-            )
-            .await
-            .map_err(|_| ApplicationError::Unavailable)?;
-
-        Ok(IssuedSession {
-            token,
-            expires_at,
-            user: identity.user,
-        })
+        self.issue_session(identity.user, now).await
     }
 
     /// Revokes an opaque session token.
@@ -235,6 +296,69 @@ impl ControlPlane {
             .revoke_session(digest.as_slice(), Utc::now())
             .await
             .map_err(|error| authentication_error(&error))
+    }
+
+    /// Lists non-sensitive user metadata for an administrator.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApplicationError::Forbidden`] for non-administrators and
+    /// [`ApplicationError::Unavailable`] when persistence fails.
+    pub async fn list_users(&self, actor: &User) -> Result<Vec<User>, ApplicationError> {
+        if actor.role != Role::Administrator {
+            return Err(ApplicationError::Forbidden);
+        }
+        self.identities
+            .list_users()
+            .await
+            .map_err(|_| ApplicationError::Unavailable)
+    }
+
+    /// Changes a user's role while preserving a usable administrator.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApplicationError::Forbidden`] for non-administrators,
+    /// [`ApplicationError::LastAdministrator`] when the mutation would remove the final
+    /// usable administrator, and an authentication/dependency error for missing data.
+    pub async fn change_user_role(
+        &self,
+        actor: &User,
+        user_id: Uuid,
+        role: Role,
+    ) -> Result<User, ApplicationError> {
+        if actor.role != Role::Administrator {
+            return Err(ApplicationError::Forbidden);
+        }
+        self.identities
+            .change_user_role(user_id, role)
+            .await
+            .map_err(|error| match error {
+                PortError::LastAdministrator => ApplicationError::LastAdministrator,
+                PortError::NotFound => ApplicationError::Unauthenticated,
+                _ => ApplicationError::Unavailable,
+            })
+    }
+
+    async fn issue_session(
+        &self,
+        user: User,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<IssuedSession, ApplicationError> {
+        let mut token_bytes = [0_u8; 32];
+        getrandom::fill(&mut token_bytes).map_err(|_| ApplicationError::Unavailable)?;
+        let token = URL_SAFE_NO_PAD.encode(token_bytes);
+        let digest = Sha256::digest(token.as_bytes());
+        let expires_at = now + chrono::Duration::days(7);
+        self.identities
+            .create_session(Uuid::new_v4(), user.id, digest.as_slice(), expires_at, now)
+            .await
+            .map_err(|_| ApplicationError::Unavailable)?;
+        Ok(IssuedSession {
+            token,
+            expires_at,
+            user,
+        })
     }
 
     /// Lists the bounded pipeline projection visible to an authenticated user.
@@ -269,12 +393,51 @@ impl ControlPlane {
             .await
             .map_err(|_| ApplicationError::Unavailable)
     }
+
+    /// Cancels queued work immediately and marks active work for cancellation atomically.
+    ///
+    /// # Errors
+    ///
+    /// Returns forbidden for viewers, not found for an unknown tenant-visible pipeline,
+    /// not cancellable for terminal state, or unavailable for persistence failures.
+    pub async fn cancel_pipeline(
+        &self,
+        user: &User,
+        pipeline_id: Uuid,
+    ) -> Result<PipelineProjection, ApplicationError> {
+        if user.role == Role::Viewer {
+            return Err(ApplicationError::Forbidden);
+        }
+        let context = ExecutionContext::embedded(
+            Actor {
+                id: user.id.to_string(),
+                kind: ActorKind::User,
+            },
+            "standalone",
+            [Capability::new("pipelines:cancel")],
+            Uuid::new_v4(),
+        )
+        .map_err(|_| ApplicationError::Forbidden)?;
+
+        self.pipelines
+            .cancel(&context.tenant_id, pipeline_id, Uuid::new_v4(), Utc::now())
+            .await
+            .map_err(|error| match error {
+                PortError::NotFound => ApplicationError::PipelineNotFound,
+                PortError::InvalidTransition => ApplicationError::PipelineNotCancellable,
+                _ => ApplicationError::Unavailable,
+            })
+    }
 }
 
 fn authentication_error(error: &PortError) -> ApplicationError {
     match error {
         PortError::NotFound | PortError::InvalidData => ApplicationError::Unauthenticated,
-        PortError::AlreadyBootstrapped | PortError::Unavailable => ApplicationError::Unavailable,
+        PortError::AlreadyBootstrapped
+        | PortError::LastAdministrator
+        | PortError::OidcEmailCollision
+        | PortError::InvalidTransition
+        | PortError::Unavailable => ApplicationError::Unavailable,
     }
 }
 

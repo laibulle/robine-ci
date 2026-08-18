@@ -1,0 +1,23 @@
+[package]
+name = "robine-oidc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+base64.workspace = true
+getrandom.workspace = true
+openidconnect.workspace = true
+robine-core = { path = "../robine-core" }
+tokio.workspace = true
+
+[dev-dependencies]
+jsonwebtoken = "9"
+serde_json.workspace = true
+url.workspace = true
+wiremock = "0.6"
+
+[lints]
+workspace = true
