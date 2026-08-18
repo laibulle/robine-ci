@@ -19,6 +19,9 @@ use robine_core::{
 use robine_persistence::{Database, Readiness};
 use robine_secrets::SecretRepository;
 use robine_source::{Provider, RepositoryStore};
+use robine_storage::{
+    Artifact, CacheEntry, MetadataRepository, StorageError, StorageQuotas, StoredObject,
+};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -37,6 +40,169 @@ impl OidcProvider for FakeOidc {
     async fn complete(&self, _code: &str, _state: &str) -> Result<OidcClaims, PortError> {
         Ok(self.0.clone())
     }
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn cache_and_dependency_artifact_metadata_are_tenant_scoped_and_quota_locked() {
+    let Ok(database_url) = std::env::var("ROBINE_DATABASE_INTEGRATION_URL") else {
+        return;
+    };
+    let database = Database::connect(&database_url, 2)
+        .await
+        .expect("connect migrated database");
+    let tenant = format!("rust-storage-{}", Uuid::new_v4());
+    let repository_id = Uuid::new_v4();
+    let pipeline_id = Uuid::new_v4();
+    let job_id = Uuid::new_v4();
+    let attempt_id = Uuid::new_v4();
+    let now = Utc::now();
+    let object = StoredObject {
+        blob_id: "a".repeat(64),
+        digest: "a".repeat(64),
+        size: 7,
+    };
+    let cache = CacheEntry {
+        id: Uuid::new_v4(),
+        repository_id,
+        key: "deps-v1".into(),
+        object: object.clone(),
+        created_at: now,
+        expires_at: now + Duration::days(7),
+    };
+    let quotas = StorageQuotas {
+        instance_bytes: 1_024,
+        repository_bytes: 1_024,
+    };
+    MetadataRepository::save_cache(&database, &tenant, &cache, quotas)
+        .await
+        .expect("save cache metadata");
+    let restored =
+        MetadataRepository::restore_cache(&database, &tenant, repository_id, "deps-v1", now)
+            .await
+            .expect("restore cache metadata")
+            .expect("cache hit");
+    assert_eq!(restored.object, object);
+    assert_eq!(
+        MetadataRepository::restore_cache(
+            &database,
+            "different-tenant",
+            repository_id,
+            "deps-v1",
+            now,
+        )
+        .await
+        .expect("cross-tenant cache miss"),
+        None
+    );
+
+    let mut fixture = database
+        .tenant_transaction(&tenant)
+        .await
+        .expect("storage fixture transaction");
+    sqlx::query(
+        "INSERT INTO pipelines \
+         (id, repository_id, workflow_name, commit_sha, status, trigger, actor, correlation_id, inserted_at) \
+         VALUES ($1, $2, 'Storage', $3, 'running', 'manual', 'test', $4, $5)",
+    )
+    .bind(pipeline_id)
+    .bind(repository_id)
+    .bind("a".repeat(40))
+    .bind(format!("rust-storage-{pipeline_id}"))
+    .bind(now)
+    .execute(&mut *fixture)
+    .await
+    .expect("insert storage pipeline");
+    sqlx::query(
+        "INSERT INTO pipeline_jobs \
+         (id, pipeline_id, job_key, status, needs, position, execution_spec, inserted_at, updated_at) \
+         VALUES ($1, $2, 'build', 'succeeded', '{}', 0, '{}', $3, $3)",
+    )
+    .bind(job_id)
+    .bind(pipeline_id)
+    .bind(now)
+    .execute(&mut *fixture)
+    .await
+    .expect("insert storage job");
+    sqlx::query(
+        "INSERT INTO job_attempts \
+         (id, job_id, number, idempotency_token, status, lease_expires_at, last_sequence, inserted_at, updated_at) \
+         VALUES ($1, $2, 1, $3, 'succeeded', $4, 3, $4, $4)",
+    )
+    .bind(attempt_id)
+    .bind(job_id)
+    .bind(Uuid::new_v4())
+    .bind(now)
+    .execute(&mut *fixture)
+    .await
+    .expect("insert successful attempt");
+    fixture.commit().await.expect("commit storage fixture");
+
+    let artifact = Artifact {
+        id: Uuid::new_v4(),
+        repository_id,
+        attempt_id,
+        name: "report".into(),
+        object: object.clone(),
+        created_at: now,
+        expires_at: now + Duration::days(7),
+    };
+    MetadataRepository::upload_artifact(&database, &tenant, &artifact, quotas)
+        .await
+        .expect("upload artifact metadata");
+    let dependency = MetadataRepository::dependency_artifact(
+        &database,
+        &tenant,
+        pipeline_id,
+        "build",
+        "report",
+        now,
+    )
+    .await
+    .expect("download dependency metadata");
+    assert_eq!(dependency.id, artifact.id);
+    assert_eq!(
+        MetadataRepository::upload_artifact(&database, &tenant, &artifact, quotas).await,
+        Err(StorageError::ImmutableConflict)
+    );
+
+    let oversized = CacheEntry {
+        id: Uuid::new_v4(),
+        key: "too-large".into(),
+        object: StoredObject {
+            size: 2_000,
+            ..object
+        },
+        ..cache
+    };
+    assert_eq!(
+        MetadataRepository::save_cache(&database, &tenant, &oversized, quotas).await,
+        Err(StorageError::QuotaExceeded)
+    );
+
+    let mut cleanup = database
+        .tenant_transaction(&tenant)
+        .await
+        .expect("storage cleanup transaction");
+    sqlx::query("DELETE FROM artifacts WHERE tenant_id = $1 AND repository_id = $2")
+        .bind(&tenant)
+        .bind(repository_id)
+        .execute(&mut *cleanup)
+        .await
+        .expect("delete artifact fixture");
+    sqlx::query("DELETE FROM cache_entries WHERE tenant_id = $1 AND repository_id = $2")
+        .bind(&tenant)
+        .bind(repository_id)
+        .execute(&mut *cleanup)
+        .await
+        .expect("delete cache fixture");
+    sqlx::query("DELETE FROM pipelines WHERE tenant_id = $1 AND id = $2")
+        .bind(&tenant)
+        .bind(pipeline_id)
+        .execute(&mut *cleanup)
+        .await
+        .expect("delete pipeline fixture");
+    cleanup.commit().await.expect("commit storage cleanup");
 }
 
 #[tokio::test]

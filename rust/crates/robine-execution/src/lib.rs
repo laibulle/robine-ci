@@ -224,15 +224,7 @@ impl ExecutionSpecification {
         {
             return Err(ExecutionError::InvalidSpecification("reserved environment"));
         }
-        if self.steps.iter().any(|step| {
-            step.kind == StepKind::Builtin
-                && !matches!(
-                    step.value.as_str(),
-                    "cache/restore" | "cache/save" | "artifacts/upload" | "artifacts/download"
-                )
-        }) {
-            return Err(ExecutionError::Unsupported("builtin step"));
-        }
+        validate_builtin_steps(&self.steps)?;
         if !self.secret_names.is_empty() {
             return Err(ExecutionError::Unsupported("secret resolution"));
         }
@@ -312,6 +304,83 @@ fn valid_source_files(files: &[SourceFile]) -> bool {
                 total.checked_add(file.contents.len())
             })
             .is_some_and(|total| total <= 1_000_000_000)
+}
+
+fn validate_builtin_steps(steps: &[ExecutionStep]) -> Result<(), ExecutionError> {
+    for step in steps.iter().filter(|step| step.kind == StepKind::Builtin) {
+        if !matches!(
+            step.value.as_str(),
+            "cache/restore" | "cache/save" | "artifacts/upload" | "artifacts/download"
+        ) {
+            return Err(ExecutionError::Unsupported("builtin step"));
+        }
+        if !valid_builtin_step(step) {
+            return Err(ExecutionError::InvalidSpecification("builtin options"));
+        }
+    }
+    Ok(())
+}
+
+fn valid_builtin_step(step: &ExecutionStep) -> bool {
+    let string = |name| step.with.get(name).and_then(serde_json::Value::as_str);
+    let paths = || {
+        step.with
+            .get("paths")
+            .and_then(serde_json::Value::as_array)
+            .filter(|paths| (1..=32).contains(&paths.len()))
+            .is_some_and(|paths| {
+                paths
+                    .iter()
+                    .all(|path| path.as_str().is_some_and(valid_workspace_path))
+            })
+    };
+    match step.value.as_str() {
+        "cache/restore" | "cache/save" => {
+            string("key").is_some_and(|key| (1..=512).contains(&key.len())) && paths()
+        }
+        "artifacts/upload" => {
+            string("name").is_some_and(valid_artifact_name)
+                && paths()
+                && step
+                    .with
+                    .get("retention-days")
+                    .and_then(serde_json::Value::as_i64)
+                    .is_none_or(|days| (1..=90).contains(&days))
+        }
+        "artifacts/download" => {
+            string("name").is_some_and(valid_artifact_name)
+                && string("from").is_some_and(valid_job_key)
+                && valid_workspace_path(string("path").unwrap_or("."))
+        }
+        _ => false,
+    }
+}
+
+fn valid_workspace_path(path: &str) -> bool {
+    !path.is_empty()
+        && path.len() <= 1_024
+        && !path.contains('\0')
+        && std::path::Path::new(path).components().all(|component| {
+            matches!(
+                component,
+                std::path::Component::Normal(_) | std::path::Component::CurDir
+            )
+        })
+}
+
+fn valid_artifact_name(name: &str) -> bool {
+    (1..=128).contains(&name.len())
+        && name.bytes().enumerate().all(|(index, byte)| {
+            byte.is_ascii_alphanumeric() || (index > 0 && matches!(byte, b'.' | b'_' | b'-'))
+        })
+}
+
+fn valid_job_key(value: &str) -> bool {
+    (1..=64).contains(&value.len())
+        && value.bytes().enumerate().all(|(index, byte)| {
+            byte.is_ascii_lowercase()
+                || (index > 0 && (byte.is_ascii_digit() || matches!(byte, b'_' | b'-')))
+        })
 }
 
 #[cfg(test)]

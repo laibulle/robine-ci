@@ -24,13 +24,15 @@ use robine_core::{
     ports::{IdentityRepository, OidcProvider, PipelineRepository, PortError},
 };
 use robine_execution::{
-    CancellationSignal, ExecutionControl, ExecutionError, ExecutionResult, ExecutionRunner,
-    ExecutionSpecification, ExecutionStatus, OutputChannel, OutputChunk, OutputSink,
+    BuiltinHandler, BuiltinRestore, CancellationSignal, ExecutionControl, ExecutionError,
+    ExecutionResult, ExecutionRunner, ExecutionSpecification, ExecutionStatus, OutputChannel,
+    OutputChunk, OutputSink,
 };
 use robine_secrets::{SecretDecryptor, SecretRepository};
 use robine_source::{
     ArchiveFetcher, ArchiveLimits, RepositoryStore, extract_tar_gz, valid_commit_sha,
 };
+use robine_storage::{Artifact, BlobStore, CacheEntry, MetadataRepository, StorageQuotas};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
@@ -56,6 +58,9 @@ pub struct ControlPlane {
     secret_decryptor: Option<Arc<dyn SecretDecryptor>>,
     source_repositories: Option<Arc<dyn RepositoryStore>>,
     source_fetcher: Option<Arc<dyn ArchiveFetcher>>,
+    storage_repository: Option<Arc<dyn MetadataRepository>>,
+    blob_store: Option<Arc<dyn BlobStore>>,
+    storage_quotas: StorageQuotas,
 }
 
 struct BootstrapConfig {
@@ -100,6 +105,125 @@ struct DurableCancellationSignal {
     pipelines: Arc<dyn PipelineRepository>,
     tenant_id: String,
     idempotency_token: Uuid,
+}
+
+struct ExecutionBuiltinHandler {
+    tenant_id: String,
+    repository_id: Uuid,
+    pipeline_id: Uuid,
+    attempt_id: Uuid,
+    needs: Vec<String>,
+    repository: Arc<dyn MetadataRepository>,
+    blobs: Arc<dyn BlobStore>,
+    quotas: StorageQuotas,
+}
+
+#[async_trait::async_trait]
+impl BuiltinHandler for ExecutionBuiltinHandler {
+    async fn restore(
+        &self,
+        step: &robine_execution::ExecutionStep,
+    ) -> Result<BuiltinRestore, ExecutionError> {
+        let now = Utc::now();
+        let object = match step.value.as_str() {
+            "cache/restore" => {
+                let key = builtin_string(step, "key")?;
+                let Some(cache) = self
+                    .repository
+                    .restore_cache(&self.tenant_id, self.repository_id, key, now)
+                    .await
+                    .map_err(storage_execution_error)?
+                else {
+                    return Ok(BuiltinRestore::CacheMiss);
+                };
+                cache.object
+            }
+            "artifacts/download" => {
+                let from = builtin_string(step, "from")?;
+                if !self.needs.iter().any(|need| need == from) {
+                    return Err(ExecutionError::InvalidSpecification("artifact dependency"));
+                }
+                self.repository
+                    .dependency_artifact(
+                        &self.tenant_id,
+                        self.pipeline_id,
+                        from,
+                        builtin_string(step, "name")?,
+                        now,
+                    )
+                    .await
+                    .map_err(storage_execution_error)?
+                    .object
+            }
+            _ => return Err(ExecutionError::Unsupported("restore builtin")),
+        };
+        let content = self
+            .blobs
+            .get(&self.tenant_id, &object)
+            .await
+            .map_err(storage_execution_error)?;
+        Ok(BuiltinRestore::Archive(content))
+    }
+
+    async fn publish(
+        &self,
+        step: &robine_execution::ExecutionStep,
+        archive: Vec<u8>,
+    ) -> Result<(), ExecutionError> {
+        let now = Utc::now();
+        let object = self
+            .blobs
+            .put(&self.tenant_id, archive)
+            .await
+            .map_err(storage_execution_error)?;
+        let result = match step.value.as_str() {
+            "cache/save" => {
+                let cache = CacheEntry {
+                    id: Uuid::new_v4(),
+                    repository_id: self.repository_id,
+                    key: builtin_string(step, "key")?.to_owned(),
+                    object: object.clone(),
+                    created_at: now,
+                    expires_at: now + chrono::Duration::days(7),
+                };
+                self.repository
+                    .save_cache(&self.tenant_id, &cache, self.quotas)
+                    .await
+            }
+            "artifacts/upload" => {
+                let days = step
+                    .with
+                    .get("retention-days")
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or(7);
+                let artifact = Artifact {
+                    id: Uuid::new_v4(),
+                    repository_id: self.repository_id,
+                    attempt_id: self.attempt_id,
+                    name: builtin_string(step, "name")?.to_owned(),
+                    object: object.clone(),
+                    created_at: now,
+                    expires_at: now + chrono::Duration::days(days),
+                };
+                self.repository
+                    .upload_artifact(&self.tenant_id, &artifact, self.quotas)
+                    .await
+            }
+            _ => return Err(ExecutionError::Unsupported("publish builtin")),
+        };
+        if result.is_err() {
+            let _ = self
+                .repository
+                .stage_blob_gc(
+                    &self.tenant_id,
+                    &object.blob_id,
+                    now + chrono::Duration::hours(1),
+                    now,
+                )
+                .await;
+        }
+        result.map_err(storage_execution_error)
+    }
 }
 
 #[async_trait::async_trait]
@@ -219,6 +343,12 @@ impl ControlPlane {
             secret_decryptor: None,
             source_repositories: None,
             source_fetcher: None,
+            storage_repository: None,
+            blob_store: None,
+            storage_quotas: StorageQuotas {
+                instance_bytes: 53_687_091_200,
+                repository_bytes: 10_737_418_240,
+            },
         }
     }
 
@@ -247,6 +377,19 @@ impl ControlPlane {
     ) -> Self {
         self.source_repositories = Some(repositories);
         self.source_fetcher = Some(fetcher);
+        self
+    }
+
+    #[must_use]
+    pub fn with_storage_runtime(
+        mut self,
+        repository: Arc<dyn MetadataRepository>,
+        blobs: Arc<dyn BlobStore>,
+        quotas: StorageQuotas,
+    ) -> Self {
+        self.storage_repository = Some(repository);
+        self.blob_store = Some(blobs);
+        self.storage_quotas = quotas;
         self
     }
 
@@ -1241,26 +1384,19 @@ impl ControlPlane {
                 exit_code: None,
             })
         } else {
-            match self
-                .resolve_execution_specification(tenant_id, work.specification)
-                .await
-            {
-                Ok(specification) => {
-                    runner
-                        .run(
-                            &specification,
-                            ExecutionControl {
-                                output: &output,
-                                cancellation: &cancellation,
-                                builtins: None,
-                                last_sequence: u64::try_from(work.last_log_sequence)
-                                    .map_err(|_| ApplicationError::Unavailable)?,
-                            },
-                        )
-                        .await
-                }
-                Err(_) => Err(ExecutionError::InvalidSpecification("persisted execution")),
-            }
+            self.run_local_specification(
+                tenant_id,
+                runner,
+                work.specification,
+                attempt.id,
+                (
+                    &output,
+                    &cancellation,
+                    u64::try_from(work.last_log_sequence)
+                        .map_err(|_| ApplicationError::Unavailable)?,
+                ),
+            )
+            .await
         };
         let (terminal_status, reason, succeeded) = execution_outcome(&result);
         self.pipelines
@@ -1287,6 +1423,34 @@ impl ControlPlane {
             failed: u64::from(!succeeded),
             recovered_terminal: 0,
         })
+    }
+
+    async fn run_local_specification(
+        &self,
+        tenant_id: &str,
+        runner: &dyn ExecutionRunner,
+        raw: serde_json::Value,
+        attempt_id: Uuid,
+        control: (&dyn OutputSink, &dyn CancellationSignal, u64),
+    ) -> Result<ExecutionResult, ExecutionError> {
+        let builtin_handler = self.execution_builtin_handler(tenant_id, &raw, attempt_id)?;
+        let specification = self
+            .resolve_execution_specification(tenant_id, raw)
+            .await
+            .map_err(|_| ExecutionError::InvalidSpecification("persisted execution"))?;
+        runner
+            .run(
+                &specification,
+                ExecutionControl {
+                    output: control.0,
+                    cancellation: control.1,
+                    builtins: builtin_handler
+                        .as_ref()
+                        .map(|handler| handler as &dyn BuiltinHandler),
+                    last_sequence: control.2,
+                },
+            )
+            .await
     }
 
     async fn prepare_local_attempt(
@@ -1352,6 +1516,8 @@ impl ControlPlane {
             &mut specification,
         )
         .await?;
+        resolve_cache_keys(&mut specification)?;
+        resolve_builtin_templates(&mut specification)?;
         if specification.secret_names.is_empty() {
             return Ok(specification);
         }
@@ -1425,6 +1591,68 @@ impl ControlPlane {
         specification.secret_names.clear();
         specification.secrets = resolved;
         Ok(specification)
+    }
+
+    fn execution_builtin_handler(
+        &self,
+        tenant_id: &str,
+        raw: &serde_json::Value,
+        attempt_id: Uuid,
+    ) -> Result<Option<ExecutionBuiltinHandler>, ExecutionError> {
+        let has_storage_builtin = raw
+            .get("steps")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|steps| {
+                steps.iter().any(|step| {
+                    step.get("kind").and_then(serde_json::Value::as_str) == Some("builtin")
+                        && matches!(
+                            step.get("value").and_then(serde_json::Value::as_str),
+                            Some(
+                                "cache/restore"
+                                    | "cache/save"
+                                    | "artifacts/upload"
+                                    | "artifacts/download"
+                            )
+                        )
+                })
+            });
+        if !has_storage_builtin {
+            return Ok(None);
+        }
+        let parse_id = |name| {
+            raw.get(name)
+                .and_then(serde_json::Value::as_str)
+                .and_then(|value| Uuid::parse_str(value).ok())
+                .ok_or(ExecutionError::InvalidSpecification("builtin identity"))
+        };
+        let needs = raw
+            .get("needs")
+            .and_then(serde_json::Value::as_array)
+            .ok_or(ExecutionError::InvalidSpecification("builtin dependencies"))?
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_owned)
+                    .ok_or(ExecutionError::InvalidSpecification("builtin dependency"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Some(ExecutionBuiltinHandler {
+            tenant_id: tenant_id.to_owned(),
+            repository_id: parse_id("repository_id")?,
+            pipeline_id: parse_id("pipeline_id")?,
+            attempt_id,
+            needs,
+            repository: self
+                .storage_repository
+                .clone()
+                .ok_or(ExecutionError::Unsupported("storage repository"))?,
+            blobs: self
+                .blob_store
+                .clone()
+                .ok_or(ExecutionError::Unsupported("blob store"))?,
+            quotas: self.storage_quotas,
+        }))
     }
 
     async fn resolve_source(
@@ -1525,6 +1753,94 @@ fn source_error(subject: &'static str) -> serde_json::Error {
         std::io::ErrorKind::InvalidData,
         format!("invalid or unavailable {subject}"),
     ))
+}
+
+fn builtin_string<'a>(
+    step: &'a robine_execution::ExecutionStep,
+    name: &str,
+) -> Result<&'a str, ExecutionError> {
+    step.with
+        .get(name)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or(ExecutionError::InvalidSpecification("builtin option"))
+}
+
+fn storage_execution_error(_error: robine_storage::StorageError) -> ExecutionError {
+    ExecutionError::Runner {
+        phase: "builtin_storage",
+    }
+}
+
+fn resolve_cache_keys(specification: &mut ExecutionSpecification) -> Result<(), serde_json::Error> {
+    for step in &mut specification.steps {
+        if !matches!(step.value.as_str(), "cache/restore" | "cache/save") {
+            continue;
+        }
+        let Some(template) = step.with.get("key").and_then(serde_json::Value::as_str) else {
+            return Err(source_error("cache key"));
+        };
+        let mut resolved = template.to_owned();
+        while let Some(start) = resolved.find("${{") {
+            let tail = &resolved[start + 3..];
+            let end = tail
+                .find("}}")
+                .ok_or_else(|| source_error("cache checksum"))?;
+            let expression = tail[..end].trim();
+            let relative = expression
+                .strip_prefix("checksum('")
+                .and_then(|value| value.strip_suffix("')"))
+                .ok_or_else(|| source_error("cache checksum"))?;
+            let path = std::path::Path::new(relative);
+            if path.as_os_str().is_empty()
+                || path
+                    .components()
+                    .any(|component| !matches!(component, std::path::Component::Normal(_)))
+            {
+                return Err(source_error("cache checksum path"));
+            }
+            let file = specification
+                .source_files
+                .iter()
+                .find(|file| file.path == path)
+                .ok_or_else(|| source_error("cache checksum file"))?;
+            let digest = format!("{:x}", Sha256::digest(&file.contents));
+            let expression_end = start + 3 + end + 2;
+            resolved.replace_range(start..expression_end, &digest);
+        }
+        if resolved.is_empty() || resolved.len() > 512 {
+            return Err(source_error("cache key"));
+        }
+        step.with.insert("key".into(), serde_json::json!(resolved));
+    }
+    Ok(())
+}
+
+fn resolve_builtin_templates(
+    specification: &mut ExecutionSpecification,
+) -> Result<(), serde_json::Error> {
+    let architecture = match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        _ => return Err(source_error("runner architecture")),
+    };
+    for step in &mut specification.steps {
+        if step.value != "artifacts/upload" {
+            continue;
+        }
+        let name = step
+            .with
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| source_error("artifact name"))?
+            .replace("${{ runner.os }}", "linux")
+            .replace("${{ runner.arch }}", architecture);
+        if name.contains("${{") {
+            return Err(source_error("artifact name template"));
+        }
+        step.with.insert("name".into(), serde_json::json!(name));
+    }
+    Ok(())
 }
 
 fn count_outbox_delivery(batch: &mut OutboxBatch, delivery: &OutboxDelivery) {
@@ -1685,4 +2001,69 @@ fn valid_email(email: &str) -> bool {
         && !domain.is_empty()
         && !domain.contains('@')
         && !email.chars().any(char::is_whitespace)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use robine_execution::{ExecutionStep, SourceFile, StepCondition, StepKind};
+    use std::{collections::BTreeMap, path::PathBuf};
+
+    #[test]
+    fn cache_checksum_and_runner_artifact_templates_resolve_without_expression_evaluation() {
+        let mut specification = ExecutionSpecification {
+            attempt_id: Uuid::new_v4(),
+            image: "alpine:3.22".into(),
+            workspace: "/workspace".into(),
+            shell: "/bin/sh".into(),
+            timeout_ms: 1_000,
+            env: BTreeMap::new(),
+            build_env: BTreeMap::new(),
+            secret_names: Vec::new(),
+            secrets: BTreeMap::new(),
+            source_files: vec![SourceFile {
+                path: PathBuf::from("mix.lock"),
+                contents: b"lock".to_vec(),
+            }],
+            services: Vec::new(),
+            steps: vec![
+                ExecutionStep {
+                    name: "cache".into(),
+                    kind: StepKind::Builtin,
+                    value: "cache/save".into(),
+                    condition: StepCondition::Success,
+                    with: BTreeMap::from([
+                        (
+                            "key".into(),
+                            serde_json::json!("mix-${{ checksum('mix.lock') }}"),
+                        ),
+                        ("paths".into(), serde_json::json!(["deps"])),
+                    ]),
+                },
+                ExecutionStep {
+                    name: "artifact".into(),
+                    kind: StepKind::Builtin,
+                    value: "artifacts/upload".into(),
+                    condition: StepCondition::Success,
+                    with: BTreeMap::from([
+                        (
+                            "name".into(),
+                            serde_json::json!("release-${{ runner.os }}-${{ runner.arch }}"),
+                        ),
+                        ("paths".into(), serde_json::json!(["release"])),
+                    ]),
+                },
+            ],
+        };
+        resolve_cache_keys(&mut specification).unwrap();
+        resolve_builtin_templates(&mut specification).unwrap();
+        let digest = format!("{:x}", Sha256::digest(b"lock"));
+        assert_eq!(specification.steps[0].with["key"], format!("mix-{digest}"));
+        assert!(
+            specification.steps[1].with["name"]
+                .as_str()
+                .unwrap()
+                .starts_with("release-linux-")
+        );
+    }
 }

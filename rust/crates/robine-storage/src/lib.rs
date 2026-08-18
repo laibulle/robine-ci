@@ -62,11 +62,7 @@ pub enum StorageError {
 #[async_trait]
 pub trait BlobStore: Send + Sync {
     async fn put(&self, tenant_id: &str, content: Vec<u8>) -> Result<StoredObject, StorageError>;
-    async fn get(
-        &self,
-        tenant_id: &str,
-        object: &StoredObject,
-    ) -> Result<Vec<u8>, StorageError>;
+    async fn get(&self, tenant_id: &str, object: &StoredObject) -> Result<Vec<u8>, StorageError>;
 }
 
 #[async_trait]
@@ -180,11 +176,7 @@ impl BlobStore for LocalBlobStore {
             .map_err(|_| StorageError::Unavailable)?
     }
 
-    async fn get(
-        &self,
-        tenant_id: &str,
-        object: &StoredObject,
-    ) -> Result<Vec<u8>, StorageError> {
+    async fn get(&self, tenant_id: &str, object: &StoredObject) -> Result<Vec<u8>, StorageError> {
         let root = self.tenant_root(tenant_id)?;
         let object = object.clone();
         let maximum = self.max_object_bytes;

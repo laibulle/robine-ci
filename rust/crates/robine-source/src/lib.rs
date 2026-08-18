@@ -576,6 +576,19 @@ mod tests {
         builder.into_inner().unwrap().finish().unwrap()
     }
 
+    fn archive_with_raw_path(path: &[u8]) -> Vec<u8> {
+        let gzip = GzEncoder::new(Vec::new(), Compression::default());
+        let mut builder = tar::Builder::new(gzip);
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(EntryType::Regular);
+        header.set_mode(0o644);
+        header.set_size(1);
+        header.as_mut_bytes()[..path.len()].copy_from_slice(path);
+        header.set_cksum();
+        builder.append(&header, b"x".as_slice()).unwrap();
+        builder.into_inner().unwrap().finish().unwrap()
+    }
+
     #[test]
     fn extracts_files_below_one_common_root() {
         let bytes = archive(&[
@@ -643,6 +656,11 @@ mod tests {
         assert_eq!(
             validate_workspace_tar_gz(&bytes, ArchiveLimits::default()),
             Ok(())
+        );
+        let traversal = archive_with_raw_path(b"../escape");
+        assert_eq!(
+            validate_workspace_tar_gz(&traversal, ArchiveLimits::default()),
+            Err(SourceError::UnsafePath)
         );
     }
 }

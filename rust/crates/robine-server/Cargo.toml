@@ -16,6 +16,7 @@ robine-oidc = { path = "../robine-oidc" }
 robine-persistence = { path = "../robine-persistence" }
 robine-secrets = { path = "../robine-secrets" }
 robine-source = { path = "../robine-source" }
+robine-storage = { path = "../robine-storage" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

@@ -2920,11 +2920,7 @@ impl ArtifactRow {
     }
 }
 
-fn stored_object(
-    blob_id: String,
-    digest: String,
-    size: i64,
-) -> Result<StoredObject, StorageError> {
+fn stored_object(blob_id: String, digest: String, size: i64) -> Result<StoredObject, StorageError> {
     if size < 0 || blob_id.is_empty() || digest.is_empty() {
         return Err(StorageError::Unavailable);
     }

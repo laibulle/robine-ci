@@ -423,6 +423,8 @@ impl DockerCli {
                 "builtin_restore_directory",
             )
             .await?;
+            self.ensure_no_workspace_symlinks(container, &target)
+                .await?;
             self.checked(
                 &[
                     "exec",
@@ -440,6 +442,28 @@ impl DockerCli {
         .await;
         let _ = std::fs::remove_file(temporary);
         result
+    }
+
+    async fn ensure_no_workspace_symlinks(
+        &self,
+        container: &str,
+        target: &str,
+    ) -> Result<(), ExecutionError> {
+        let output = self
+            .command(&[
+                "exec", container, "find", target, "-type", "l", "-print", "-quit",
+            ])
+            .await
+            .map_err(|_| ExecutionError::Unavailable {
+                phase: "builtin_restore_preflight",
+            })?;
+        if output.status.success() && output.stdout.is_empty() {
+            Ok(())
+        } else {
+            Err(ExecutionError::Runner {
+                phase: "builtin_restore_preflight",
+            })
+        }
     }
 
     async fn publish_archive(
@@ -1159,6 +1183,46 @@ mod tests {
         cancel: bool,
     }
 
+    #[derive(Default)]
+    struct MemoryBuiltins {
+        archives: Mutex<std::collections::BTreeMap<String, Vec<u8>>>,
+    }
+
+    #[async_trait]
+    impl crate::BuiltinHandler for MemoryBuiltins {
+        async fn restore(
+            &self,
+            step: &crate::ExecutionStep,
+        ) -> Result<BuiltinRestore, ExecutionError> {
+            let source = match step.value.as_str() {
+                "cache/restore" => "cache/save",
+                "artifacts/download" => "artifacts/upload",
+                _ => return Err(ExecutionError::Unsupported("test builtin")),
+            };
+            self.archives
+                .lock()
+                .expect("archive lock")
+                .get(source)
+                .cloned()
+                .map(BuiltinRestore::Archive)
+                .ok_or(ExecutionError::Runner {
+                    phase: "test_builtin",
+                })
+        }
+
+        async fn publish(
+            &self,
+            step: &crate::ExecutionStep,
+            archive: Vec<u8>,
+        ) -> Result<(), ExecutionError> {
+            self.archives
+                .lock()
+                .expect("archive lock")
+                .insert(step.value.clone(), archive);
+            Ok(())
+        }
+    }
+
     #[async_trait]
     impl OutputSink for RecordingControl {
         async fn append(&self, chunk: OutputChunk) -> Result<(), ExecutionError> {
@@ -1361,6 +1425,92 @@ mod tests {
         });
         let result = runner.run(&specification).await.expect("source execution");
         assert_eq!(result.status, ExecutionStatus::Succeeded);
+    }
+
+    #[tokio::test]
+    async fn docker_runs_cache_and_artifact_builtins_in_step_order_when_enabled() {
+        if std::env::var_os("ROBINE_DOCKER_INTEGRATION").is_none() {
+            return;
+        }
+        let attempt_id = Uuid::new_v4();
+        let run = |name: &str, value: &str| ExecutionStep {
+            name: name.into(),
+            kind: StepKind::Run,
+            value: value.into(),
+            condition: StepCondition::Success,
+            with: BTreeMap::new(),
+        };
+        let builtin = |name: &str, value: &str, options: serde_json::Value| ExecutionStep {
+            name: name.into(),
+            kind: StepKind::Builtin,
+            value: value.into(),
+            condition: StepCondition::Success,
+            with: options.as_object().unwrap().clone().into_iter().collect(),
+        };
+        let specification = ExecutionSpecification {
+            attempt_id,
+            image: "alpine:3.22".into(),
+            workspace: "/workspace".into(),
+            shell: "/bin/sh".into(),
+            timeout_ms: 30_000,
+            env: BTreeMap::new(),
+            build_env: BTreeMap::new(),
+            secret_names: Vec::new(),
+            secrets: BTreeMap::new(),
+            source_files: Vec::new(),
+            services: Vec::new(),
+            steps: vec![
+                run(
+                    "create",
+                    "mkdir -p cache report && echo cached > cache/value && echo artifact > report/value",
+                ),
+                builtin(
+                    "save-cache",
+                    "cache/save",
+                    serde_json::json!({"key": "deps-v1", "paths": ["cache"]}),
+                ),
+                builtin(
+                    "upload-artifact",
+                    "artifacts/upload",
+                    serde_json::json!({"name": "report", "paths": ["report"], "retention-days": 7}),
+                ),
+                run("clear", "rm -rf cache report"),
+                builtin(
+                    "restore-cache",
+                    "cache/restore",
+                    serde_json::json!({"key": "deps-v1", "paths": ["cache"]}),
+                ),
+                builtin(
+                    "download-artifact",
+                    "artifacts/download",
+                    serde_json::json!({"name": "report", "from": "build", "path": "downloads"}),
+                ),
+                run(
+                    "verify",
+                    "test \"$(cat cache/value)\" = cached && test \"$(cat downloads/report/value)\" = artifact",
+                ),
+            ],
+        };
+        let runner = DockerCli::new(DockerConfig {
+            instance: format!("rust-test-{attempt_id}"),
+            ..DockerConfig::default()
+        });
+        let control = RecordingControl::default();
+        let builtins = MemoryBuiltins::default();
+        let result = runner
+            .run_controlled(
+                &specification,
+                ExecutionControl {
+                    output: &control,
+                    cancellation: &control,
+                    builtins: Some(&builtins),
+                    last_sequence: 0,
+                },
+            )
+            .await
+            .expect("builtin execution");
+        assert_eq!(result.status, ExecutionStatus::Succeeded);
+        assert_eq!(builtins.archives.lock().expect("archive lock").len(), 2);
     }
 
     async fn assert_job_resources_cleaned(runner: &DockerCli, attempt_id: Uuid) {

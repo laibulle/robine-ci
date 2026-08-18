@@ -9,6 +9,7 @@ use robine_persistence::Database;
 use robine_secrets::AesGcmKeyring;
 use robine_server::AppState;
 use robine_source::HttpArchiveFetcher;
+use robine_storage::{LocalBlobStore, StorageQuotas};
 use tokio::sync::watch;
 
 #[actix_web::main]
@@ -34,6 +35,29 @@ async fn main() -> io::Result<()> {
     )
     .map_err(io::Error::other)?;
     control_plane = control_plane.with_source_runtime(database.clone(), Arc::new(source_fetcher));
+    let configured_storage_root =
+        std::env::var("ROBINE_STORAGE_ROOT").unwrap_or_else(|_| "var/storage".into());
+    let storage_path = std::path::PathBuf::from(configured_storage_root);
+    let storage_root = if storage_path.is_absolute() {
+        storage_path
+    } else {
+        std::env::current_dir()?.join(storage_path)
+    };
+    let max_object_bytes = environment_usize("ROBINE_STORAGE_MAX_OBJECT_BYTES", 1_073_741_824)?;
+    let storage_quotas = StorageQuotas {
+        instance_bytes: environment_i64("ROBINE_STORAGE_INSTANCE_QUOTA_BYTES", 53_687_091_200)?,
+        repository_bytes: environment_i64("ROBINE_STORAGE_REPOSITORY_QUOTA_BYTES", 10_737_418_240)?,
+    };
+    if storage_quotas.repository_bytes > storage_quotas.instance_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "repository storage quota exceeds instance quota",
+        ));
+    }
+    let blob_store =
+        LocalBlobStore::new(storage_root, max_object_bytes).map_err(io::Error::other)?;
+    control_plane =
+        control_plane.with_storage_runtime(database.clone(), Arc::new(blob_store), storage_quotas);
     control_plane = control_plane.with_execution_runner(Arc::new(DockerCli::new(DockerConfig {
         instance: std::env::var("ROBINE_RUNNER_RESOURCE_NAMESPACE")
             .unwrap_or_else(|_| "production".into()),
@@ -104,6 +128,26 @@ async fn main() -> io::Result<()> {
     let _ = outbox_worker.await;
     let _ = execution_worker.await;
     result
+}
+
+fn environment_usize(name: &str, default: usize) -> io::Result<usize> {
+    std::env::var(name).ok().map_or(Ok(default), |value| {
+        value
+            .parse::<usize>()
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, format!("invalid {name}")))
+    })
+}
+
+fn environment_i64(name: &str, default: i64) -> io::Result<i64> {
+    std::env::var(name).ok().map_or(Ok(default), |value| {
+        value
+            .parse::<i64>()
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, format!("invalid {name}")))
+    })
 }
 
 async fn run_execution_worker(
