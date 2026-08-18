@@ -3744,6 +3744,14 @@ async fn insert_new_creation(
     .execute(&mut **transaction)
     .await
     .map_err(|_| PortError::Unavailable)?;
+    insert_creation_audit(transaction, tenant_id, pipeline).await
+}
+
+async fn insert_creation_audit(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    pipeline: &NewPipeline,
+) -> Result<(), PortError> {
     if pipeline.trigger == "workflow_dispatch" {
         sqlx::query(
             "INSERT INTO audit_events (id, actor_id, action, target_type, target_id, metadata, occurred_at, tenant_id) \
@@ -3757,6 +3765,25 @@ async fn insert_new_creation(
             "commit_sha": pipeline.commit_sha,
             "pipeline_id": pipeline.id,
             "input_count": pipeline.inputs.len()
+        }))
+        .bind(pipeline.inserted_at)
+        .bind(tenant_id)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|_| PortError::Unavailable)?;
+    } else if pipeline.trigger == "schedule" {
+        sqlx::query(
+            "INSERT INTO audit_events (id, actor_id, action, target_type, target_id, metadata, occurred_at, tenant_id) \
+             VALUES ($1, $2, 'workflow.scheduled', 'repository', $3, $4, $5, $6)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(&pipeline.actor)
+        .bind(pipeline.repository_id)
+        .bind(serde_json::json!({
+            "workflow_path": pipeline.revision.path,
+            "commit_sha": pipeline.commit_sha,
+            "pipeline_id": pipeline.id,
+            "scheduled_for": pipeline.scheduled_for
         }))
         .bind(pipeline.inserted_at)
         .bind(tenant_id)

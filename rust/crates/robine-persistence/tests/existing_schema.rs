@@ -269,6 +269,124 @@ async fn manual_workflow_discovery_and_launch_are_exact_sha_and_audited() {
 
 #[tokio::test]
 #[allow(clippy::too_many_lines)]
+async fn scheduled_reconciliation_is_exact_sha_durable_and_idempotent() {
+    let Ok(database_url) = std::env::var("ROBINE_DATABASE_INTEGRATION_URL") else {
+        return;
+    };
+    let database = Arc::new(
+        Database::connect(&database_url, 2)
+            .await
+            .expect("connect migrated database"),
+    );
+    let repository_id = Uuid::new_v4();
+    let provider_id = i64::from_be_bytes(
+        repository_id.as_bytes()[..8]
+            .try_into()
+            .expect("UUID prefix"),
+    ) & i64::MAX;
+    let mut setup = database
+        .tenant_transaction("standalone")
+        .await
+        .expect("setup transaction");
+    sqlx::query("DELETE FROM schedule_reconciliation_states WHERE tenant_id = 'standalone' AND key = 'scheduled-workflows:v1'")
+        .execute(&mut *setup)
+        .await
+        .expect("reset schedule cursor");
+    sqlx::query("INSERT INTO github_repositories (id, provider_id, installation_id, owner, name, full_name, trusted, inserted_at, provider, provider_instance, tenant_id) VALUES ($1, $2, 1, 'acme', 'scheduled', 'acme/scheduled', TRUE, $3, 'github', 'https://github.com', 'standalone')")
+        .bind(repository_id)
+        .bind(provider_id)
+        .bind(Utc::now())
+        .execute(&mut *setup)
+        .await
+        .expect("insert repository");
+    setup.commit().await.expect("commit repository");
+    let archive = create_source_tar_gz(
+        &[SourceFile {
+            path: ".robine-ci/workflows/nightly.yml".into(),
+            contents: b"version: 1\nname: Nightly\non:\n  schedule:\n    - cron: '* * * * *'\njobs:\n  test:\n    image: alpine:3.22\n    steps:\n      - run: echo scheduled\n"
+                .to_vec(),
+        }],
+        ArchiveLimits::default(),
+    )
+    .expect("scheduled workflow archive");
+    let source = Arc::new(WorkflowArchive(archive));
+    let control_plane = ControlPlane::new(database.clone(), database.clone())
+        .with_source_runtime(database.clone(), source.clone())
+        .with_source_inspector(source);
+    let now = Utc::now();
+    let first = control_plane
+        .reconcile_scheduled_workflows(now)
+        .await
+        .expect("first reconciliation");
+    assert_eq!(first.scanned_minutes, 1);
+    assert_eq!(first.due_occurrences, 1);
+    assert_eq!(first.pipelines, 1);
+    assert!(first.cursor_advanced);
+    let duplicate = control_plane
+        .reconcile_scheduled_workflows(now)
+        .await
+        .expect("duplicate reconciliation");
+    assert_eq!(duplicate.scanned_minutes, 0);
+
+    let mut verification = database
+        .tenant_transaction("standalone")
+        .await
+        .expect("verification transaction");
+    let pipeline = sqlx::query_as::<_, (Uuid, String, String, String, Option<chrono::NaiveDateTime>)>(
+        "SELECT id, commit_sha, trigger, actor, scheduled_for FROM pipelines WHERE repository_id = $1",
+    )
+    .bind(repository_id)
+    .fetch_one(&mut *verification)
+    .await
+    .expect("scheduled pipeline");
+    assert_eq!(pipeline.1, "b".repeat(40));
+    assert_eq!(pipeline.2, "schedule");
+    assert_eq!(pipeline.3, "system:scheduler");
+    assert!(pipeline.4.is_some());
+    let count =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM pipelines WHERE repository_id = $1")
+            .bind(repository_id)
+            .fetch_one(&mut *verification)
+            .await
+            .expect("pipeline count");
+    assert_eq!(count, 1);
+    let audit = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM audit_events WHERE action = 'workflow.scheduled' AND metadata->>'pipeline_id' = $1",
+    )
+    .bind(pipeline.0.to_string())
+    .fetch_one(&mut *verification)
+    .await
+    .expect("schedule audit");
+    assert_eq!(audit, 1);
+    sqlx::query("DELETE FROM outbox_events WHERE aggregate_id = $1")
+        .bind(pipeline.0)
+        .execute(&mut *verification)
+        .await
+        .expect("delete outbox");
+    sqlx::query("DELETE FROM pipelines WHERE id = $1")
+        .bind(pipeline.0)
+        .execute(&mut *verification)
+        .await
+        .expect("delete pipeline");
+    sqlx::query("DELETE FROM audit_events WHERE target_id = $1")
+        .bind(repository_id)
+        .execute(&mut *verification)
+        .await
+        .expect("delete audit");
+    sqlx::query("DELETE FROM github_repositories WHERE id = $1")
+        .bind(repository_id)
+        .execute(&mut *verification)
+        .await
+        .expect("delete repository");
+    sqlx::query("DELETE FROM schedule_reconciliation_states WHERE tenant_id = 'standalone' AND key = 'scheduled-workflows:v1'")
+        .execute(&mut *verification)
+        .await
+        .expect("delete cursor");
+    verification.commit().await.expect("commit cleanup");
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn source_control_worker_creates_an_exact_sha_tenant_pipeline() {
     let Ok(database_url) = std::env::var("ROBINE_DATABASE_INTEGRATION_URL") else {
         return;

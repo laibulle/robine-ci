@@ -3740,6 +3740,36 @@ mod tests {
             Ok(vec!["standalone".into()])
         }
 
+        async fn schedule_cursor(
+            &self,
+            _tenant_id: &str,
+            _key: &str,
+            _attempted_at: DateTime<Utc>,
+        ) -> Result<Option<DateTime<Utc>>, PortError> {
+            Ok(None)
+        }
+
+        async fn advance_schedule_cursor(
+            &self,
+            _tenant_id: &str,
+            _key: &str,
+            _expected: Option<DateTime<Utc>>,
+            _cursor: DateTime<Utc>,
+            _completed_at: DateTime<Utc>,
+        ) -> Result<bool, PortError> {
+            Ok(true)
+        }
+
+        async fn record_schedule_failure(
+            &self,
+            _tenant_id: &str,
+            _key: &str,
+            _failure: &str,
+            _failed_at: DateTime<Utc>,
+        ) -> Result<(), PortError> {
+            Ok(())
+        }
+
         async fn accept_source_control_delivery(
             &self,
             _tenant_id: &str,
