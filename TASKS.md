@@ -11,6 +11,31 @@ This file orders implementation work for the MVP and accepted post-MVP increment
 
 Only one status marker belongs on a task. Complete dependencies before starting a dependent task unless the task explicitly permits parallel work.
 
+## Rust/Actix replacement
+
+### RUST-001 — Establish the compatibility-first Rust foundation
+
+- **Spec:** [PLAT-004](docs/specs/platform/plat-004-rust-actix-migration.md)
+- **Depends on:** Existing accepted specifications
+- [x] Add a Cargo workspace with framework-independent core and Actix delivery crates.
+- [x] Port execution-context validation and the top-level pipeline state machine with unit tests.
+- [x] Implement tested Actix liveness and readiness endpoints at the existing paths.
+- [~] Inventory HTTP, database, background-work, browser, CLI, and runner compatibility surfaces. (Owner: Robine maintainers; route inventory and migration contract recorded, deeper payload/schema inventory remains.)
+- [x] Select SQLx for PostgreSQL access and prove reads against the existing Ecto-migrated schema; retain the existing forward migrations until Rust owns migration generation.
+- [ ] Add CI gates for Rust formatting, Clippy, tests, dependency auditing, and license policy.
+
+### RUST-002 — Replace the control plane by verified vertical slices
+
+- **Spec:** [PLAT-004](docs/specs/platform/plat-004-rust-actix-migration.md)
+- **Depends on:** RUST-001
+- [ ] Port database access, transactions, tenant isolation, identity, and sessions.
+- [ ] Port workflows, pipeline lifecycle, scheduling, durable jobs, and outbox delivery.
+- [ ] Port source-control providers, runner protocol, execution adapters, secrets, and storage.
+- [ ] Replace LiveView with an accessible real-time Actix-delivered browser experience.
+- [ ] Port CLI, release packaging, configuration, telemetry, and operational tooling.
+- [ ] Pass specification parity, upgrade, rollback, and release acceptance suites.
+- [ ] Remove the Elixir/Phoenix implementation after verified cutover.
+
 ## Phase 0 — Resolve blocking decisions
 
 ### DEC-001 — Accept the application architecture
