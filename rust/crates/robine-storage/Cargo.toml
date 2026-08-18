@@ -1,5 +1,5 @@
 [package]
-name = "robine-execution"
+name = "robine-storage"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,13 +7,11 @@ rust-version.workspace = true
 
 [dependencies]
 async-trait.workspace = true
-robine-source = { path = "../robine-source" }
-serde.workspace = true
-serde_json.workspace = true
+chrono.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 uuid.workspace = true
-zeroize.workspace = true
 
 [lints]
 workspace = true

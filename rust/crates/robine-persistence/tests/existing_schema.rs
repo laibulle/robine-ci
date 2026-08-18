@@ -18,6 +18,7 @@ use robine_core::{
 };
 use robine_persistence::{Database, Readiness};
 use robine_secrets::SecretRepository;
+use robine_source::{Provider, RepositoryStore};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -1631,6 +1632,18 @@ async fn sql_outbox_claims_once_enqueues_dispatch_and_dead_letters_bounded_failu
         .tenant_transaction(&tenant)
         .await
         .expect("secret fixture transaction");
+    sqlx::query(
+        "INSERT INTO github_repositories \
+         (id, provider, provider_instance, provider_id, installation_id, owner, name, full_name, trusted, inserted_at, tenant_id) \
+         VALUES ($1, 'github', 'https://github.com', $2, 42, 'robine-ci', 'fixture', 'robine-ci/fixture', TRUE, $3, $4)",
+    )
+    .bind(pipeline.repository_id)
+    .bind(now.timestamp_micros())
+    .bind(now)
+    .bind(&tenant)
+    .execute(&mut *secret_fixture)
+    .await
+    .expect("insert trusted repository fixture");
     for (id, repository_id, name) in [
         (secret_id, pipeline.repository_id, "TOKEN"),
         (unauthorized_secret_id, Uuid::new_v4(), "OTHER"),
@@ -1663,6 +1676,26 @@ async fn sql_outbox_claims_once_enqueues_dispatch_and_dead_letters_bounded_failu
     .await
     .expect("resolve authorized secrets");
     assert_eq!(authorized.len(), 1);
+    let source_repository =
+        RepositoryStore::find_trusted(&database, &tenant, pipeline.repository_id)
+            .await
+            .expect("resolve trusted source repository");
+    assert_eq!(source_repository.provider, Provider::GitHub);
+    assert_eq!(source_repository.full_name, "robine-ci/fixture");
+    let mut cleanup = database
+        .tenant_transaction(&tenant)
+        .await
+        .expect("source fixture cleanup transaction");
+    sqlx::query("DELETE FROM github_repositories WHERE id = $1 AND tenant_id = $2")
+        .bind(pipeline.repository_id)
+        .bind(&tenant)
+        .execute(&mut *cleanup)
+        .await
+        .expect("delete trusted repository fixture");
+    cleanup
+        .commit()
+        .await
+        .expect("commit source fixture cleanup");
     assert_eq!(authorized[0].id, secret_id);
     let process_at = now + Duration::seconds(1);
     let first_database = database.clone();

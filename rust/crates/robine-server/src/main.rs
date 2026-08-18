@@ -8,6 +8,7 @@ use robine_oidc::OidcClient;
 use robine_persistence::Database;
 use robine_secrets::AesGcmKeyring;
 use robine_server::AppState;
+use robine_source::HttpArchiveFetcher;
 use tokio::sync::watch;
 
 #[actix_web::main]
@@ -21,6 +22,18 @@ async fn main() -> io::Result<()> {
             .map_err(io::Error::other)?,
     );
     let mut control_plane = ControlPlane::new(database.clone(), database.clone());
+    let source_fetcher = HttpArchiveFetcher::new(
+        std::env::var("GITHUB_APP_ID").ok(),
+        std::env::var("GITHUB_APP_PRIVATE_KEY")
+            .ok()
+            .map(|value| value.replace("\\n", "\n")),
+        std::env::var("GITLAB_URL").ok(),
+        std::env::var("GITLAB_TOKEN").ok(),
+        std::env::var("FORGEJO_URL").ok(),
+        std::env::var("FORGEJO_TOKEN").ok(),
+    )
+    .map_err(io::Error::other)?;
+    control_plane = control_plane.with_source_runtime(database.clone(), Arc::new(source_fetcher));
     control_plane = control_plane.with_execution_runner(Arc::new(DockerCli::new(DockerConfig {
         instance: std::env::var("ROBINE_RUNNER_RESOURCE_NAMESPACE")
             .unwrap_or_else(|_| "production".into()),

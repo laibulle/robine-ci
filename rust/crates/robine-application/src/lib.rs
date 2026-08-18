@@ -28,6 +28,9 @@ use robine_execution::{
     ExecutionSpecification, ExecutionStatus, OutputChannel, OutputChunk, OutputSink,
 };
 use robine_secrets::{SecretDecryptor, SecretRepository};
+use robine_source::{
+    ArchiveFetcher, ArchiveLimits, RepositoryStore, extract_tar_gz, valid_commit_sha,
+};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
@@ -51,6 +54,8 @@ pub struct ControlPlane {
     execution_runner: Option<Arc<dyn ExecutionRunner>>,
     secret_repository: Option<Arc<dyn SecretRepository>>,
     secret_decryptor: Option<Arc<dyn SecretDecryptor>>,
+    source_repositories: Option<Arc<dyn RepositoryStore>>,
+    source_fetcher: Option<Arc<dyn ArchiveFetcher>>,
 }
 
 struct BootstrapConfig {
@@ -212,6 +217,8 @@ impl ControlPlane {
             execution_runner: None,
             secret_repository: None,
             secret_decryptor: None,
+            source_repositories: None,
+            source_fetcher: None,
         }
     }
 
@@ -229,6 +236,17 @@ impl ControlPlane {
     ) -> Self {
         self.secret_repository = Some(repository);
         self.secret_decryptor = Some(decryptor);
+        self
+    }
+
+    #[must_use]
+    pub fn with_source_runtime(
+        mut self,
+        repositories: Arc<dyn RepositoryStore>,
+        fetcher: Arc<dyn ArchiveFetcher>,
+    ) -> Self {
+        self.source_repositories = Some(repositories);
+        self.source_fetcher = Some(fetcher);
         self
     }
 
@@ -1234,6 +1252,7 @@ impl ControlPlane {
                             ExecutionControl {
                                 output: &output,
                                 cancellation: &cancellation,
+                                builtins: None,
                                 last_sequence: u64::try_from(work.last_log_sequence)
                                     .map_err(|_| ApplicationError::Unavailable)?,
                             },
@@ -1321,7 +1340,18 @@ impl ControlPlane {
             .get("repository_id")
             .and_then(serde_json::Value::as_str)
             .and_then(|value| Uuid::parse_str(value).ok());
+        let commit_sha = raw
+            .get("commit_sha")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
         let mut specification = serde_json::from_value::<ExecutionSpecification>(raw)?;
+        self.resolve_source(
+            tenant_id,
+            repository_id,
+            commit_sha.as_deref(),
+            &mut specification,
+        )
+        .await?;
         if specification.secret_names.is_empty() {
             return Ok(specification);
         }
@@ -1397,6 +1427,54 @@ impl ControlPlane {
         Ok(specification)
     }
 
+    async fn resolve_source(
+        &self,
+        tenant_id: &str,
+        repository_id: Option<Uuid>,
+        commit_sha: Option<&str>,
+        specification: &mut ExecutionSpecification,
+    ) -> Result<(), serde_json::Error> {
+        let checkout = specification.steps.iter().any(|step| {
+            step.kind == robine_execution::StepKind::Builtin && step.value == "checkout"
+        });
+        if checkout {
+            let repository_id = repository_id.ok_or_else(|| source_error("repository identity"))?;
+            let commit_sha = commit_sha
+                .filter(|sha| valid_commit_sha(sha))
+                .ok_or_else(|| source_error("commit SHA"))?;
+            let repositories = self
+                .source_repositories
+                .as_ref()
+                .ok_or_else(|| source_error("source repository adapter"))?;
+            let fetcher = self
+                .source_fetcher
+                .as_ref()
+                .ok_or_else(|| source_error("source provider adapter"))?;
+            let repository = repositories
+                .find_trusted(tenant_id, repository_id)
+                .await
+                .map_err(|_| source_error("trusted repository"))?;
+            let archive = fetcher
+                .fetch_archive(&repository, commit_sha)
+                .await
+                .map_err(|_| source_error("provider archive"))?;
+            specification.source_files = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                tokio::task::spawn_blocking(move || {
+                    extract_tar_gz(&archive, ArchiveLimits::default())
+                }),
+            )
+            .await
+            .map_err(|_| source_error("archive timeout"))?
+            .map_err(|_| source_error("archive task"))?
+            .map_err(|_| source_error("archive validation"))?;
+            specification.steps.retain(|step| {
+                step.kind != robine_execution::StepKind::Builtin || step.value != "checkout"
+            });
+        }
+        Ok(())
+    }
+
     async fn authenticate_runner(
         &self,
         tenant_id: &str,
@@ -1440,6 +1518,13 @@ impl ControlPlane {
         }
         Ok(())
     }
+}
+
+fn source_error(subject: &'static str) -> serde_json::Error {
+    serde_json::Error::io(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("invalid or unavailable {subject}"),
+    ))
 }
 
 fn count_outbox_delivery(batch: &mut OutboxBatch, delivery: &OutboxDelivery) {

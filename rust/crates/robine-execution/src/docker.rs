@@ -1,10 +1,12 @@
 use crate::{
-    CancellationSignal, ExecutionControl, ExecutionError, ExecutionResult, ExecutionRunner,
-    ExecutionSpecification, ExecutionStatus, OutputChannel, OutputChunk, OutputSink, StepCondition,
-    StepKind,
+    BuiltinRestore, CancellationSignal, ExecutionControl, ExecutionError, ExecutionResult,
+    ExecutionRunner, ExecutionSpecification, ExecutionStatus, OutputChannel, OutputChunk,
+    OutputSink, StepCondition, StepKind,
 };
 use async_trait::async_trait;
 use std::collections::HashSet;
+use std::io::Write;
+use std::path::{Component, Path, PathBuf};
 use std::process::Output;
 use std::process::Stdio;
 use tokio::io::AsyncReadExt;
@@ -149,6 +151,7 @@ impl DockerCli {
             ExecutionControl {
                 output: &DiscardOutput,
                 cancellation: &NeverCancel,
+                builtins: None,
                 last_sequence: 0,
             },
         )
@@ -240,13 +243,11 @@ impl DockerCli {
         .await?;
         self.checked(&["start", container], "container_start")
             .await?;
+        self.copy_source(specification, container).await?;
         let mut failed = false;
         let mut exit_code = Some(0);
         let mut sequence = control.last_sequence;
         for (step_index, step) in specification.steps.iter().enumerate() {
-            if step.kind != StepKind::Run {
-                return Err(ExecutionError::Unsupported("builtin step"));
-            }
             let should_run = match step.condition {
                 StepCondition::Success => !failed,
                 StepCondition::Failure => failed,
@@ -255,17 +256,31 @@ impl DockerCli {
             if !should_run {
                 continue;
             }
-            let result = self
-                .execute_step(
-                    specification,
-                    container,
-                    step_index,
-                    &step.name,
-                    &step.value,
-                    &mut sequence,
-                    control,
-                )
-                .await?;
+            let result = match step.kind {
+                StepKind::Run => {
+                    self.execute_step(
+                        specification,
+                        container,
+                        step_index,
+                        &step.name,
+                        &step.value,
+                        &mut sequence,
+                        control,
+                    )
+                    .await?
+                }
+                StepKind::Builtin => {
+                    self.execute_builtin(
+                        specification,
+                        container,
+                        step_index,
+                        step,
+                        &mut sequence,
+                        control,
+                    )
+                    .await?
+                }
+            };
             if matches!(
                 result.status,
                 ExecutionStatus::Cancelled | ExecutionStatus::ServiceUnavailable
@@ -285,6 +300,194 @@ impl DockerCli {
             },
             exit_code,
         })
+    }
+
+    async fn copy_source(
+        &self,
+        specification: &ExecutionSpecification,
+        container: &str,
+    ) -> Result<(), ExecutionError> {
+        if specification.source_files.is_empty() {
+            return Ok(());
+        }
+        let files = specification.source_files.clone();
+        let attempt_id = specification.attempt_id;
+        let staging = tokio::task::spawn_blocking(move || stage_source(attempt_id, &files))
+            .await
+            .map_err(|_| ExecutionError::Unavailable {
+                phase: "source_stage",
+            })??;
+        let source = format!("{}/.", staging.display());
+        let destination = format!("{container}:/workspace");
+        let result = self
+            .checked(&["cp", &source, &destination], "source_copy")
+            .await;
+        let _ = std::fs::remove_dir_all(&staging);
+        result
+    }
+
+    async fn execute_builtin(
+        &self,
+        specification: &ExecutionSpecification,
+        container: &str,
+        step_index: usize,
+        step: &crate::ExecutionStep,
+        sequence: &mut u64,
+        control: &ExecutionControl<'_>,
+    ) -> Result<ExecutionResult, ExecutionError> {
+        let Some(handler) = control.builtins else {
+            return Err(ExecutionError::Unsupported("builtin handler"));
+        };
+        let operation = match step.value.as_str() {
+            "cache/restore" | "artifacts/download" => match handler.restore(step).await {
+                Ok(BuiltinRestore::CacheMiss) => Ok("Cache miss"),
+                Ok(BuiltinRestore::Archive(content)) => self
+                    .restore_archive(specification, container, step_index, step, content)
+                    .await
+                    .map(|()| "Restored archive"),
+                Err(error) => Err(error),
+            },
+            "cache/save" | "artifacts/upload" => {
+                match self
+                    .publish_archive(specification, container, step_index, step)
+                    .await
+                {
+                    Ok(content) => handler
+                        .publish(step, content)
+                        .await
+                        .map(|()| "Published archive"),
+                    Err(error) => Err(error),
+                }
+            }
+            _ => Err(ExecutionError::Unsupported("builtin step")),
+        };
+        *sequence = sequence.saturating_add(1);
+        let (status, exit_code, message) = match operation {
+            Ok(message) => (ExecutionStatus::Succeeded, Some(0), message.as_bytes()),
+            Err(_) => (
+                ExecutionStatus::Failed,
+                Some(1),
+                b"Built-in step failed".as_slice(),
+            ),
+        };
+        control
+            .output
+            .append(OutputChunk {
+                sequence: *sequence,
+                step: step_index,
+                step_name: step.name.clone(),
+                channel: OutputChannel::System,
+                bytes: message.to_vec(),
+            })
+            .await?;
+        Ok(ExecutionResult { status, exit_code })
+    }
+
+    async fn restore_archive(
+        &self,
+        specification: &ExecutionSpecification,
+        container: &str,
+        step_index: usize,
+        step: &crate::ExecutionStep,
+        content: Vec<u8>,
+    ) -> Result<(), ExecutionError> {
+        validate_workspace_archive(content.clone()).await?;
+        let temporary = temporary_archive_path(specification.attempt_id, "restore", step_index);
+        write_archive(temporary.clone(), content).await?;
+        let container_archive = format!("/var/tmp/robine-restore-{step_index}.tar.gz");
+        let destination = if step.value == "artifacts/download" {
+            step.with
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or(".")
+        } else {
+            "."
+        };
+        let target = if destination == "." {
+            specification.workspace.clone()
+        } else {
+            format!("{}/{destination}", specification.workspace)
+        };
+        let result = async {
+            self.checked(
+                &[
+                    "cp",
+                    &temporary.display().to_string(),
+                    &format!("{container}:{container_archive}"),
+                ],
+                "builtin_restore_copy",
+            )
+            .await?;
+            self.checked(
+                &["exec", container, "mkdir", "-p", &target],
+                "builtin_restore_directory",
+            )
+            .await?;
+            self.checked(
+                &[
+                    "exec",
+                    container,
+                    "tar",
+                    "-xzf",
+                    &container_archive,
+                    "-C",
+                    &target,
+                ],
+                "builtin_restore_extract",
+            )
+            .await
+        }
+        .await;
+        let _ = std::fs::remove_file(temporary);
+        result
+    }
+
+    async fn publish_archive(
+        &self,
+        specification: &ExecutionSpecification,
+        container: &str,
+        step_index: usize,
+        step: &crate::ExecutionStep,
+    ) -> Result<Vec<u8>, ExecutionError> {
+        let paths = step
+            .with
+            .get("paths")
+            .and_then(serde_json::Value::as_array)
+            .ok_or(ExecutionError::InvalidSpecification("builtin paths"))?;
+        let container_archive = format!("/var/tmp/robine-publish-{step_index}.tar.gz");
+        let mut arguments = vec![
+            "exec".to_owned(),
+            container.to_owned(),
+            "tar".to_owned(),
+            "-czf".to_owned(),
+            container_archive.clone(),
+            "-C".to_owned(),
+            specification.workspace.clone(),
+            "--".to_owned(),
+        ];
+        for path in paths {
+            arguments.push(
+                path.as_str()
+                    .ok_or(ExecutionError::InvalidSpecification("builtin path"))?
+                    .to_owned(),
+            );
+        }
+        self.checked(&arguments, "builtin_publish_archive").await?;
+        let temporary = temporary_archive_path(specification.attempt_id, "publish", step_index);
+        self.checked(
+            &[
+                "cp",
+                &format!("{container}:{container_archive}"),
+                &temporary.display().to_string(),
+            ],
+            "builtin_publish_copy",
+        )
+        .await?;
+        let content = read_archive(temporary.clone()).await;
+        let _ = std::fs::remove_file(temporary);
+        let content = content?;
+        validate_workspace_archive(content.clone()).await?;
+        Ok(content)
     }
 
     async fn create_network(
@@ -779,6 +982,66 @@ impl StreamingRedactor {
     }
 }
 
+fn temporary_archive_path(attempt_id: uuid::Uuid, phase: &str, step: usize) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "robine-{phase}-{attempt_id}-{step}-{}.tar.gz",
+        uuid::Uuid::new_v4()
+    ))
+}
+
+async fn validate_workspace_archive(content: Vec<u8>) -> Result<(), ExecutionError> {
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::task::spawn_blocking(move || {
+            robine_source::validate_workspace_tar_gz(
+                &content,
+                robine_source::ArchiveLimits::default(),
+            )
+        }),
+    )
+    .await
+    .map_err(|_| ExecutionError::Runner {
+        phase: "builtin_archive_timeout",
+    })?
+    .map_err(|_| ExecutionError::Unavailable {
+        phase: "builtin_archive_task",
+    })?
+    .map_err(|_| ExecutionError::Runner {
+        phase: "builtin_archive_validation",
+    })
+}
+
+async fn write_archive(path: PathBuf, content: Vec<u8>) -> Result<(), ExecutionError> {
+    tokio::task::spawn_blocking(move || {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|_| ExecutionError::Unavailable {
+                phase: "builtin_archive_write",
+            })?;
+        file.write_all(&content)
+            .map_err(|_| ExecutionError::Unavailable {
+                phase: "builtin_archive_write",
+            })
+    })
+    .await
+    .map_err(|_| ExecutionError::Unavailable {
+        phase: "builtin_archive_task",
+    })?
+}
+
+async fn read_archive(path: PathBuf) -> Result<Vec<u8>, ExecutionError> {
+    tokio::task::spawn_blocking(move || std::fs::read(path))
+        .await
+        .map_err(|_| ExecutionError::Unavailable {
+            phase: "builtin_archive_task",
+        })?
+        .map_err(|_| ExecutionError::Unavailable {
+            phase: "builtin_archive_read",
+        })
+}
+
 fn inactive_resource_ids(
     output: &[u8],
     active_attempts: &HashSet<uuid::Uuid>,
@@ -799,6 +1062,87 @@ fn inactive_resource_ids(
         }
     }
     Ok(inactive)
+}
+
+fn stage_source(
+    attempt_id: uuid::Uuid,
+    files: &[crate::SourceFile],
+) -> Result<PathBuf, ExecutionError> {
+    let staging = std::env::temp_dir().join(format!("robine-source-{attempt_id}"));
+    std::fs::create_dir(&staging).map_err(|_| ExecutionError::Unavailable {
+        phase: "source_stage",
+    })?;
+    let result = (|| {
+        for source in files {
+            if source.path.as_os_str().is_empty()
+                || source
+                    .path
+                    .components()
+                    .any(|component| !matches!(component, Component::Normal(_)))
+            {
+                return Err(ExecutionError::InvalidSpecification("source path"));
+            }
+            let destination = staging.join(&source.path);
+            let parent = destination
+                .parent()
+                .filter(|parent| parent.starts_with(&staging))
+                .ok_or(ExecutionError::InvalidSpecification("source path"))?;
+            create_source_directories(&staging, parent)?;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&destination)
+                .map_err(|_| ExecutionError::InvalidSpecification("source file"))?;
+            file.write_all(&source.contents)
+                .map_err(|_| ExecutionError::Unavailable {
+                    phase: "source_stage",
+                })?;
+            set_source_permissions(&destination, false)?;
+        }
+        set_source_permissions(&staging, true)?;
+        Ok(staging.clone())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+    result
+}
+
+fn create_source_directories(root: &Path, parent: &Path) -> Result<(), ExecutionError> {
+    let mut current = root.to_path_buf();
+    for component in parent
+        .strip_prefix(root)
+        .map_err(|_| ExecutionError::InvalidSpecification("source path"))?
+        .components()
+    {
+        current.push(component);
+        match std::fs::create_dir(&current) {
+            Ok(()) => set_source_permissions(&current, true)?,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => {
+                return Err(ExecutionError::Unavailable {
+                    phase: "source_stage",
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_source_permissions(path: &Path, directory: bool) -> Result<(), ExecutionError> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = if directory { 0o755 } else { 0o644 };
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).map_err(|_| {
+        ExecutionError::Unavailable {
+            phase: "source_stage",
+        }
+    })
+}
+
+#[cfg(not(unix))]
+fn set_source_permissions(_path: &Path, _directory: bool) -> Result<(), ExecutionError> {
+    Ok(())
 }
 
 #[cfg(test)]
@@ -846,6 +1190,7 @@ mod tests {
                 "TOKEN".into(),
                 zeroize::Zeroizing::new("super-secret".into()),
             )]),
+            source_files: Vec::new(),
             services: Vec::new(),
             steps: vec![ExecutionStep {
                 name: "test".into(),
@@ -908,6 +1253,7 @@ mod tests {
                 "TOKEN".into(),
                 zeroize::Zeroizing::new("super-secret".into()),
             )]),
+            source_files: Vec::new(),
             services: Vec::new(),
             steps: Vec::new(),
         };
@@ -939,6 +1285,7 @@ mod tests {
                 ExecutionControl {
                     output: &control,
                     cancellation: &control,
+                    builtins: None,
                     last_sequence: 40,
                 },
             )
@@ -979,6 +1326,43 @@ mod tests {
         assert_job_resources_cleaned(&runner, specification.attempt_id).await;
     }
 
+    #[tokio::test]
+    async fn docker_materializes_source_before_steps_when_enabled() {
+        if std::env::var_os("ROBINE_DOCKER_INTEGRATION").is_none() {
+            return;
+        }
+        let attempt_id = Uuid::new_v4();
+        let specification = ExecutionSpecification {
+            attempt_id,
+            image: "alpine:3.22".into(),
+            workspace: "/workspace".into(),
+            shell: "/bin/sh".into(),
+            timeout_ms: 10_000,
+            env: BTreeMap::new(),
+            build_env: BTreeMap::new(),
+            secret_names: Vec::new(),
+            secrets: BTreeMap::new(),
+            source_files: vec![crate::SourceFile {
+                path: PathBuf::from("src/message.txt"),
+                contents: b"checked-out".to_vec(),
+            }],
+            services: Vec::new(),
+            steps: vec![ExecutionStep {
+                name: "read-source".into(),
+                kind: StepKind::Run,
+                value: "test \"$(cat src/message.txt)\" = checked-out".into(),
+                condition: StepCondition::Success,
+                with: BTreeMap::new(),
+            }],
+        };
+        let runner = DockerCli::new(DockerConfig {
+            instance: format!("rust-test-{attempt_id}"),
+            ..DockerConfig::default()
+        });
+        let result = runner.run(&specification).await.expect("source execution");
+        assert_eq!(result.status, ExecutionStatus::Succeeded);
+    }
+
     async fn assert_job_resources_cleaned(runner: &DockerCli, attempt_id: Uuid) {
         let container = format!("robine-job-{}", attempt_id.simple());
         let volume = format!("robine-workspace-{}", attempt_id.simple());
@@ -1015,6 +1399,7 @@ mod tests {
             build_env: BTreeMap::new(),
             secret_names: Vec::new(),
             secrets: BTreeMap::new(),
+            source_files: Vec::new(),
             services: Vec::new(),
             steps: vec![ExecutionStep {
                 name: "wait".into(),
@@ -1039,6 +1424,7 @@ mod tests {
                 ExecutionControl {
                     output: &control,
                     cancellation: &control,
+                    builtins: None,
                     last_sequence: 0,
                 },
             )
@@ -1064,6 +1450,7 @@ mod tests {
             build_env: BTreeMap::new(),
             secret_names: Vec::new(),
             secrets: BTreeMap::new(),
+            source_files: Vec::new(),
             services: vec![ServiceSpecification {
                 id: "database".into(),
                 image: "alpine:3.22".into(),
@@ -1142,6 +1529,7 @@ mod tests {
             build_env: BTreeMap::new(),
             secret_names: Vec::new(),
             secrets: BTreeMap::new(),
+            source_files: Vec::new(),
             services: vec![ServiceSpecification {
                 id: "short-lived".into(),
                 image: "alpine:3.22".into(),

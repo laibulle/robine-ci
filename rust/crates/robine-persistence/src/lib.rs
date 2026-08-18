@@ -15,6 +15,10 @@ use robine_core::{
     ports::{IdentityRepository, PipelineRepository, PortError},
 };
 use robine_secrets::{EncryptedSecret, SecretError, SecretRepository, SecretScope};
+use robine_source::{Provider, Repository, RepositoryStore, SourceError};
+use robine_storage::{
+    Artifact, CacheEntry, MetadataRepository, StorageError, StorageQuotas, StoredObject,
+};
 use sqlx::{PgPool, Postgres, Transaction, postgres::PgPoolOptions};
 use thiserror::Error;
 use uuid::Uuid;
@@ -478,6 +482,268 @@ impl SecretRepository for Database {
                 })
             })
             .collect()
+    }
+}
+
+#[async_trait]
+impl RepositoryStore for Database {
+    async fn find_trusted(
+        &self,
+        tenant_id: &str,
+        repository_id: Uuid,
+    ) -> Result<Repository, SourceError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| SourceError::RepositoryUnavailable)?;
+        let row = sqlx::query_as::<_, SourceRepositoryRow>(
+            "SELECT id, provider::text AS provider, provider_instance, installation_id, owner, name, full_name \
+             FROM github_repositories \
+             WHERE tenant_id = $1 AND id = $2 AND trusted = TRUE",
+        )
+        .bind(tenant_id)
+        .bind(repository_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| SourceError::RepositoryUnavailable)?
+        .ok_or(SourceError::RepositoryUnavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| SourceError::RepositoryUnavailable)?;
+        let provider = match row.provider.as_str() {
+            "github" => Provider::GitHub,
+            "gitlab" => Provider::GitLab,
+            "forgejo" => Provider::Forgejo,
+            _ => return Err(SourceError::RepositoryUnavailable),
+        };
+        Ok(Repository {
+            id: row.id,
+            provider,
+            provider_instance: row.provider_instance,
+            installation_id: row.installation_id,
+            owner: row.owner,
+            name: row.name,
+            full_name: row.full_name,
+        })
+    }
+}
+
+#[async_trait]
+impl MetadataRepository for Database {
+    async fn restore_cache(
+        &self,
+        tenant_id: &str,
+        repository_id: Uuid,
+        key: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<CacheEntry>, StorageError> {
+        if key.is_empty() || key.len() > 512 {
+            return Err(StorageError::InvalidInput);
+        }
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| StorageError::Unavailable)?;
+        let row = sqlx::query_as::<_, CacheEntryRow>(
+            "SELECT id, repository_id, key, blob_id, digest, size, created_at, expires_at \
+             FROM cache_entries WHERE tenant_id = $1 AND repository_id = $2 AND key = $3 \
+               AND expires_at > $4 FOR UPDATE",
+        )
+        .bind(tenant_id)
+        .bind(repository_id)
+        .bind(key)
+        .bind(now)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| StorageError::Unavailable)?;
+        if let Some(row) = &row {
+            sqlx::query(
+                "UPDATE cache_entries SET last_restored_at = $1 \
+                 WHERE id = $2 AND tenant_id = $3",
+            )
+            .bind(now)
+            .bind(row.id)
+            .bind(tenant_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| StorageError::Unavailable)?;
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| StorageError::Unavailable)?;
+        row.map(CacheEntryRow::into_domain).transpose()
+    }
+
+    async fn save_cache(
+        &self,
+        tenant_id: &str,
+        cache: &CacheEntry,
+        quotas: StorageQuotas,
+    ) -> Result<(), StorageError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| StorageError::Unavailable)?;
+        storage_quota_lock(&mut transaction, tenant_id).await?;
+        let replaced = sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE((SELECT size FROM cache_entries \
+             WHERE tenant_id = $1 AND repository_id = $2 AND key = $3), 0)",
+        )
+        .bind(tenant_id)
+        .bind(cache.repository_id)
+        .bind(&cache.key)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| StorageError::Unavailable)?;
+        enforce_storage_quota(
+            &mut transaction,
+            tenant_id,
+            cache.repository_id,
+            cache.object.size - replaced,
+            quotas,
+        )
+        .await?;
+        sqlx::query(
+            "INSERT INTO cache_entries \
+             (id, repository_id, key, blob_id, digest, size, created_at, expires_at, last_restored_at, tenant_id) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, $9) \
+             ON CONFLICT (tenant_id, repository_id, key) DO UPDATE SET \
+               id = EXCLUDED.id, blob_id = EXCLUDED.blob_id, digest = EXCLUDED.digest, \
+               size = EXCLUDED.size, created_at = EXCLUDED.created_at, \
+               expires_at = EXCLUDED.expires_at, last_restored_at = NULL",
+        )
+        .bind(cache.id)
+        .bind(cache.repository_id)
+        .bind(&cache.key)
+        .bind(&cache.object.blob_id)
+        .bind(&cache.object.digest)
+        .bind(cache.object.size)
+        .bind(cache.created_at)
+        .bind(cache.expires_at)
+        .bind(tenant_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| StorageError::Unavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| StorageError::Unavailable)
+    }
+
+    async fn dependency_artifact(
+        &self,
+        tenant_id: &str,
+        pipeline_id: Uuid,
+        from_job: &str,
+        name: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Artifact, StorageError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| StorageError::Unavailable)?;
+        let row = sqlx::query_as::<_, ArtifactRow>(
+            "SELECT artifact.id, artifact.repository_id, artifact.attempt_id, artifact.name, \
+                    artifact.blob_id, artifact.digest, artifact.size, artifact.created_at, artifact.expires_at \
+             FROM artifacts AS artifact \
+             JOIN job_attempts AS attempt ON attempt.id = artifact.attempt_id \
+               AND attempt.tenant_id = artifact.tenant_id \
+             JOIN pipeline_jobs AS job ON job.id = attempt.job_id AND job.tenant_id = attempt.tenant_id \
+             WHERE artifact.tenant_id = $1 AND job.pipeline_id = $2 AND job.job_key = $3 \
+               AND attempt.status = 'succeeded' AND artifact.name = $4 AND artifact.expires_at > $5 \
+             ORDER BY attempt.number DESC LIMIT 1",
+        )
+        .bind(tenant_id)
+        .bind(pipeline_id)
+        .bind(from_job)
+        .bind(name)
+        .bind(now)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| StorageError::Unavailable)?
+        .ok_or(StorageError::NotFound)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| StorageError::Unavailable)?;
+        row.into_domain()
+    }
+
+    async fn upload_artifact(
+        &self,
+        tenant_id: &str,
+        artifact: &Artifact,
+        quotas: StorageQuotas,
+    ) -> Result<(), StorageError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| StorageError::Unavailable)?;
+        storage_quota_lock(&mut transaction, tenant_id).await?;
+        enforce_storage_quota(
+            &mut transaction,
+            tenant_id,
+            artifact.repository_id,
+            artifact.object.size,
+            quotas,
+        )
+        .await?;
+        let result = sqlx::query(
+            "INSERT INTO artifacts \
+             (id, repository_id, attempt_id, name, blob_id, digest, size, created_at, expires_at, tenant_id) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
+             ON CONFLICT (tenant_id, attempt_id, name) DO NOTHING",
+        )
+        .bind(artifact.id)
+        .bind(artifact.repository_id)
+        .bind(artifact.attempt_id)
+        .bind(&artifact.name)
+        .bind(&artifact.object.blob_id)
+        .bind(&artifact.object.digest)
+        .bind(artifact.object.size)
+        .bind(artifact.created_at)
+        .bind(artifact.expires_at)
+        .bind(tenant_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| StorageError::Unavailable)?;
+        if result.rows_affected() != 1 {
+            return Err(StorageError::ImmutableConflict);
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| StorageError::Unavailable)
+    }
+
+    async fn stage_blob_gc(
+        &self,
+        tenant_id: &str,
+        blob_id: &str,
+        not_before: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Result<(), StorageError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| StorageError::Unavailable)?;
+        sqlx::query(
+            "INSERT INTO storage_gc_candidates (blob_id, not_before, inserted_at, tenant_id) \
+             VALUES ($1, $2, $3, $4) ON CONFLICT (tenant_id, blob_id) DO NOTHING",
+        )
+        .bind(blob_id)
+        .bind(not_before)
+        .bind(now)
+        .bind(tenant_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| StorageError::Unavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| StorageError::Unavailable)
     }
 }
 
@@ -2587,6 +2853,133 @@ fn artifact_requirements(
         }
     }
     Ok(requirements)
+}
+
+#[derive(sqlx::FromRow)]
+struct SourceRepositoryRow {
+    id: Uuid,
+    provider: String,
+    provider_instance: String,
+    installation_id: i64,
+    owner: String,
+    name: String,
+    full_name: String,
+}
+
+#[derive(sqlx::FromRow)]
+struct CacheEntryRow {
+    id: Uuid,
+    repository_id: Uuid,
+    key: String,
+    blob_id: String,
+    digest: String,
+    size: i64,
+    created_at: NaiveDateTime,
+    expires_at: NaiveDateTime,
+}
+
+impl CacheEntryRow {
+    fn into_domain(self) -> Result<CacheEntry, StorageError> {
+        let object = stored_object(self.blob_id, self.digest, self.size)?;
+        Ok(CacheEntry {
+            id: self.id,
+            repository_id: self.repository_id,
+            key: self.key,
+            object,
+            created_at: self.created_at.and_utc(),
+            expires_at: self.expires_at.and_utc(),
+        })
+    }
+}
+
+#[derive(sqlx::FromRow)]
+struct ArtifactRow {
+    id: Uuid,
+    repository_id: Uuid,
+    attempt_id: Uuid,
+    name: String,
+    blob_id: String,
+    digest: String,
+    size: i64,
+    created_at: NaiveDateTime,
+    expires_at: NaiveDateTime,
+}
+
+impl ArtifactRow {
+    fn into_domain(self) -> Result<Artifact, StorageError> {
+        let object = stored_object(self.blob_id, self.digest, self.size)?;
+        Ok(Artifact {
+            id: self.id,
+            repository_id: self.repository_id,
+            attempt_id: self.attempt_id,
+            name: self.name,
+            object,
+            created_at: self.created_at.and_utc(),
+            expires_at: self.expires_at.and_utc(),
+        })
+    }
+}
+
+fn stored_object(
+    blob_id: String,
+    digest: String,
+    size: i64,
+) -> Result<StoredObject, StorageError> {
+    if size < 0 || blob_id.is_empty() || digest.is_empty() {
+        return Err(StorageError::Unavailable);
+    }
+    Ok(StoredObject {
+        blob_id,
+        digest,
+        size,
+    })
+}
+
+async fn storage_quota_lock(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+) -> Result<(), StorageError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtext('robine:storage-quota:' || $1))")
+        .bind(tenant_id)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|_| StorageError::Unavailable)?;
+    Ok(())
+}
+
+async fn enforce_storage_quota(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    repository_id: Uuid,
+    delta: i64,
+    quotas: StorageQuotas,
+) -> Result<(), StorageError> {
+    if delta <= 0 {
+        return Ok(());
+    }
+    let instance = sqlx::query_scalar::<_, i64>(
+        "SELECT (COALESCE((SELECT SUM(size) FROM artifacts WHERE tenant_id = $1), 0) + \
+                        COALESCE((SELECT SUM(size) FROM cache_entries WHERE tenant_id = $1), 0))::bigint",
+    )
+    .bind(tenant_id)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(|_| StorageError::Unavailable)?;
+    let repository = sqlx::query_scalar::<_, i64>(
+        "SELECT (COALESCE((SELECT SUM(size) FROM artifacts WHERE tenant_id = $1 AND repository_id = $2), 0) + \
+                        COALESCE((SELECT SUM(size) FROM cache_entries WHERE tenant_id = $1 AND repository_id = $2), 0))::bigint",
+    )
+    .bind(tenant_id)
+    .bind(repository_id)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(|_| StorageError::Unavailable)?;
+    if instance.saturating_add(delta) > quotas.instance_bytes
+        || repository.saturating_add(delta) > quotas.repository_bytes
+    {
+        return Err(StorageError::QuotaExceeded);
+    }
+    Ok(())
 }
 
 #[derive(sqlx::FromRow)]

@@ -4,6 +4,7 @@ mod docker;
 
 use async_trait::async_trait;
 pub use docker::{DockerCli, DockerConfig};
+pub use robine_source::SourceFile;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use thiserror::Error;
@@ -58,6 +59,8 @@ pub struct ExecutionSpecification {
     pub secret_names: Vec<String>,
     #[serde(skip)]
     pub secrets: BTreeMap<String, Zeroizing<String>>,
+    #[serde(skip)]
+    pub source_files: Vec<SourceFile>,
     #[serde(default)]
     pub services: Vec<ServiceSpecification>,
     pub steps: Vec<ExecutionStep>,
@@ -159,7 +162,20 @@ pub trait CancellationSignal: Send + Sync {
 pub struct ExecutionControl<'a> {
     pub output: &'a dyn OutputSink,
     pub cancellation: &'a dyn CancellationSignal,
+    pub builtins: Option<&'a dyn BuiltinHandler>,
     pub last_sequence: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BuiltinRestore {
+    CacheMiss,
+    Archive(Vec<u8>),
+}
+
+#[async_trait]
+pub trait BuiltinHandler: Send + Sync {
+    async fn restore(&self, step: &ExecutionStep) -> Result<BuiltinRestore, ExecutionError>;
+    async fn publish(&self, step: &ExecutionStep, archive: Vec<u8>) -> Result<(), ExecutionError>;
 }
 
 #[async_trait]
@@ -176,7 +192,7 @@ impl ExecutionSpecification {
     ///
     /// # Errors
     ///
-    /// Rejects empty or unsafe boundary values and currently unsupported built-ins.
+    /// Rejects empty or unsafe boundary values and unknown built-ins.
     pub fn validate(&self) -> Result<(), ExecutionError> {
         if self.image.trim().is_empty() {
             return Err(ExecutionError::InvalidSpecification("image"));
@@ -208,7 +224,13 @@ impl ExecutionSpecification {
         {
             return Err(ExecutionError::InvalidSpecification("reserved environment"));
         }
-        if self.steps.iter().any(|step| step.kind == StepKind::Builtin) {
+        if self.steps.iter().any(|step| {
+            step.kind == StepKind::Builtin
+                && !matches!(
+                    step.value.as_str(),
+                    "cache/restore" | "cache/save" | "artifacts/upload" | "artifacts/download"
+                )
+        }) {
             return Err(ExecutionError::Unsupported("builtin step"));
         }
         if !self.secret_names.is_empty() {
@@ -221,6 +243,9 @@ impl ExecutionSpecification {
                 .any(|(name, value)| name.is_empty() || value.is_empty() || value.len() > 65_536)
         {
             return Err(ExecutionError::InvalidSpecification("secrets"));
+        }
+        if !valid_source_files(&self.source_files) {
+            return Err(ExecutionError::InvalidSpecification("source files"));
         }
         if self.services.len() > 8 {
             return Err(ExecutionError::InvalidSpecification("services"));
@@ -271,6 +296,24 @@ impl ExecutionSpecification {
     }
 }
 
+fn valid_source_files(files: &[SourceFile]) -> bool {
+    files.len() <= 10_000
+        && !files.iter().any(|file| {
+            file.path.as_os_str().is_empty()
+                || file.path.as_os_str().len() > 4_096
+                || file
+                    .path
+                    .components()
+                    .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        })
+        && files
+            .iter()
+            .try_fold(0_usize, |total, file| {
+                total.checked_add(file.contents.len())
+            })
+            .is_some_and(|total| total <= 1_000_000_000)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,6 +330,7 @@ mod tests {
             build_env: BTreeMap::from([("ROBINE_BUILD_COMMIT_SHA".into(), "real".into())]),
             secret_names: Vec::new(),
             secrets: BTreeMap::new(),
+            source_files: Vec::new(),
             services: Vec::new(),
             steps: vec![ExecutionStep {
                 name: "test".into(),

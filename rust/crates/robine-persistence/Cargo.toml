@@ -11,6 +11,8 @@ base64.workspace = true
 chrono.workspace = true
 robine-core = { path = "../robine-core" }
 robine-secrets = { path = "../robine-secrets" }
+robine-source = { path = "../robine-source" }
+robine-storage = { path = "../robine-storage" }
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
