@@ -1,17 +1,22 @@
 use async_trait::async_trait;
 use reqwest::Client;
 use robine_execution::{
-    CancellationSignal, DockerCli, DockerConfig, ExecutionControl, ExecutionError,
-    ExecutionSpecification, ExecutionStatus, OutputChannel, OutputChunk, OutputSink, StepKind,
+    BuiltinHandler, BuiltinRestore, CancellationSignal, DockerCli, DockerConfig, ExecutionControl,
+    ExecutionError, ExecutionSpecification, ExecutionStatus, ExecutionStep, OutputChannel,
+    OutputChunk, OutputSink,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     env, fs, io,
     path::{Path, PathBuf},
     process::ExitCode,
-    sync::atomic::{AtomicU64, Ordering},
-    time::Duration,
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
 };
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -247,30 +252,48 @@ async fn execute_offer(
             .map(|(name, value)| (name, Zeroizing::new(value)))
             .collect();
     }
-    specification
-        .steps
-        .retain(|step| step.kind == StepKind::Run);
     let output = RemoteOutput {
         client: client.clone(),
         config: config.clone(),
         attempt_id,
         sequence: AtomicU64::new(0),
     };
+    let cancellation = RemoteCancellation {
+        client: client.clone(),
+        config: config.clone(),
+        attempt_id,
+        last_check: Mutex::new(None),
+        requested: AtomicBool::new(false),
+    };
+    let builtins = RemoteBuiltins {
+        client: client.clone(),
+        config: config.clone(),
+        attempt_id,
+    };
     let result = DockerCli::new(DockerConfig::default())
         .run_controlled(
             &specification,
             ExecutionControl {
                 output: &output,
-                cancellation: &NeverCancel,
-                builtins: None,
+                cancellation: &cancellation,
+                builtins: Some(&builtins),
                 last_sequence: 0,
             },
         )
         .await;
     let (status, reason) = match result {
         Ok(result) if result.status == ExecutionStatus::Succeeded => ("succeeded", None),
-        Ok(result) => ("failed", Some(format!("{:?}", result.status))),
-        Err(error) => ("failed", Some(error.to_string())),
+        Ok(result) if result.status == ExecutionStatus::Cancelled => {
+            ("cancelled", Some("cancelled".to_owned()))
+        }
+        Ok(result) if result.status == ExecutionStatus::TimedOut => {
+            ("failed", Some("timeout".to_owned()))
+        }
+        Ok(result) if result.status == ExecutionStatus::ServiceUnavailable => {
+            ("failed", Some("service_unavailable".to_owned()))
+        }
+        Ok(_) => ("failed", Some("command_failed".to_owned())),
+        Err(_) => ("failed", Some("system_failure".to_owned())),
     };
     event(client, config, &token, 3, status, reason.as_deref()).await
 }
@@ -307,12 +330,197 @@ impl OutputSink for RemoteOutput {
         Ok(())
     }
 }
-struct NeverCancel;
+struct RemoteCancellation {
+    client: Client,
+    config: Config,
+    attempt_id: Uuid,
+    last_check: Mutex<Option<Instant>>,
+    requested: AtomicBool,
+}
+
 #[async_trait]
-impl CancellationSignal for NeverCancel {
+impl CancellationSignal for RemoteCancellation {
     async fn requested(&self) -> Result<bool, ExecutionError> {
-        Ok(false)
+        if self.requested.load(Ordering::Acquire) {
+            return Ok(true);
+        }
+        {
+            let mut last_check = self
+                .last_check
+                .lock()
+                .map_err(|_| ExecutionError::Unavailable {
+                    phase: "cancellation_state",
+                })?;
+            if last_check.is_some_and(|instant| instant.elapsed() < Duration::from_secs(2)) {
+                return Ok(false);
+            }
+            *last_check = Some(Instant::now());
+        }
+        let heartbeat: Heartbeat = machine(
+            self.client
+                .post(url(&self.config, "/api/v1/runners/heartbeat")),
+            &self.config,
+        )
+        .json(&serde_json::json!({"lease_seconds":60}))
+        .send()
+        .await
+        .map_err(|_| ExecutionError::Unavailable {
+            phase: "cancellation_heartbeat",
+        })?
+        .error_for_status()
+        .map_err(|_| ExecutionError::Unavailable {
+            phase: "cancellation_heartbeat",
+        })?
+        .json()
+        .await
+        .map_err(|_| ExecutionError::Unavailable {
+            phase: "cancellation_heartbeat",
+        })?;
+        let requested = heartbeat
+            .cancellation_requested_attempt_ids
+            .contains(&self.attempt_id);
+        self.requested.store(requested, Ordering::Release);
+        Ok(requested)
     }
+}
+
+struct RemoteBuiltins {
+    client: Client,
+    config: Config,
+    attempt_id: Uuid,
+}
+
+#[async_trait]
+impl BuiltinHandler for RemoteBuiltins {
+    async fn restore(&self, step: &ExecutionStep) -> Result<BuiltinRestore, ExecutionError> {
+        let mut endpoint = url::Url::parse(&url(
+            &self.config,
+            match step.value.as_str() {
+                "cache/restore" => {
+                    &format!("/api/v1/runners/attempts/{}/cache", self.attempt_id)
+                }
+                "artifacts/download" => {
+                    &format!("/api/v1/runners/attempts/{}/artifacts", self.attempt_id)
+                }
+                _ => return Err(ExecutionError::Unsupported("builtin restore")),
+            },
+        ))
+        .map_err(|_| ExecutionError::InvalidSpecification("runner URL"))?;
+        match step.value.as_str() {
+            "cache/restore" => endpoint
+                .query_pairs_mut()
+                .append_pair("key", step_string(step, "key")?),
+            "artifacts/download" => endpoint
+                .query_pairs_mut()
+                .append_pair("name", step_string(step, "name")?)
+                .append_pair("from", step_string(step, "from")?),
+            _ => unreachable!(),
+        };
+        let response = machine(self.client.get(endpoint), &self.config)
+            .send()
+            .await
+            .map_err(|_| ExecutionError::Unavailable {
+                phase: "builtin_download",
+            })?;
+        if response.status() == reqwest::StatusCode::NO_CONTENT {
+            return Ok(BuiltinRestore::CacheMiss);
+        }
+        let response = response
+            .error_for_status()
+            .map_err(|_| ExecutionError::Runner {
+                phase: "builtin_download",
+            })?;
+        let expected = response
+            .headers()
+            .get("x-content-sha256")
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned)
+            .ok_or(ExecutionError::Runner {
+                phase: "builtin_digest",
+            })?;
+        if response.content_length().is_some_and(|size| size > 104_857_600) {
+            return Err(ExecutionError::Runner {
+                phase: "builtin_download_size",
+            });
+        }
+        let content = response
+            .bytes()
+            .await
+            .map_err(|_| ExecutionError::Unavailable {
+                phase: "builtin_download",
+            })?
+            .to_vec();
+        if content.len() > 104_857_600 || format!("{:x}", Sha256::digest(&content)) != expected {
+            return Err(ExecutionError::Runner {
+                phase: "builtin_digest",
+            });
+        }
+        Ok(BuiltinRestore::Archive(content))
+    }
+
+    async fn publish(
+        &self,
+        step: &ExecutionStep,
+        archive: Vec<u8>,
+    ) -> Result<(), ExecutionError> {
+        if archive.len() > 104_857_600 {
+            return Err(ExecutionError::Runner {
+                phase: "builtin_upload_size",
+            });
+        }
+        let mut endpoint = url::Url::parse(&url(
+            &self.config,
+            match step.value.as_str() {
+                "cache/save" => {
+                    &format!("/api/v1/runners/attempts/{}/cache", self.attempt_id)
+                }
+                "artifacts/upload" => {
+                    &format!("/api/v1/runners/attempts/{}/artifacts", self.attempt_id)
+                }
+                _ => return Err(ExecutionError::Unsupported("builtin publish")),
+            },
+        ))
+        .map_err(|_| ExecutionError::InvalidSpecification("runner URL"))?;
+        match step.value.as_str() {
+            "cache/save" => endpoint
+                .query_pairs_mut()
+                .append_pair("key", step_string(step, "key")?),
+            "artifacts/upload" => endpoint
+                .query_pairs_mut()
+                .append_pair("name", step_string(step, "name")?)
+                .append_pair(
+                    "retention_days",
+                    &step
+                        .with
+                        .get("retention_days")
+                        .and_then(serde_json::Value::as_i64)
+                        .unwrap_or(7)
+                        .to_string(),
+                ),
+            _ => unreachable!(),
+        };
+        machine(self.client.put(endpoint), &self.config)
+            .header("content-type", "application/gzip")
+            .body(archive)
+            .send()
+            .await
+            .map_err(|_| ExecutionError::Unavailable {
+                phase: "builtin_upload",
+            })?
+            .error_for_status()
+            .map_err(|_| ExecutionError::Runner {
+                phase: "builtin_upload",
+            })?;
+        Ok(())
+    }
+}
+
+fn step_string<'a>(step: &'a ExecutionStep, key: &str) -> Result<&'a str, ExecutionError> {
+    step.with
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .ok_or(ExecutionError::InvalidSpecification("builtin parameter"))
 }
 
 fn machine(builder: reqwest::RequestBuilder, config: &Config) -> reqwest::RequestBuilder {

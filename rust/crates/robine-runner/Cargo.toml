@@ -12,7 +12,9 @@ robine-execution = { path = "../robine-execution" }
 robine-source = { path = "../robine-source" }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tokio.workspace = true
+url.workspace = true
 uuid.workspace = true
 zeroize.workspace = true
 
