@@ -20,6 +20,7 @@ use robine_storage::{
     Artifact, CacheEntry, InventoryObject, MetadataRepository, RetentionRepository, RetentionStage,
     StorageError, StorageQuotas, StoredObject,
 };
+use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction, postgres::PgPoolOptions};
 use thiserror::Error;
 use uuid::Uuid;
@@ -35,6 +36,8 @@ pub enum PersistenceError {
     Database(#[source] sqlx::Error),
     #[error(transparent)]
     UnknownPipelineState(#[from] UnknownPipelineState),
+    #[error("storage backend migration acknowledgement is required: {0}")]
+    StorageMigrationAcknowledgementRequired(String),
 }
 
 impl From<sqlx::Error> for PersistenceError {
@@ -65,6 +68,76 @@ impl Database {
     #[must_use]
     pub fn from_pool(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    /// Verifies that every tenant's retained metadata still addresses the configured backend.
+    ///
+    /// # Errors
+    ///
+    /// Returns an acknowledgement token when retained metadata would be reinterpreted under a
+    /// different storage namespace, or a database error when state cannot be checked atomically.
+    pub async fn verify_storage_backend(
+        &self,
+        backend: &str,
+        namespace_digest: &str,
+        acknowledgement: Option<&str>,
+    ) -> Result<(), PersistenceError> {
+        let tenants = sqlx::query_scalar::<_, String>("SELECT id FROM ci_tenants ORDER BY id")
+            .fetch_all(&self.pool)
+            .await?;
+        let tenants = if tenants.is_empty() {
+            vec!["standalone".to_owned()]
+        } else {
+            tenants
+        };
+        for tenant_id in tenants {
+            let mut transaction = self.tenant_transaction(&tenant_id).await?;
+            let state = sqlx::query_as::<_, (String, String)>(
+                "SELECT backend, namespace_digest FROM storage_backend_states \
+                 WHERE tenant_id = $1 AND id = 'primary' FOR UPDATE",
+            )
+            .bind(&tenant_id)
+            .fetch_optional(&mut *transaction)
+            .await?;
+            let retained = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS (SELECT 1 FROM artifacts WHERE tenant_id = $1) \
+                 OR EXISTS (SELECT 1 FROM cache_entries WHERE tenant_id = $1)",
+            )
+            .bind(&tenant_id)
+            .fetch_one(&mut *transaction)
+            .await?;
+            let previous = state
+                .as_ref()
+                .map_or("unrecorded", |(_, digest)| digest.as_str());
+            let changed = state.as_ref().is_none_or(|(stored_backend, stored_digest)| {
+                stored_backend != backend || stored_digest != namespace_digest
+            });
+            let expected = storage_transition_ack(previous, namespace_digest);
+            if changed && retained && acknowledgement != Some(expected.as_str()) {
+                transaction.rollback().await?;
+                return Err(PersistenceError::StorageMigrationAcknowledgementRequired(
+                    expected,
+                ));
+            }
+            if changed {
+                sqlx::query(
+                    "INSERT INTO storage_backend_states \
+                     (tenant_id, id, backend, namespace_digest, acknowledged_at, inserted_at, updated_at) \
+                     VALUES ($1, 'primary', $2, $3, $4, NOW(), NOW()) \
+                     ON CONFLICT (tenant_id, id) DO UPDATE SET \
+                       backend = EXCLUDED.backend, namespace_digest = EXCLUDED.namespace_digest, \
+                       acknowledged_at = EXCLUDED.acknowledged_at, updated_at = NOW()",
+                )
+                .bind(&tenant_id)
+                .bind(backend)
+                .bind(namespace_digest)
+                .bind((acknowledgement == Some(expected.as_str())).then(Utc::now))
+                .execute(&mut *transaction)
+                .await?;
+            }
+            transaction.commit().await?;
+        }
+        Ok(())
     }
 
     /// Opens a transaction with `PostgreSQL` row-level security scoped to one tenant.
@@ -124,6 +197,14 @@ impl Database {
 
         records.into_iter().map(TryInto::try_into).collect()
     }
+}
+
+#[must_use]
+pub fn storage_transition_ack(previous_digest: &str, next_digest: &str) -> String {
+    format!(
+        "{:x}",
+        Sha256::digest(format!("{previous_digest}->{next_digest}").as_bytes())
+    )
 }
 
 #[async_trait]

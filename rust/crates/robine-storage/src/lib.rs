@@ -1,4 +1,8 @@
-//! Storage contracts and a content-addressed local blob adapter.
+//! Storage contracts and content-addressed local and S3-compatible blob adapters.
+
+mod s3;
+
+pub use s3::{S3BlobStore, S3Config, S3Encryption};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
