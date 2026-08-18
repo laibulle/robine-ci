@@ -746,6 +746,15 @@ pub struct StatusProjectionSnapshot {
     pub items: Vec<StatusProjectionItem>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ScheduleScanMetrics {
+    pub duration_ms: i64,
+    pub scanned_minutes: u32,
+    pub due_occurrences: u32,
+    pub pipelines: u32,
+    pub truncated_minutes: u64,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct LocalExecutionWork {
     pub attempt: AttemptProjection,

@@ -10,8 +10,8 @@ use robine_core::{
         JobState, LocalExecutionWork, NewPipeline, OutboxDelivery, PipelineEvent,
         PipelineProjection, PipelineState, RecordAttemptEvent, RecordRemoteAttemptEvent,
         RetryProjection, RunnerAuthenticationMaterial, RunnerLeaseHeartbeat, RunnerResume,
-        SchedulerClaim, StatusProjectionItem, StatusProjectionSnapshot, UnknownPipelineState,
-        outbox_backoff_seconds,
+        ScheduleScanMetrics, SchedulerClaim, StatusProjectionItem, StatusProjectionSnapshot,
+        UnknownPipelineState, outbox_backoff_seconds,
     },
     ports::{IdentityRepository, PipelineRepository, PortError},
 };
@@ -96,6 +96,11 @@ impl Database {
                 .execute(&mut *transaction)
                 .await?;
         }
+        sqlx::raw_sql(include_str!(
+            "../migrations/0002_native_scheduler_metrics.sql"
+        ))
+        .execute(&mut *transaction)
+        .await?;
         let current = sqlx::query_scalar::<_, bool>(
             "SELECT to_regclass('public.pipelines') IS NOT NULL \
              AND to_regclass('public.durable_jobs') IS NOT NULL \
@@ -694,6 +699,114 @@ impl SecretRepository for Database {
             .commit()
             .await
             .map_err(|_| SecretError::Unavailable)
+    }
+
+    async fn rotation_batch(
+        &self,
+        tenant_id: &str,
+        after: Option<Uuid>,
+        target_version: i32,
+        limit: i64,
+    ) -> Result<Vec<EncryptedSecret>, SecretError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| SecretError::Unavailable)?;
+        let rows = sqlx::query_as::<_, SecretRow>(
+            "SELECT id, name, scope, repository_id, allowed_repository_ids, ciphertext, nonce, tag, key_version \
+             FROM secrets WHERE tenant_id = $1 AND ($2::uuid IS NULL OR id > $2) \
+               AND key_version <> $3 ORDER BY id LIMIT $4",
+        )
+        .bind(tenant_id)
+        .bind(after)
+        .bind(target_version)
+        .bind(limit.clamp(1, 100))
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(|_| SecretError::Unavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| SecretError::Unavailable)?;
+        rows.into_iter().map(secret_from_row).collect()
+    }
+
+    async fn rotate(
+        &self,
+        tenant_id: &str,
+        actor_id: Uuid,
+        expected_version: i32,
+        secret: &EncryptedSecret,
+    ) -> Result<bool, SecretError> {
+        let now = Utc::now();
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| SecretError::Unavailable)?;
+        let updated = sqlx::query(
+            "UPDATE secrets SET ciphertext = $4, nonce = $5, tag = $6, key_version = $7 \
+             WHERE tenant_id = $1 AND id = $2 AND key_version = $3",
+        )
+        .bind(tenant_id)
+        .bind(secret.id)
+        .bind(expected_version)
+        .bind(&secret.ciphertext)
+        .bind(&secret.nonce)
+        .bind(&secret.tag)
+        .bind(secret.key_version)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| SecretError::Unavailable)?
+        .rows_affected()
+            == 1;
+        if updated {
+            sqlx::query(
+                "INSERT INTO audit_events \
+                 (id, actor_id, action, target_type, target_id, metadata, occurred_at, tenant_id) \
+                 VALUES ($1, $2, 'secret.key_rotated', 'secret', $3, $4, $5, $6)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(actor_id.to_string())
+            .bind(secret.id)
+            .bind(serde_json::json!({
+                "from_key_version": expected_version,
+                "to_key_version": secret.key_version
+            }))
+            .bind(now)
+            .bind(tenant_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| SecretError::Unavailable)?;
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| SecretError::Unavailable)?;
+        Ok(updated)
+    }
+
+    async fn rotation_pending(
+        &self,
+        tenant_id: &str,
+        target_version: i32,
+    ) -> Result<u64, SecretError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| SecretError::Unavailable)?;
+        let pending = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM secrets WHERE tenant_id = $1 AND key_version <> $2",
+        )
+        .bind(tenant_id)
+        .bind(target_version)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| SecretError::Unavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| SecretError::Unavailable)?;
+        u64::try_from(pending).map_err(|_| SecretError::Unavailable)
     }
 }
 
@@ -1303,6 +1416,7 @@ impl PipelineRepository for Database {
         key: &str,
         expected: Option<DateTime<Utc>>,
         cursor: DateTime<Utc>,
+        metrics: ScheduleScanMetrics,
         completed_at: DateTime<Utc>,
     ) -> Result<bool, PortError> {
         let mut transaction = self
@@ -1311,13 +1425,21 @@ impl PipelineRepository for Database {
             .map_err(|_| PortError::Unavailable)?;
         let advanced = sqlx::query(
             "UPDATE schedule_reconciliation_states \
-             SET cursor = $3, updated_at = $4, last_success_at = $4, last_failure = NULL \
-             WHERE tenant_id = $1 AND key = $2 AND cursor IS NOT DISTINCT FROM $5",
+             SET cursor = $3, updated_at = $4, last_success_at = $4, last_failure = NULL, \
+                 last_duration_ms = $5, last_outcome = 'success', last_scanned_minutes = $6, \
+                 last_due_occurrences = $7, last_pipeline_count = $8, \
+                 last_truncated_minutes = $9 \
+             WHERE tenant_id = $1 AND key = $2 AND cursor IS NOT DISTINCT FROM $10",
         )
         .bind(tenant_id)
         .bind(key)
         .bind(cursor)
         .bind(completed_at)
+        .bind(metrics.duration_ms)
+        .bind(i32::try_from(metrics.scanned_minutes).map_err(|_| PortError::InvalidData)?)
+        .bind(i32::try_from(metrics.due_occurrences).map_err(|_| PortError::InvalidData)?)
+        .bind(i32::try_from(metrics.pipelines).map_err(|_| PortError::InvalidData)?)
+        .bind(i64::try_from(metrics.truncated_minutes).map_err(|_| PortError::InvalidData)?)
         .bind(expected)
         .execute(&mut *transaction)
         .await
@@ -1336,6 +1458,7 @@ impl PipelineRepository for Database {
         tenant_id: &str,
         key: &str,
         failure: &str,
+        duration_ms: i64,
         failed_at: DateTime<Utc>,
     ) -> Result<(), PortError> {
         let failure = failure.chars().take(255).collect::<String>();
@@ -1345,13 +1468,15 @@ impl PipelineRepository for Database {
             .map_err(|_| PortError::Unavailable)?;
         sqlx::query(
             "UPDATE schedule_reconciliation_states \
-             SET updated_at = $3, last_failure = $4 \
+             SET updated_at = $3, last_failure = $4, last_duration_ms = $5, \
+                 last_outcome = 'failure' \
              WHERE tenant_id = $1 AND key = $2",
         )
         .bind(tenant_id)
         .bind(key)
         .bind(failed_at)
         .bind(failure)
+        .bind(duration_ms)
         .execute(&mut *transaction)
         .await
         .map_err(|_| PortError::Unavailable)?;
@@ -1748,6 +1873,15 @@ impl PipelineRepository for Database {
                'durable_available', (SELECT COUNT(*) FROM durable_jobs WHERE tenant_id = $1 AND status = 'available'), \
                'durable_executing', (SELECT COUNT(*) FROM durable_jobs WHERE tenant_id = $1 AND status = 'executing'), \
                'durable_discarded', (SELECT COUNT(*) FROM durable_jobs WHERE tenant_id = $1 AND status = 'discarded'), \
+               'projection_pending', (SELECT COUNT(*) FROM durable_jobs WHERE tenant_id = $1 AND kind = 'project_status' AND status IN ('available', 'retry', 'executing')), \
+               'projection_discarded', (SELECT COUNT(*) FROM durable_jobs WHERE tenant_id = $1 AND kind = 'project_status' AND status = 'discarded'), \
+               'schedule_cursor_age_seconds', COALESCE((SELECT GREATEST(0, EXTRACT(EPOCH FROM (NOW() - cursor)))::bigint FROM schedule_reconciliation_states WHERE tenant_id = $1 AND key = 'scheduled-workflows:v1'), 0), \
+               'schedule_last_duration_ms', COALESCE((SELECT last_duration_ms FROM schedule_reconciliation_states WHERE tenant_id = $1 AND key = 'scheduled-workflows:v1'), 0), \
+               'schedule_last_scanned_minutes', COALESCE((SELECT last_scanned_minutes FROM schedule_reconciliation_states WHERE tenant_id = $1 AND key = 'scheduled-workflows:v1'), 0), \
+               'schedule_last_due_occurrences', COALESCE((SELECT last_due_occurrences FROM schedule_reconciliation_states WHERE tenant_id = $1 AND key = 'scheduled-workflows:v1'), 0), \
+               'schedule_last_pipeline_count', COALESCE((SELECT last_pipeline_count FROM schedule_reconciliation_states WHERE tenant_id = $1 AND key = 'scheduled-workflows:v1'), 0), \
+               'schedule_last_truncated_minutes', COALESCE((SELECT last_truncated_minutes FROM schedule_reconciliation_states WHERE tenant_id = $1 AND key = 'scheduled-workflows:v1'), 0), \
+               'schedule_last_failure', COALESCE((SELECT CASE WHEN last_outcome = 'failure' THEN 1 ELSE 0 END FROM schedule_reconciliation_states WHERE tenant_id = $1 AND key = 'scheduled-workflows:v1'), 0), \
                'runners_online', (SELECT COUNT(*) FROM remote_runners WHERE tenant_id = $1 AND admin_state != 'revoked' AND last_seen_at >= NOW() - INTERVAL '60 seconds'), \
                'runners_offline', (SELECT COUNT(*) FROM remote_runners WHERE tenant_id = $1 AND admin_state != 'revoked' AND (last_seen_at IS NULL OR last_seen_at < NOW() - INTERVAL '60 seconds')) \
              )",
@@ -2975,15 +3109,7 @@ impl PipelineRepository for Database {
         now: DateTime<Utc>,
         stale_before: DateTime<Utc>,
     ) -> Result<Option<DurableJobClaim>, PortError> {
-        claim_durable_job(
-            self,
-            tenant_id,
-            "project_status",
-            claim_token,
-            now,
-            stale_before,
-        )
-        .await
+        claim_status_projection_job(self, tenant_id, claim_token, now, stale_before).await
     }
 
     #[allow(clippy::too_many_lines)]
@@ -2998,11 +3124,14 @@ impl PipelineRepository for Database {
             .map_err(|_| PortError::Unavailable)?;
         let pipeline = sqlx::query_as::<_, ProjectionPipelineRow>(
             "SELECT pipeline.repository_id, pipeline.workflow_name, pipeline.commit_sha, \
-                    pipeline.status, check.provider_check_id \
+                    pipeline.status, projected.provider_check_id \
              FROM pipelines AS pipeline \
-             LEFT JOIN github_checks AS check ON check.tenant_id = pipeline.tenant_id \
-               AND check.external_key = CONCAT('pipeline:', pipeline.id::text) \
-               AND check.provider = 'github' \
+             JOIN github_repositories AS repository ON repository.id = pipeline.repository_id \
+               AND repository.tenant_id = pipeline.tenant_id \
+             LEFT JOIN github_checks AS projected ON projected.tenant_id = pipeline.tenant_id \
+               AND projected.external_key = CONCAT('pipeline:', pipeline.id::text) \
+               AND projected.provider = 'github' \
+               AND projected.provider_instance = repository.provider_instance \
              WHERE pipeline.id = $1 AND pipeline.tenant_id = $2",
         )
         .bind(pipeline_id)
@@ -3012,11 +3141,16 @@ impl PipelineRepository for Database {
         .map_err(|_| PortError::Unavailable)?
         .ok_or(PortError::NotFound)?;
         let jobs = sqlx::query_as::<_, ProjectionJobRow>(
-            "SELECT job.id, job.job_key, job.status, check.provider_check_id \
+            "SELECT job.id, job.job_key, job.status, projected.provider_check_id \
              FROM pipeline_jobs AS job \
-             LEFT JOIN github_checks AS check ON check.tenant_id = job.tenant_id \
-               AND check.external_key = CONCAT('job:', job.id::text) \
-               AND check.provider = 'github' \
+             JOIN pipelines AS pipeline ON pipeline.id = job.pipeline_id \
+               AND pipeline.tenant_id = job.tenant_id \
+             JOIN github_repositories AS repository ON repository.id = pipeline.repository_id \
+               AND repository.tenant_id = pipeline.tenant_id \
+             LEFT JOIN github_checks AS projected ON projected.tenant_id = job.tenant_id \
+               AND projected.external_key = CONCAT('job:', job.id::text) \
+               AND projected.provider = 'github' \
+               AND projected.provider_instance = repository.provider_instance \
              WHERE job.pipeline_id = $1 AND job.tenant_id = $2 ORDER BY job.position, job.id",
         )
         .bind(pipeline_id)
@@ -3098,6 +3232,63 @@ impl PipelineRepository for Database {
             .commit()
             .await
             .map_err(|_| PortError::Unavailable)
+    }
+
+    async fn reconcile_status_projection_jobs(
+        &self,
+        tenant_id: &str,
+        limit: i64,
+        now: DateTime<Utc>,
+    ) -> Result<u64, PortError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        let pipeline_ids = sqlx::query_scalar::<_, Uuid>(
+            "SELECT pipeline.id FROM pipelines AS pipeline \
+             JOIN github_repositories AS repository ON repository.id = pipeline.repository_id \
+               AND repository.tenant_id = pipeline.tenant_id AND repository.provider = 'github' \
+               AND repository.trusted = TRUE \
+             WHERE pipeline.tenant_id = $1 \
+               AND (pipeline.status IN ('created', 'queued', 'running', 'cancelling') \
+                 OR pipeline.inserted_at >= $2 - INTERVAL '30 days') \
+             ORDER BY pipeline.inserted_at DESC, pipeline.id LIMIT $3",
+        )
+        .bind(tenant_id)
+        .bind(now)
+        .bind(limit.clamp(1, 1_000))
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(|_| PortError::Unavailable)?;
+        let hour = now.timestamp().div_euclid(3_600);
+        let mut inserted = 0_u64;
+        for pipeline_id in pipeline_ids {
+            let identity = format!("status-reconcile\0{tenant_id}\0{pipeline_id}\0{hour}");
+            let digest = Sha256::digest(identity.as_bytes());
+            let mut bytes = [0_u8; 16];
+            bytes.copy_from_slice(&digest[..16]);
+            inserted += sqlx::query(
+                "INSERT INTO durable_jobs \
+                 (id, source_event_id, kind, payload, status, attempts, available_at, \
+                  inserted_at, updated_at, tenant_id) \
+                 VALUES ($1, $2, 'project_status', $3, 'available', 0, $4, $4, $4, $5) \
+                 ON CONFLICT (tenant_id, source_event_id, kind) DO NOTHING",
+            )
+            .bind(Uuid::new_v4())
+            .bind(Uuid::from_bytes(bytes))
+            .bind(serde_json::json!({"pipeline_id": pipeline_id}))
+            .bind(now)
+            .bind(tenant_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| PortError::Unavailable)?
+            .rows_affected();
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        Ok(inserted)
     }
 
     async fn local_execution_work(
@@ -3411,6 +3602,58 @@ async fn claim_durable_job(
     )
     .bind(tenant_id)
     .bind(kind)
+    .bind(now)
+    .bind(stale_before)
+    .bind(claim_token)
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(|_| PortError::Unavailable)?;
+    transaction
+        .commit()
+        .await
+        .map_err(|_| PortError::Unavailable)?;
+    Ok(claimed.map(|job| DurableJobClaim {
+        id: job.id,
+        source_event_id: job.source_event_id,
+        kind: job.kind,
+        payload: job.payload,
+        claim_token: job.claim_token,
+        attempt: job.attempts,
+    }))
+}
+
+async fn claim_status_projection_job(
+    database: &Database,
+    tenant_id: &str,
+    claim_token: Uuid,
+    now: DateTime<Utc>,
+    stale_before: DateTime<Utc>,
+) -> Result<Option<DurableJobClaim>, PortError> {
+    let mut transaction = database
+        .tenant_transaction(tenant_id)
+        .await
+        .map_err(|_| PortError::Unavailable)?;
+    let claimed = sqlx::query_as::<_, DurableJobRow>(
+        "WITH candidate AS ( \
+           SELECT pending.id FROM durable_jobs AS pending \
+           WHERE pending.tenant_id = $1 AND pending.kind = 'project_status' \
+             AND ((pending.status IN ('available', 'retry') AND pending.available_at <= $2) \
+               OR (pending.status = 'executing' AND pending.claimed_at < $3)) \
+             AND NOT EXISTS ( \
+               SELECT 1 FROM durable_jobs AS active \
+               WHERE active.tenant_id = pending.tenant_id AND active.kind = pending.kind \
+                 AND active.id <> pending.id AND active.status = 'executing' \
+                 AND active.claimed_at >= $3 \
+                 AND active.payload->>'pipeline_id' = pending.payload->>'pipeline_id') \
+           ORDER BY pending.available_at, pending.inserted_at, pending.id \
+           LIMIT 1 FOR UPDATE SKIP LOCKED \
+         ) UPDATE durable_jobs AS job SET status = 'executing', attempts = attempts + 1, \
+             claimed_at = $2, claim_token = $4, updated_at = $2 \
+         FROM candidate WHERE job.id = candidate.id AND job.tenant_id = $1 \
+         RETURNING job.id, job.source_event_id, job.kind, job.payload, \
+                   job.claim_token, job.attempts",
+    )
+    .bind(tenant_id)
     .bind(now)
     .bind(stale_before)
     .bind(claim_token)
@@ -4649,6 +4892,24 @@ struct SecretRow {
     nonce: Vec<u8>,
     tag: Vec<u8>,
     key_version: i32,
+}
+
+fn secret_from_row(row: SecretRow) -> Result<EncryptedSecret, SecretError> {
+    Ok(EncryptedSecret {
+        id: row.id,
+        name: row.name,
+        scope: match row.scope.as_str() {
+            "repository" => SecretScope::Repository,
+            "instance" => SecretScope::Instance,
+            _ => return Err(SecretError::InvalidCiphertext),
+        },
+        repository_id: row.repository_id,
+        allowed_repository_ids: row.allowed_repository_ids,
+        ciphertext: row.ciphertext,
+        nonce: row.nonce,
+        tag: row.tag,
+        key_version: row.key_version,
+    })
 }
 
 impl AttemptEventRow {

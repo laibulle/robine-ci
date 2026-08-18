@@ -164,6 +164,121 @@ async fn repository_secrets_are_encrypted_upserted_and_listed_with_audit() {
     cleanup.commit().await.expect("commit cleanup");
 }
 
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn interrupted_secret_rotation_resumes_with_mixed_version_reads_and_atomic_audit() {
+    let Ok(database_url) = std::env::var("ROBINE_DATABASE_INTEGRATION_URL") else {
+        return;
+    };
+    let database = Arc::new(
+        Database::connect(&database_url, 2)
+            .await
+            .expect("connect migrated database"),
+    );
+    let tenant = format!("rust-secret-rotation-{}", Uuid::new_v4());
+    let repository_id = Uuid::new_v4();
+    let administrator = User {
+        id: Uuid::new_v4(),
+        email: "rotation@example.invalid".into(),
+        role: Role::Administrator,
+        disabled: false,
+        inserted_at: Utc::now(),
+    };
+    let old_keyring = AesGcmKeyring::from_encoded(
+        Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="),
+        None,
+        1,
+    )
+    .expect("old keyring");
+    let rotating_keyring = Arc::new(
+        AesGcmKeyring::from_encoded(
+            None,
+            Some(
+                r#"{"1":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=","2":"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="}"#,
+            ),
+            2,
+        )
+        .expect("rotating keyring"),
+    );
+    for (name, value) in [
+        ("FIRST", b"first-secret".as_slice()),
+        ("SECOND", b"second-secret".as_slice()),
+    ] {
+        let secret = old_keyring
+            .encrypt_repository(repository_id, name.into(), value)
+            .expect("encrypt old secret");
+        SecretRepository::upsert_repository(&*database, &tenant, administrator.id, &secret)
+            .await
+            .expect("store old secret");
+    }
+    let control_plane = ControlPlane::new(database.clone(), database.clone())
+        .with_secret_runtime(database.clone(), rotating_keyring.clone());
+    let first = control_plane
+        .rotate_secrets(&tenant, &administrator, None, 1)
+        .await
+        .expect("first rotation batch");
+    assert_eq!(first.rotated, 1);
+    assert!(!first.complete);
+    let mixed = SecretRepository::list_repository(&*database, &tenant, repository_id)
+        .await
+        .expect("mixed version read");
+    assert_eq!(
+        mixed
+            .iter()
+            .filter(|secret| secret.key_version == 2)
+            .count(),
+        1
+    );
+    for secret in &mixed {
+        rotating_keyring
+            .decrypt(secret)
+            .expect("decrypt mixed secret");
+    }
+    let second = control_plane
+        .rotate_secrets(&tenant, &administrator, first.next_cursor, 1)
+        .await
+        .expect("resumed rotation batch");
+    assert_eq!(second.rotated, 1);
+    let finished = control_plane
+        .rotate_secrets(&tenant, &administrator, second.next_cursor, 1)
+        .await
+        .expect("finish rotation");
+    assert!(finished.complete);
+    assert_eq!(finished.rotated, 0);
+
+    let mut verification = database
+        .tenant_transaction(&tenant)
+        .await
+        .expect("rotation verification");
+    let versions = sqlx::query_scalar::<_, i32>(
+        "SELECT key_version FROM secrets WHERE tenant_id = $1 ORDER BY id",
+    )
+    .bind(&tenant)
+    .fetch_all(&mut *verification)
+    .await
+    .expect("rotated versions");
+    assert_eq!(versions, vec![2, 2]);
+    let audits = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM audit_events WHERE tenant_id = $1 AND action = 'secret.key_rotated'",
+    )
+    .bind(&tenant)
+    .fetch_one(&mut *verification)
+    .await
+    .expect("rotation audits");
+    assert_eq!(audits, 2);
+    sqlx::query("DELETE FROM audit_events WHERE tenant_id = $1")
+        .bind(&tenant)
+        .execute(&mut *verification)
+        .await
+        .expect("delete audits");
+    sqlx::query("DELETE FROM secrets WHERE tenant_id = $1")
+        .bind(&tenant)
+        .execute(&mut *verification)
+        .await
+        .expect("delete secrets");
+    verification.commit().await.expect("commit cleanup");
+}
+
 #[async_trait]
 impl ArchiveFetcher for WorkflowArchive {
     async fn fetch_archive(
@@ -425,6 +540,98 @@ async fn scheduled_reconciliation_is_exact_sha_durable_and_idempotent() {
         .expect("project GitHub checks");
     assert!(projected.projected >= 1);
 
+    let mut projection_setup = database
+        .tenant_transaction("standalone")
+        .await
+        .expect("projection serialization setup");
+    let projection_pipeline_id =
+        sqlx::query_scalar::<_, Uuid>("SELECT id FROM pipelines WHERE repository_id = $1")
+            .bind(repository_id)
+            .fetch_one(&mut *projection_setup)
+            .await
+            .expect("projection pipeline ID");
+    for source_event_id in [Uuid::new_v4(), Uuid::new_v4()] {
+        sqlx::query(
+            "INSERT INTO durable_jobs (id, source_event_id, kind, payload, status, attempts, available_at, inserted_at, updated_at, tenant_id) \
+             VALUES ($1, $2, 'project_status', $3, 'available', 0, $4, $4, $4, 'standalone')",
+        )
+        .bind(Uuid::new_v4())
+        .bind(source_event_id)
+        .bind(serde_json::json!({"pipeline_id": projection_pipeline_id}))
+        .bind(Utc::now())
+        .execute(&mut *projection_setup)
+        .await
+        .expect("insert projection job");
+    }
+    projection_setup
+        .commit()
+        .await
+        .expect("commit projection jobs");
+    let claim_time = Utc::now();
+    let first_claim = database
+        .claim_next_status_projection_job(
+            "standalone",
+            Uuid::new_v4(),
+            claim_time,
+            claim_time - Duration::minutes(5),
+        )
+        .await
+        .expect("claim first serialized projection")
+        .expect("first projection present");
+    assert!(
+        database
+            .claim_next_status_projection_job(
+                "standalone",
+                Uuid::new_v4(),
+                claim_time,
+                claim_time - Duration::minutes(5),
+            )
+            .await
+            .expect("attempt concurrent projection")
+            .is_none()
+    );
+    database
+        .complete_durable_job(
+            "standalone",
+            first_claim.id,
+            first_claim.claim_token,
+            Utc::now(),
+        )
+        .await
+        .expect("complete first projection");
+    let second_claim = database
+        .claim_next_status_projection_job(
+            "standalone",
+            Uuid::new_v4(),
+            Utc::now(),
+            Utc::now() - Duration::minutes(5),
+        )
+        .await
+        .expect("claim second serialized projection")
+        .expect("second projection present");
+    database
+        .complete_durable_job(
+            "standalone",
+            second_claim.id,
+            second_claim.claim_token,
+            Utc::now(),
+        )
+        .await
+        .expect("complete second projection");
+    let repair_time = Utc::now();
+    let repairs = database
+        .reconcile_status_projection_jobs("standalone", 1_000, repair_time)
+        .await
+        .expect("enqueue repair projections");
+    assert!(repairs >= 1);
+    assert_eq!(
+        database
+            .reconcile_status_projection_jobs("standalone", 1_000, repair_time)
+            .await
+            .expect("repeat repair reconciliation"),
+        0
+    );
+
     let mut verification = database
         .tenant_transaction("standalone")
         .await
@@ -455,6 +662,21 @@ async fn scheduled_reconciliation_is_exact_sha_durable_and_idempotent() {
     .await
     .expect("schedule audit");
     assert_eq!(audit, 1);
+    let schedule_metrics = sqlx::query_as::<_, (String, i32, i32, i32, i64, i64)>(
+        "SELECT last_outcome, last_scanned_minutes, last_due_occurrences, \
+                last_pipeline_count, last_truncated_minutes, last_duration_ms \
+         FROM schedule_reconciliation_states \
+         WHERE tenant_id = 'standalone' AND key = 'scheduled-workflows:v1'",
+    )
+    .fetch_one(&mut *verification)
+    .await
+    .expect("scheduler metrics");
+    assert_eq!(schedule_metrics.0, "success");
+    assert_eq!(schedule_metrics.1, 1);
+    assert_eq!(schedule_metrics.2, 1);
+    assert_eq!(schedule_metrics.3, 1);
+    assert_eq!(schedule_metrics.4, 0);
+    assert!(schedule_metrics.5 >= 0);
     let checks = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM github_checks WHERE pipeline_id = $1 AND provider = 'github'",
     )

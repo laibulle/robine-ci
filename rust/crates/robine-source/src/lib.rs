@@ -120,10 +120,14 @@ pub struct HttpArchiveFetcher {
     github_app_id: Option<String>,
     github_private_key: Option<Zeroizing<String>>,
     public_url: String,
+    github_tokens:
+        tokio::sync::Mutex<std::collections::HashMap<i64, (String, chrono::DateTime<chrono::Utc>)>>,
     gitlab_origin: Option<String>,
     gitlab_token: Option<Zeroizing<String>>,
     forgejo_origin: Option<String>,
     forgejo_token: Option<Zeroizing<String>>,
+    #[cfg(test)]
+    github_token_override: Option<String>,
 }
 
 impl HttpArchiveFetcher {
@@ -154,14 +158,39 @@ impl HttpArchiveFetcher {
             github_app_id,
             github_private_key: github_private_key.map(Zeroizing::new),
             public_url: normalize_public_url(public_url)?,
+            github_tokens: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             gitlab_origin: normalize_origin(gitlab_origin)?,
             gitlab_token: gitlab_token.map(Zeroizing::new),
             forgejo_origin: normalize_origin(forgejo_origin)?,
             forgejo_token: forgejo_token.map(Zeroizing::new),
+            #[cfg(test)]
+            github_token_override: None,
         })
     }
 
+    #[cfg(test)]
+    fn with_github_test_endpoint(mut self, origin: String, token: &str) -> Self {
+        self.github_api_origin = origin;
+        self.github_token_override = Some(token.into());
+        self
+    }
+
     async fn github_token(&self, installation_id: i64) -> Result<String, SourceError> {
+        #[cfg(test)]
+        if let Some(token) = &self.github_token_override {
+            return Ok(token.clone());
+        }
+        if let Some((token, _expires_at)) = self
+            .github_tokens
+            .lock()
+            .await
+            .get(&installation_id)
+            .filter(|(_, expires_at)| {
+                *expires_at > chrono::Utc::now() + chrono::Duration::minutes(1)
+            })
+        {
+            return Ok(token.clone());
+        }
         let app_id = self
             .github_app_id
             .as_deref()
@@ -196,11 +225,14 @@ impl HttpArchiveFetcher {
         if !response.status().is_success() {
             return Err(SourceError::ProviderUnavailable);
         }
-        response
-            .json::<GitHubToken>()
+        let token = self
+            .bounded_json_response::<GitHubToken>(response, 65_536)
+            .await?;
+        self.github_tokens
+            .lock()
             .await
-            .map(|body| body.token)
-            .map_err(|_| SourceError::ProviderUnavailable)
+            .insert(installation_id, (token.token.clone(), token.expires_at));
+        Ok(token.token)
     }
 
     async fn bounded_body(&self, mut response: reqwest::Response) -> Result<Vec<u8>, SourceError> {
@@ -223,6 +255,31 @@ impl HttpArchiveFetcher {
             body.extend_from_slice(&chunk);
         }
         Ok(body)
+    }
+
+    async fn bounded_json_response<T: serde::de::DeserializeOwned>(
+        &self,
+        mut response: reqwest::Response,
+        maximum: usize,
+    ) -> Result<T, SourceError> {
+        if response
+            .content_length()
+            .is_some_and(|length| length > u64::try_from(maximum).unwrap_or(u64::MAX))
+        {
+            return Err(SourceError::ProviderUnavailable);
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .map_err(|_| SourceError::ProviderUnavailable)?
+        {
+            if body.len().saturating_add(chunk.len()) > maximum {
+                return Err(SourceError::ProviderUnavailable);
+            }
+            body.extend_from_slice(&chunk);
+        }
+        serde_json::from_slice(&body).map_err(|_| SourceError::ProviderUnavailable)
     }
 
     async fn github_archive_response(
@@ -322,35 +379,45 @@ impl StatusProjector for HttpArchiveFetcher {
         );
         let mut provider_check_id = projection.provider_check_id;
         if provider_check_id.is_none() {
-            let response = self
-                .client
-                .get(format!(
-                    "{}{repository_path}/commits/{}/check-runs?per_page=100",
+            for page in 1..=10_u8 {
+                let mut url = reqwest::Url::parse(&format!(
+                    "{}{repository_path}/commits/{}/check-runs",
                     self.github_api_origin,
                     segment(&projection.head_sha)
                 ))
-                .bearer_auth(&token)
-                .header("accept", "application/vnd.github+json")
-                .header("x-github-api-version", "2022-11-28")
-                .send()
-                .await
                 .map_err(|_| SourceError::ProviderUnavailable)?;
-            if !response.status().is_success() {
-                return Err(SourceError::ProviderUnavailable);
+                url.query_pairs_mut()
+                    .append_pair("per_page", "100")
+                    .append_pair("page", &page.to_string())
+                    .append_pair("check_name", &projection.name);
+                let response = self
+                    .client
+                    .get(url)
+                    .bearer_auth(&token)
+                    .header("accept", "application/vnd.github+json")
+                    .header("x-github-api-version", "2022-11-28")
+                    .send()
+                    .await
+                    .map_err(|_| SourceError::ProviderUnavailable)?;
+                if !response.status().is_success() {
+                    return Err(SourceError::ProviderUnavailable);
+                }
+                let checks = self
+                    .bounded_json_response::<GitHubCheckRuns>(response, 1_048_576)
+                    .await?;
+                let exhausted = checks.check_runs.len() < 100;
+                provider_check_id = checks
+                    .check_runs
+                    .into_iter()
+                    .find(|check| check.external_id.as_deref() == Some(&projection.external_key))
+                    .map(|check| check.id);
+                if provider_check_id.is_some() || exhausted {
+                    break;
+                }
             }
-            let checks = response
-                .json::<GitHubCheckRuns>()
-                .await
-                .map_err(|_| SourceError::ProviderUnavailable)?;
-            provider_check_id = checks
-                .check_runs
-                .into_iter()
-                .find(|check| check.external_id.as_deref() == Some(&projection.external_key))
-                .map(|check| check.id);
         }
         let mut body = serde_json::json!({
             "name": projection.name,
-            "head_sha": projection.head_sha,
             "external_id": projection.external_key,
             "details_url": format!("{}{}", self.public_url, projection.details_path),
             "status": projection.status,
@@ -361,6 +428,9 @@ impl StatusProjector for HttpArchiveFetcher {
         });
         if let Some(conclusion) = &projection.conclusion {
             body["conclusion"] = serde_json::json!(conclusion);
+        }
+        if provider_check_id.is_none() {
+            body["head_sha"] = serde_json::json!(projection.head_sha);
         }
         let request = provider_check_id.map_or_else(
             || {
@@ -387,11 +457,9 @@ impl StatusProjector for HttpArchiveFetcher {
         if !response.status().is_success() {
             return Err(SourceError::ProviderUnavailable);
         }
-        response
-            .json::<GitHubCheckRun>()
+        self.bounded_json_response::<GitHubCheckRun>(response, 65_536)
             .await
             .map(|check| check.id)
-            .map_err(|_| SourceError::ProviderUnavailable)
     }
 }
 
@@ -659,6 +727,7 @@ struct GitHubClaims<'a> {
 #[derive(Deserialize)]
 struct GitHubToken {
     token: String,
+    expires_at: chrono::DateTime<chrono::Utc>,
 }
 
 fn segment(value: &str) -> impl std::fmt::Display + '_ {
@@ -1066,6 +1135,123 @@ fn read_entry(
 mod tests {
     use super::*;
     use flate2::{Compression, write::GzEncoder};
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{body_partial_json, header, method, path},
+    };
+
+    #[tokio::test]
+    async fn github_projection_recovers_an_existing_external_key_and_patches_it() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/repos/acme/widget/commits/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/check-runs",
+            ))
+            .and(header("authorization", "Bearer test-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "check_runs": [{"id": 42, "external_id": "pipeline:one"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/repos/acme/widget/check-runs/42"))
+            .and(body_partial_json(serde_json::json!({
+                "external_id": "pipeline:one",
+                "status": "completed",
+                "conclusion": "success",
+                "details_url": "http://localhost:4000/pipelines/one"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": 42})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let projector =
+            HttpArchiveFetcher::new(None, None, None, None, None, None, "http://localhost:4000")
+                .expect("projector")
+                .with_github_test_endpoint(server.uri(), "test-token");
+        let repository = Repository {
+            id: Uuid::new_v4(),
+            provider: Provider::GitHub,
+            provider_instance: "default".into(),
+            installation_id: 7,
+            owner: "acme".into(),
+            name: "widget".into(),
+            full_name: "acme/widget".into(),
+        };
+        let check_id = projector
+            .upsert_status(
+                &repository,
+                &StatusProjection {
+                    external_key: "pipeline:one".into(),
+                    name: "Robine / CI".into(),
+                    head_sha: "a".repeat(40),
+                    status: "completed".into(),
+                    conclusion: Some("success".into()),
+                    details_path: "/pipelines/one".into(),
+                    provider_check_id: None,
+                },
+            )
+            .await
+            .expect("update check");
+        assert_eq!(check_id, 42);
+    }
+
+    #[tokio::test]
+    async fn github_projection_creates_a_missing_check_with_the_exact_sha() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/repos/acme/widget/commits/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/check-runs",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"check_runs": []})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/repos/acme/widget/check-runs"))
+            .and(body_partial_json(serde_json::json!({
+                "head_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "external_id": "job:one",
+                "status": "queued"
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 84})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let projector =
+            HttpArchiveFetcher::new(None, None, None, None, None, None, "http://localhost:4000")
+                .expect("projector")
+                .with_github_test_endpoint(server.uri(), "test-token");
+        let repository = Repository {
+            id: Uuid::new_v4(),
+            provider: Provider::GitHub,
+            provider_instance: "default".into(),
+            installation_id: 7,
+            owner: "acme".into(),
+            name: "widget".into(),
+            full_name: "acme/widget".into(),
+        };
+        assert_eq!(
+            projector
+                .upsert_status(
+                    &repository,
+                    &StatusProjection {
+                        external_key: "job:one".into(),
+                        name: "Robine / test".into(),
+                        head_sha: "b".repeat(40),
+                        status: "queued".into(),
+                        conclusion: None,
+                        details_path: "/pipelines/one/jobs/one".into(),
+                        provider_check_id: None,
+                    },
+                )
+                .await
+                .expect("create check"),
+            84
+        );
+    }
 
     fn archive(entries: &[(&str, EntryType, &[u8])]) -> Vec<u8> {
         let gzip = GzEncoder::new(Vec::new(), Compression::default());

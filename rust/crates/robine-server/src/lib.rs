@@ -1748,7 +1748,7 @@ async fn metrics(request: HttpRequest, state: web::Data<AppState>) -> HttpRespon
             .unwrap_or(0)
     };
     let body = format!(
-        "# HELP robine_up Whether the Rust control plane is serving.\n# TYPE robine_up gauge\nrobine_up 1\n# HELP robine_pipelines Current pipelines by lifecycle bucket.\n# TYPE robine_pipelines gauge\nrobine_pipelines{{status=\"created\"}} {}\nrobine_pipelines{{status=\"queued\"}} {}\nrobine_pipelines{{status=\"running\"}} {}\n# HELP robine_outbox_events Durable outbox events by state.\n# TYPE robine_outbox_events gauge\nrobine_outbox_events{{status=\"pending\"}} {}\nrobine_outbox_events{{status=\"dead_lettered\"}} {}\n# HELP robine_durable_jobs Durable jobs by state.\n# TYPE robine_durable_jobs gauge\nrobine_durable_jobs{{status=\"available\"}} {}\nrobine_durable_jobs{{status=\"executing\"}} {}\nrobine_durable_jobs{{status=\"discarded\"}} {}\n# HELP robine_runners Remote runners by connectivity.\n# TYPE robine_runners gauge\nrobine_runners{{connectivity=\"online\"}} {}\nrobine_runners{{connectivity=\"offline\"}} {}\n",
+        "# HELP robine_up Whether the Rust control plane is serving.\n# TYPE robine_up gauge\nrobine_up 1\n# HELP robine_pipelines Current pipelines by lifecycle bucket.\n# TYPE robine_pipelines gauge\nrobine_pipelines{{status=\"created\"}} {}\nrobine_pipelines{{status=\"queued\"}} {}\nrobine_pipelines{{status=\"running\"}} {}\n# HELP robine_outbox_events Durable outbox events by state.\n# TYPE robine_outbox_events gauge\nrobine_outbox_events{{status=\"pending\"}} {}\nrobine_outbox_events{{status=\"dead_lettered\"}} {}\n# HELP robine_durable_jobs Durable jobs by state.\n# TYPE robine_durable_jobs gauge\nrobine_durable_jobs{{status=\"available\"}} {}\nrobine_durable_jobs{{status=\"executing\"}} {}\nrobine_durable_jobs{{status=\"discarded\"}} {}\n# HELP robine_github_projection_jobs GitHub status projection jobs by state.\n# TYPE robine_github_projection_jobs gauge\nrobine_github_projection_jobs{{status=\"pending\"}} {}\nrobine_github_projection_jobs{{status=\"discarded\"}} {}\n# HELP robine_schedule_last_scan Last native scheduler scan measurements.\n# TYPE robine_schedule_last_scan gauge\nrobine_schedule_last_scan{{measure=\"duration_ms\"}} {}\nrobine_schedule_last_scan{{measure=\"scanned_minutes\"}} {}\nrobine_schedule_last_scan{{measure=\"due_occurrences\"}} {}\nrobine_schedule_last_scan{{measure=\"pipelines\"}} {}\nrobine_schedule_last_scan{{measure=\"truncated_minutes\"}} {}\nrobine_schedule_last_scan{{measure=\"failed\"}} {}\n# HELP robine_schedule_cursor_age_seconds Age of the durable UTC scheduler cursor.\n# TYPE robine_schedule_cursor_age_seconds gauge\nrobine_schedule_cursor_age_seconds {}\n# HELP robine_secret_rotation Secret key version and pending rotation records.\n# TYPE robine_secret_rotation gauge\nrobine_secret_rotation{{measure=\"target_version\"}} {}\nrobine_secret_rotation{{measure=\"pending\"}} {}\n# HELP robine_runners Remote runners by connectivity.\n# TYPE robine_runners gauge\nrobine_runners{{connectivity=\"online\"}} {}\nrobine_runners{{connectivity=\"offline\"}} {}\n",
         value("pipelines_created"),
         value("pipelines_queued"),
         value("pipelines_running"),
@@ -1757,6 +1757,17 @@ async fn metrics(request: HttpRequest, state: web::Data<AppState>) -> HttpRespon
         value("durable_available"),
         value("durable_executing"),
         value("durable_discarded"),
+        value("projection_pending"),
+        value("projection_discarded"),
+        value("schedule_last_duration_ms"),
+        value("schedule_last_scanned_minutes"),
+        value("schedule_last_due_occurrences"),
+        value("schedule_last_pipeline_count"),
+        value("schedule_last_truncated_minutes"),
+        value("schedule_last_failure"),
+        value("schedule_cursor_age_seconds"),
+        value("secret_key_version"),
+        value("secret_rotation_pending"),
         value("runners_online"),
         value("runners_offline")
     );
@@ -3085,6 +3096,38 @@ async fn list_users(request: HttpRequest, state: web::Data<AppState>) -> impl Re
 }
 
 #[derive(Deserialize)]
+struct RotateSecretsRequest {
+    cursor: Option<Uuid>,
+    limit: Option<i64>,
+}
+
+async fn rotate_secrets(
+    request: HttpRequest,
+    input: web::Json<RotateSecretsRequest>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let Ok(actor) = authenticated_user(&request, &state).await else {
+        return HttpResponse::Unauthorized().finish();
+    };
+    match state
+        .control_plane
+        .rotate_secrets(
+            "standalone",
+            &actor,
+            input.cursor,
+            input.limit.unwrap_or(100),
+        )
+        .await
+    {
+        Ok(rotation) => HttpResponse::Ok()
+            .insert_header((header::CACHE_CONTROL, "no-store"))
+            .json(rotation),
+        Err(ApplicationError::Forbidden) => HttpResponse::Forbidden().finish(),
+        Err(_) => HttpResponse::ServiceUnavailable().finish(),
+    }
+}
+
+#[derive(Deserialize)]
 struct ChangeRoleRequest {
     role: Role,
 }
@@ -3501,6 +3544,10 @@ pub fn configure(config: &mut web::ServiceConfig) {
         )
         .route("/api/v1/admin/users", web::get().to(list_users))
         .route(
+            "/api/v1/admin/secrets/rotate",
+            web::post().to(rotate_secrets),
+        )
+        .route(
             "/api/v1/admin/users/{user_id}/role",
             web::patch().to(change_user_role),
         )
@@ -3526,6 +3573,10 @@ mod tests {
     };
     use sha2::Sha256;
     use std::path::PathBuf;
+    use tokio_tungstenite::{
+        connect_async,
+        tungstenite::{Message, client::IntoClientRequest},
+    };
 
     use super::*;
 
@@ -3595,6 +3646,34 @@ mod tests {
             _secret: &EncryptedSecret,
         ) -> Result<(), SecretError> {
             Ok(())
+        }
+
+        async fn rotation_batch(
+            &self,
+            _tenant_id: &str,
+            _after: Option<Uuid>,
+            _target_version: i32,
+            _limit: i64,
+        ) -> Result<Vec<EncryptedSecret>, SecretError> {
+            Ok(Vec::new())
+        }
+
+        async fn rotate(
+            &self,
+            _tenant_id: &str,
+            _actor_id: Uuid,
+            _expected_version: i32,
+            _secret: &EncryptedSecret,
+        ) -> Result<bool, SecretError> {
+            Ok(true)
+        }
+
+        async fn rotation_pending(
+            &self,
+            _tenant_id: &str,
+            _target_version: i32,
+        ) -> Result<u64, SecretError> {
+            Ok(0)
         }
     }
 
@@ -3755,6 +3834,7 @@ mod tests {
             _key: &str,
             _expected: Option<DateTime<Utc>>,
             _cursor: DateTime<Utc>,
+            _metrics: robine_core::pipelines::ScheduleScanMetrics,
             _completed_at: DateTime<Utc>,
         ) -> Result<bool, PortError> {
             Ok(true)
@@ -3765,6 +3845,7 @@ mod tests {
             _tenant_id: &str,
             _key: &str,
             _failure: &str,
+            _duration_ms: i64,
             _failed_at: DateTime<Utc>,
         ) -> Result<(), PortError> {
             Ok(())
@@ -4090,6 +4171,15 @@ mod tests {
             Ok(())
         }
 
+        async fn reconcile_status_projection_jobs(
+            &self,
+            _tenant_id: &str,
+            _limit: i64,
+            _now: DateTime<Utc>,
+        ) -> Result<u64, PortError> {
+            Ok(0)
+        }
+
         async fn local_execution_work(
             &self,
             _tenant_id: &str,
@@ -4349,6 +4439,92 @@ mod tests {
     }
 
     #[actix_web::test]
+    async fn runner_websocket_negotiates_through_a_tcp_reverse_proxy() {
+        use futures_util::{SinkExt, StreamExt};
+
+        let upstream_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind upstream");
+        upstream_listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let upstream_address = upstream_listener.local_addr().expect("upstream address");
+        let app_state = state(true);
+        let server = actix_web::HttpServer::new(move || {
+            App::new().app_data(app_state.clone()).configure(configure)
+        })
+        .listen(upstream_listener)
+        .expect("listen upstream")
+        .run();
+        let server_handle = server.handle();
+        actix_web::rt::spawn(server);
+
+        let proxy_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind proxy");
+        let proxy_address = proxy_listener.local_addr().expect("proxy address");
+        let proxy = tokio::spawn(async move {
+            let (mut downstream, _) = proxy_listener.accept().await.expect("proxy accept");
+            let mut upstream = tokio::net::TcpStream::connect(upstream_address)
+                .await
+                .expect("proxy upstream");
+            tokio::io::copy_bidirectional(&mut downstream, &mut upstream)
+                .await
+                .expect("proxy websocket bytes");
+        });
+
+        let mut request = format!("ws://{proxy_address}/runner/socket/websocket?vsn=2.0.0")
+            .into_client_request()
+            .expect("websocket request");
+        request.headers_mut().insert(
+            "x-robine-runner-id",
+            Uuid::new_v4()
+                .to_string()
+                .parse()
+                .expect("runner ID header"),
+        );
+        request.headers_mut().insert(
+            "x-robine-runner-credential",
+            format!("rrc_{}", "a".repeat(43))
+                .parse()
+                .expect("credential header"),
+        );
+        let (mut socket, response) = connect_async(request).await.expect("proxy websocket");
+        assert_eq!(response.status(), 101);
+        socket
+            .send(Message::Text(
+                serde_json::json!([
+                    null,
+                    "1",
+                    RUNNER_TOPIC,
+                    "phx_join",
+                    {
+                        "supported_protocol_versions": [1],
+                        "software_version": "0.3.0",
+                        "capabilities": {"labels": ["linux"]},
+                        "active_attempt_ids": []
+                    }
+                ])
+                .to_string()
+                .into(),
+            ))
+            .await
+            .expect("send hello");
+        let reply = socket
+            .next()
+            .await
+            .expect("welcome frame")
+            .expect("welcome");
+        let body: serde_json::Value =
+            serde_json::from_str(reply.to_text().expect("text reply")).expect("welcome JSON");
+        assert_eq!(body[3], "phx_reply");
+        assert_eq!(body[4]["status"], "ok");
+        assert_eq!(body[4]["response"]["protocol_version"], 1);
+        socket.close(None).await.expect("close websocket");
+        server_handle.stop(true).await;
+        proxy.abort();
+        let _ = proxy.await;
+    }
+
+    #[actix_web::test]
     async fn liveness_route_matches_the_existing_contract() {
         let app = test::init_service(App::new().app_data(state(true)).configure(configure)).await;
         let request = test::TestRequest::get().uri("/health/live").to_request();
@@ -4499,6 +4675,43 @@ mod tests {
             .to_request();
         let response = test::call_service(&maintainer, request).await;
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    }
+
+    #[actix_web::test]
+    async fn secret_rotation_is_administrator_only_bounded_and_no_store() {
+        let admin_app = test::init_service(
+            App::new()
+                .app_data(state_with_role(true, Role::Administrator))
+                .configure(configure),
+        )
+        .await;
+        let request = test::TestRequest::post()
+            .uri("/api/v1/admin/secrets/rotate")
+            .insert_header(("authorization", "Bearer admin-session"))
+            .set_json(serde_json::json!({"limit": 1}))
+            .to_request();
+        let response = test::call_service(&admin_app, request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get(header::CACHE_CONTROL),
+            Some(&header::HeaderValue::from_static("no-store"))
+        );
+        let body: serde_json::Value = test::read_body_json(response).await;
+        assert_eq!(body["target_version"], 1);
+        assert_eq!(body["rotated"], 0);
+        assert_eq!(body["complete"], true);
+
+        let viewer_app =
+            test::init_service(App::new().app_data(state(true)).configure(configure)).await;
+        let forbidden = test::TestRequest::post()
+            .uri("/api/v1/admin/secrets/rotate")
+            .insert_header(("authorization", "Bearer viewer-session"))
+            .set_json(serde_json::json!({"limit": 1}))
+            .to_request();
+        assert_eq!(
+            test::call_service(&viewer_app, forbidden).await.status(),
+            StatusCode::FORBIDDEN
+        );
     }
 
     #[actix_web::test]

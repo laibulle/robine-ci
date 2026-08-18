@@ -398,6 +398,7 @@ async fn run_schedule_worker(
         tokio::select! {
             _ = interval.tick() => {
                 let _ = control_plane.reconcile_all_tenant_schedules(chrono::Utc::now()).await;
+                let _ = control_plane.reconcile_all_status_projection_jobs(100).await;
             }
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {

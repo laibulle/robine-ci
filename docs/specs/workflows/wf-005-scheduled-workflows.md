@@ -81,7 +81,7 @@ on:
 
 The workflow domain owns a `CronExpression` value object and a `Schedule` definition. Validation normalizes cron syntax without framework dependencies. The repository context owns a `ReconcileScheduledWorkflows` use case because it coordinates trusted repositories, exact-SHA GitHub reads, workflow validation, the Pipelines facade, and a repository-owned durable cursor port.
 
-The Oban adapter invokes the facade once per minute. The use case computes the bounded minute interval after the stored cursor, fetches each trusted repository once, evaluates every normalized schedule against every minute, and calls `Pipelines.create_pipeline/2` with a deterministic idempotency key. It advances the cursor with compare-and-set only after the complete scan succeeds.
+The shutdown-aware Tokio worker invokes the application service once per minute. The service computes the bounded minute interval after the SQLx-owned cursor, fetches each trusted repository once, evaluates every normalized schedule against every minute, and creates a pipeline through the application boundary with a deterministic idempotency key. It advances the cursor with compare-and-set only after the complete scan succeeds.
 
 ## Failure modes and recovery
 
@@ -109,7 +109,7 @@ Emit bounded reconciliation duration/outcome plus scanned, due, pipeline, and tr
 - [x] A due workflow creates one exact-SHA scheduled pipeline with its intended minute and ordinary jobs/outbox.
 - [x] Duplicate/concurrent scans create no duplicate pipeline and advance one durable cursor.
 - [x] GitHub or validation failure retains the cursor; bounded recovery later creates each missed occurrence once.
-- [x] Repository, pipeline, GitHub check, metrics, audit, architecture, release smoke, and full QA remain green (326 tests).
+- [x] Rust integration coverage proves repository, exact-SHA pipeline, GitHub check, metrics, audit, retained-failure, bounded-recovery, concurrent-claim, and idempotent-repeat behavior.
 
 ## Open questions
 

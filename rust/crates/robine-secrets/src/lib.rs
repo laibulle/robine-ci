@@ -70,6 +70,28 @@ pub trait SecretRepository: Send + Sync {
         actor_id: Uuid,
         secret: &EncryptedSecret,
     ) -> Result<(), SecretError>;
+
+    async fn rotation_batch(
+        &self,
+        tenant_id: &str,
+        after: Option<Uuid>,
+        target_version: i32,
+        limit: i64,
+    ) -> Result<Vec<EncryptedSecret>, SecretError>;
+
+    async fn rotate(
+        &self,
+        tenant_id: &str,
+        actor_id: Uuid,
+        expected_version: i32,
+        secret: &EncryptedSecret,
+    ) -> Result<bool, SecretError>;
+
+    async fn rotation_pending(
+        &self,
+        tenant_id: &str,
+        target_version: i32,
+    ) -> Result<u64, SecretError>;
 }
 
 pub trait SecretDecryptor: Send + Sync {
@@ -82,6 +104,11 @@ pub trait SecretDecryptor: Send + Sync {
 }
 
 impl AesGcmKeyring {
+    #[must_use]
+    pub fn current_version(&self) -> Option<i32> {
+        self.keys.last_key_value().map(|(version, _)| *version)
+    }
+
     /// Parses the legacy single-key or versioned-key environment representation.
     ///
     /// # Errors
@@ -187,6 +214,34 @@ impl AesGcmKeyring {
         secret.nonce = nonce.to_vec();
         secret.tag = tag.to_vec();
         Ok(secret)
+    }
+
+    /// Re-encrypts a record with the current key while preserving authenticated metadata.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an unreadable source record or unavailable current key.
+    pub fn reencrypt(&self, secret: &EncryptedSecret) -> Result<EncryptedSecret, SecretError> {
+        let plaintext = self.decrypt(secret)?;
+        let (&key_version, key) = self
+            .keys
+            .last_key_value()
+            .ok_or(SecretError::KeyUnavailable)?;
+        if secret.key_version == key_version {
+            return Ok(secret.clone());
+        }
+        let mut rotated = secret.clone();
+        rotated.key_version = key_version;
+        rotated.ciphertext = plaintext.to_vec();
+        let cipher =
+            Aes256Gcm::new_from_slice(key).map_err(|_| SecretError::InvalidConfiguration)?;
+        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let tag = cipher
+            .encrypt_in_place_detached(&nonce, &erlang_aad(&rotated), &mut rotated.ciphertext)
+            .map_err(|_| SecretError::AuthenticationFailed)?;
+        rotated.nonce = nonce.to_vec();
+        rotated.tag = tag.to_vec();
+        Ok(rotated)
     }
 }
 

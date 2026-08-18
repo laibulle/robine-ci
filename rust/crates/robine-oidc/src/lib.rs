@@ -17,7 +17,8 @@ use robine_core::{
 use tokio::sync::Mutex;
 
 pub struct OidcClient {
-    metadata: CoreProviderMetadata,
+    metadata: tokio::sync::RwLock<CoreProviderMetadata>,
+    issuer: IssuerUrl,
     client_id: String,
     client_secret: String,
     redirect_uri: String,
@@ -48,11 +49,12 @@ impl OidcClient {
             .build()
             .map_err(|_| PortError::Unavailable)?;
         let issuer = IssuerUrl::new(issuer.into()).map_err(|_| PortError::InvalidData)?;
-        let metadata = CoreProviderMetadata::discover_async(issuer, &http)
+        let metadata = CoreProviderMetadata::discover_async(issuer.clone(), &http)
             .await
             .map_err(|_| PortError::Unavailable)?;
         Ok(Self {
-            metadata,
+            metadata: tokio::sync::RwLock::new(metadata),
+            issuer,
             client_id,
             client_secret,
             redirect_uri,
@@ -65,8 +67,9 @@ impl OidcClient {
 #[async_trait]
 impl OidcProvider for OidcClient {
     async fn start(&self) -> Result<OidcAuthorization, PortError> {
+        let metadata = self.metadata.read().await.clone();
         let client = CoreClient::from_provider_metadata(
-            self.metadata.clone(),
+            metadata,
             ClientId::new(self.client_id.clone()),
             Some(ClientSecret::new(self.client_secret.clone())),
         )
@@ -115,8 +118,9 @@ impl OidcProvider for OidcClient {
             return Err(PortError::InvalidData);
         }
 
+        let metadata = self.metadata.read().await.clone();
         let client = CoreClient::from_provider_metadata(
-            self.metadata.clone(),
+            metadata,
             ClientId::new(self.client_id.clone()),
             Some(ClientSecret::new(self.client_secret.clone())),
         )
@@ -131,18 +135,43 @@ impl OidcProvider for OidcClient {
             .await
             .map_err(|_| PortError::Unavailable)?;
         let id_token = token_response.id_token().ok_or(PortError::InvalidData)?;
+        let nonce = Nonce::new(pending.nonce);
+        if let Ok(claims) = id_token.claims(&client.id_token_verifier(), &nonce) {
+            return oidc_claims(claims);
+        }
+        let refreshed = CoreProviderMetadata::discover_async(self.issuer.clone(), &self.http)
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        *self.metadata.write().await = refreshed.clone();
+        let refreshed_client = CoreClient::from_provider_metadata(
+            refreshed,
+            ClientId::new(self.client_id.clone()),
+            Some(ClientSecret::new(self.client_secret.clone())),
+        )
+        .set_redirect_uri(
+            RedirectUrl::new(self.redirect_uri.clone()).map_err(|_| PortError::InvalidData)?,
+        );
         let claims = id_token
-            .claims(&client.id_token_verifier(), &Nonce::new(pending.nonce))
+            .claims(&refreshed_client.id_token_verifier(), &nonce)
             .map_err(|_| PortError::InvalidData)?;
-        let email = claims.email().ok_or(PortError::InvalidData)?;
-
-        Ok(OidcClaims {
-            issuer: claims.issuer().to_string(),
-            subject: claims.subject().to_string(),
-            email: email.to_string(),
-            email_verified: claims.email_verified().unwrap_or(false),
-        })
+        oidc_claims(claims)
     }
+}
+
+fn oidc_claims<AC, GC>(
+    claims: &openidconnect::IdTokenClaims<AC, GC>,
+) -> Result<OidcClaims, PortError>
+where
+    AC: openidconnect::AdditionalClaims,
+    GC: openidconnect::GenderClaim,
+{
+    let email = claims.email().ok_or(PortError::InvalidData)?;
+    Ok(OidcClaims {
+        issuer: claims.issuer().to_string(),
+        subject: claims.subject().to_string(),
+        email: email.to_string(),
+        email_verified: claims.email_verified().unwrap_or(false),
+    })
 }
 
 fn random_secret() -> Result<String, PortError> {
@@ -260,5 +289,74 @@ mod tests {
 
         let replay = client.complete("valid-code", &authorization.state).await;
         assert!(matches!(replay, Err(PortError::InvalidData)));
+    }
+
+    #[tokio::test]
+    async fn signature_failure_refreshes_provider_keys_once_before_rejection() {
+        let server = MockServer::start().await;
+        let issuer = server.uri();
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "issuer": issuer,
+                "authorization_endpoint": format!("{issuer}/authorize"),
+                "token_endpoint": format!("{issuer}/token"),
+                "jwks_uri": format!("{issuer}/jwks"),
+                "response_types_supported": ["code"],
+                "subject_types_supported": ["public"],
+                "id_token_signing_alg_values_supported": ["HS256"]
+            })))
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"keys": []})))
+            .expect(2)
+            .mount(&server)
+            .await;
+        let client = OidcClient::discover(
+            &issuer,
+            "client".into(),
+            "secret".into(),
+            "https://robine.example/auth/oidc/callback".into(),
+        )
+        .await
+        .expect("discover provider");
+        let authorization = client.start().await.expect("start authorization");
+        let url = Url::parse(&authorization.url).expect("authorization URL");
+        let nonce = url
+            .query_pairs()
+            .find(|(name, _)| name == "nonce")
+            .map(|(_, value)| value.into_owned())
+            .expect("nonce");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time after epoch")
+            .as_secs();
+        let invalid_token = encode(
+            &Header::new(Algorithm::HS256),
+            &json!({
+                "iss": issuer, "sub": "subject-1", "aud": "client",
+                "exp": now + 300, "iat": now, "nonce": nonce,
+                "email": "dev@example.com", "email_verified": true
+            }),
+            &EncodingKey::from_secret(b"rotated-but-not-discovered"),
+        )
+        .expect("sign invalid token");
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "access-token",
+                "token_type": "Bearer",
+                "id_token": invalid_token
+            })))
+            .mount(&server)
+            .await;
+        assert!(matches!(
+            client.complete("code", &authorization.state).await,
+            Err(PortError::InvalidData)
+        ));
+        server.verify().await;
     }
 }

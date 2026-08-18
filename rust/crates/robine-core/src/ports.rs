@@ -10,8 +10,8 @@ use crate::{
         ExecutionLogChunk, LocalExecutionWork, NewPipeline, NewRunnerEnrollment, OutboxDelivery,
         PipelineProjection, RecordAttemptEvent, RecordRemoteAttemptEvent, RetryProjection,
         RevokeRunner, RotateRunnerCredential, RunnerAuthenticationMaterial, RunnerFleetEntry,
-        RunnerLeaseHeartbeat, RunnerResume, SchedulerClaim, SourceControlDelivery,
-        StatusProjectionItem, StatusProjectionSnapshot,
+        RunnerLeaseHeartbeat, RunnerResume, ScheduleScanMetrics, SchedulerClaim,
+        SourceControlDelivery, StatusProjectionItem, StatusProjectionSnapshot,
     },
 };
 
@@ -122,6 +122,7 @@ pub trait PipelineRepository: Send + Sync {
         key: &str,
         expected: Option<DateTime<Utc>>,
         cursor: DateTime<Utc>,
+        metrics: ScheduleScanMetrics,
         completed_at: DateTime<Utc>,
     ) -> Result<bool, PortError>;
 
@@ -130,6 +131,7 @@ pub trait PipelineRepository: Send + Sync {
         tenant_id: &str,
         key: &str,
         failure: &str,
+        duration_ms: i64,
         failed_at: DateTime<Utc>,
     ) -> Result<(), PortError>;
 
@@ -402,6 +404,13 @@ pub trait PipelineRepository: Send + Sync {
         conclusion: Option<&str>,
         now: DateTime<Utc>,
     ) -> Result<(), PortError>;
+
+    async fn reconcile_status_projection_jobs(
+        &self,
+        tenant_id: &str,
+        limit: i64,
+        now: DateTime<Utc>,
+    ) -> Result<u64, PortError>;
 
     async fn local_execution_work(
         &self,

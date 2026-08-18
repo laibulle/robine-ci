@@ -20,8 +20,8 @@ use robine_core::{
         ExecutionLogChunk, JobState, NewJob, NewPipeline, NewRunnerEnrollment, NewWorkflowRevision,
         OutboxDelivery, PipelineProjection, RecordAttemptEvent, RecordRemoteAttemptEvent,
         RetryProjection, RevokeRunner, RotateRunnerCredential, RunnerFleetEntry,
-        RunnerLeaseHeartbeat, RunnerReconciliation, SchedulerClaim, SourceControlDelivery,
-        outbox_backoff_seconds, source_digest,
+        RunnerLeaseHeartbeat, RunnerReconciliation, ScheduleScanMetrics, SchedulerClaim,
+        SourceControlDelivery, outbox_backoff_seconds, source_digest,
     },
     ports::{IdentityRepository, OidcProvider, PipelineRepository, PortError},
     source_control::{NormalizationOutcome, SourceControlTrigger, normalize},
@@ -345,6 +345,10 @@ fn schedule_failure_code(error: &ApplicationError) -> &'static str {
     }
 }
 
+fn elapsed_milliseconds(started: std::time::Instant) -> i64 {
+    i64::try_from(started.elapsed().as_millis()).unwrap_or(i64::MAX)
+}
+
 fn schedule_window(
     cursor: Option<chrono::DateTime<Utc>>,
     minute: chrono::DateTime<Utc>,
@@ -425,6 +429,14 @@ pub struct ProjectionBatch {
     pub skipped: u64,
     pub retried: u64,
     pub discarded: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+pub struct SecretRotation {
+    pub target_version: i32,
+    pub rotated: u32,
+    pub next_cursor: Option<Uuid>,
+    pub complete: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -945,10 +957,25 @@ impl ControlPlane {
     ///
     /// Returns unavailable when persistence cannot produce a consistent snapshot.
     pub async fn operational_metrics(&self) -> Result<serde_json::Value, ApplicationError> {
-        self.pipelines
+        let mut metrics = self
+            .pipelines
             .operational_metrics("standalone")
             .await
-            .map_err(|_| ApplicationError::Unavailable)
+            .map_err(|_| ApplicationError::Unavailable)?;
+        if let (Some(repository), Some(keyring), Some(object)) = (
+            self.secret_repository.as_ref(),
+            self.secret_encryptor.as_ref(),
+            metrics.as_object_mut(),
+        ) && let Some(target_version) = keyring.current_version()
+        {
+            let pending = repository
+                .rotation_pending("standalone", target_version)
+                .await
+                .map_err(|_| ApplicationError::Unavailable)?;
+            object.insert("secret_key_version".into(), target_version.into());
+            object.insert("secret_rotation_pending".into(), pending.into());
+        }
+        Ok(metrics)
     }
 
     /// Discovers manually enabled workflows at one immutable branch head.
@@ -1072,6 +1099,7 @@ impl ControlPlane {
         now: chrono::DateTime<Utc>,
     ) -> Result<ScheduleReconciliation, ApplicationError> {
         const CURSOR_KEY: &str = "scheduled-workflows:v1";
+        let started = std::time::Instant::now();
         let minute = now
             .with_second(0)
             .and_then(|value| value.with_nanosecond(0))
@@ -1091,7 +1119,20 @@ impl ControlPlane {
                 }
                 outcome.cursor_advanced = self
                     .pipelines
-                    .advance_schedule_cursor(tenant_id, CURSOR_KEY, cursor, minute, Utc::now())
+                    .advance_schedule_cursor(
+                        tenant_id,
+                        CURSOR_KEY,
+                        cursor,
+                        minute,
+                        ScheduleScanMetrics {
+                            duration_ms: elapsed_milliseconds(started),
+                            scanned_minutes: outcome.scanned_minutes,
+                            due_occurrences: outcome.due_occurrences,
+                            pipelines: outcome.pipelines,
+                            truncated_minutes: outcome.truncated_minutes,
+                        },
+                        Utc::now(),
+                    )
                     .await
                     .map_err(|_| ApplicationError::Unavailable)?;
                 Ok(outcome)
@@ -1100,7 +1141,13 @@ impl ControlPlane {
                 let failure = schedule_failure_code(&error);
                 let _ = self
                     .pipelines
-                    .record_schedule_failure(tenant_id, CURSOR_KEY, failure, Utc::now())
+                    .record_schedule_failure(
+                        tenant_id,
+                        CURSOR_KEY,
+                        failure,
+                        elapsed_milliseconds(started),
+                        Utc::now(),
+                    )
                     .await;
                 Err(error)
             }
@@ -1366,6 +1413,60 @@ impl ControlPlane {
             .await
             .map_err(|_| ApplicationError::Unavailable)?;
         Ok(secrets.into_iter().map(|secret| secret.name).collect())
+    }
+
+    /// Re-encrypts one administrator-owned bounded secret batch with a resumable UUID cursor.
+    ///
+    /// # Errors
+    ///
+    /// Returns forbidden for non-administrators and unavailable for key or persistence failures.
+    pub async fn rotate_secrets(
+        &self,
+        tenant_id: &str,
+        user: &User,
+        cursor: Option<Uuid>,
+        limit: i64,
+    ) -> Result<SecretRotation, ApplicationError> {
+        if user.disabled || user.role != Role::Administrator {
+            return Err(ApplicationError::Forbidden);
+        }
+        let keyring = self
+            .secret_encryptor
+            .as_ref()
+            .ok_or(ApplicationError::Unavailable)?;
+        let target_version = keyring
+            .current_version()
+            .ok_or(ApplicationError::Unavailable)?;
+        let repository = self
+            .secret_repository
+            .as_ref()
+            .ok_or(ApplicationError::Unavailable)?;
+        let batch = repository
+            .rotation_batch(tenant_id, cursor, target_version, limit.clamp(1, 100))
+            .await
+            .map_err(|_| ApplicationError::Unavailable)?;
+        let complete = batch.len() < usize::try_from(limit.clamp(1, 100)).unwrap_or(100);
+        let next_cursor = batch.last().map(|secret| secret.id).or(cursor);
+        let mut rotated = 0_u32;
+        for secret in batch {
+            let expected_version = secret.key_version;
+            let rotated_secret = keyring
+                .reencrypt(&secret)
+                .map_err(|_| ApplicationError::Unavailable)?;
+            if repository
+                .rotate(tenant_id, user.id, expected_version, &rotated_secret)
+                .await
+                .map_err(|_| ApplicationError::Unavailable)?
+            {
+                rotated = rotated.saturating_add(1);
+            }
+        }
+        Ok(SecretRotation {
+            target_version,
+            rotated,
+            next_cursor,
+            complete,
+        })
     }
 
     /// Encrypts and atomically audits a write-only repository secret.
@@ -2850,6 +2951,32 @@ impl ControlPlane {
         Ok(total)
     }
 
+    /// Enqueues one idempotent hourly repair projection for recent or active GitHub pipelines.
+    ///
+    /// # Errors
+    ///
+    /// Returns unavailable when tenant discovery or reconciliation persistence fails.
+    pub async fn reconcile_all_status_projection_jobs(
+        &self,
+        per_tenant_limit: i64,
+    ) -> Result<u64, ApplicationError> {
+        let tenants = self
+            .pipelines
+            .list_tenants()
+            .await
+            .map_err(|_| ApplicationError::Unavailable)?;
+        let mut total = 0_u64;
+        for tenant in tenants {
+            total = total.saturating_add(
+                self.pipelines
+                    .reconcile_status_projection_jobs(&tenant, per_tenant_limit, Utc::now())
+                    .await
+                    .map_err(|_| ApplicationError::Unavailable)?,
+            );
+        }
+        Ok(total)
+    }
+
     /// Projects one tenant's bounded durable status batch.
     ///
     /// # Errors
@@ -2940,7 +3067,7 @@ impl ControlPlane {
             let (status, conclusion) = github_check_state(&item.state)?;
             let projection = StatusProjection {
                 external_key: item.external_key.clone(),
-                name: item.name.clone(),
+                name: item.name.chars().take(100).collect(),
                 head_sha: item.commit_sha.clone(),
                 status: status.into(),
                 conclusion: conclusion.map(str::to_owned),
