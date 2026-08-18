@@ -109,6 +109,22 @@ impl S3BlobStore {
         })
     }
 
+    /// Checks that the configured credentials can reach the selected bucket without writing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StorageError::Unavailable`] for authentication, authorization, endpoint, bucket,
+    /// throttling, or transport failures; provider details remain inside the adapter.
+    pub async fn health(&self) -> Result<(), StorageError> {
+        self.client
+            .head_bucket()
+            .bucket(&self.config.bucket)
+            .send()
+            .await
+            .map_err(|_| StorageError::Unavailable)?;
+        Ok(())
+    }
+
     fn tenant_prefix(&self, tenant_id: &str) -> Result<String, StorageError> {
         validate_tenant(tenant_id)?;
         let tenant = if tenant_id == "standalone" {

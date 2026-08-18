@@ -109,11 +109,14 @@ impl Database {
             let previous = state
                 .as_ref()
                 .map_or("unrecorded", |(_, digest)| digest.as_str());
-            let changed = state.as_ref().is_none_or(|(stored_backend, stored_digest)| {
-                stored_backend != backend || stored_digest != namespace_digest
-            });
+            let changed = state
+                .as_ref()
+                .is_none_or(|(stored_backend, stored_digest)| {
+                    stored_backend != backend || stored_digest != namespace_digest
+                });
             let expected = storage_transition_ack(previous, namespace_digest);
-            if changed && retained && acknowledgement != Some(expected.as_str()) {
+            let requires_ack = state.is_some() || backend != "local";
+            if changed && retained && requires_ack && acknowledgement != Some(expected.as_str()) {
                 transaction.rollback().await?;
                 return Err(PersistenceError::StorageMigrationAcknowledgementRequired(
                     expected,

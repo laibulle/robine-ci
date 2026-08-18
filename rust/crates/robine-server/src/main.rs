@@ -9,7 +9,10 @@ use robine_persistence::Database;
 use robine_secrets::AesGcmKeyring;
 use robine_server::AppState;
 use robine_source::HttpArchiveFetcher;
-use robine_storage::{LocalBlobStore, StorageQuotas};
+use robine_storage::{
+    BlobStore, LocalBlobStore, S3BlobStore, S3Config, S3Encryption, StorageQuotas,
+};
+use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 
 #[actix_web::main]
@@ -54,10 +57,20 @@ async fn main() -> io::Result<()> {
             "repository storage quota exceeds instance quota",
         ));
     }
-    let blob_store =
-        LocalBlobStore::new(storage_root, max_object_bytes).map_err(io::Error::other)?;
+    let (blob_store, storage_backend, storage_namespace_digest) =
+        configure_blob_store(storage_root, max_object_bytes).await?;
+    database
+        .verify_storage_backend(
+            &storage_backend,
+            &storage_namespace_digest,
+            std::env::var("ROBINE_STORAGE_BACKEND_MIGRATION_ACK")
+                .ok()
+                .as_deref(),
+        )
+        .await
+        .map_err(io::Error::other)?;
     control_plane =
-        control_plane.with_storage_runtime(database.clone(), Arc::new(blob_store), storage_quotas);
+        control_plane.with_storage_runtime(database.clone(), blob_store, storage_quotas);
     control_plane = control_plane.with_retention_runtime(
         database.clone(),
         RetentionConfig {
@@ -141,6 +154,123 @@ async fn main() -> io::Result<()> {
     let _ = execution_worker.await;
     let _ = retention_worker.await;
     result
+}
+
+async fn configure_blob_store(
+    storage_root: std::path::PathBuf,
+    max_object_bytes: usize,
+) -> io::Result<(Arc<dyn BlobStore>, String, String)> {
+    match std::env::var("ROBINE_BLOB_STORE")
+        .unwrap_or_else(|_| "local".into())
+        .as_str()
+    {
+        "local" => {
+            let locator = format!("local:{}", storage_root.display());
+            let store =
+                LocalBlobStore::new(storage_root, max_object_bytes).map_err(io::Error::other)?;
+            Ok((
+                Arc::new(store),
+                "local".into(),
+                storage_namespace_digest(&locator),
+            ))
+        }
+        "s3" => {
+            let endpoint = required_environment("ROBINE_S3_ENDPOINT")?;
+            let bucket = required_environment("ROBINE_S3_BUCKET")?;
+            let region = required_environment("ROBINE_S3_REGION")?;
+            let prefix = std::env::var("ROBINE_S3_PREFIX").unwrap_or_default();
+            let encryption = if let Ok(key_id) = std::env::var("ROBINE_S3_KMS_KEY_ID") {
+                if key_id.is_empty() {
+                    return Err(invalid_environment("ROBINE_S3_KMS_KEY_ID"));
+                }
+                S3Encryption::Kms { key_id }
+            } else {
+                match std::env::var("ROBINE_S3_SERVER_SIDE_ENCRYPTION")
+                    .unwrap_or_else(|_| "none".into())
+                    .as_str()
+                {
+                    "none" => S3Encryption::None,
+                    "AES256" => S3Encryption::Aes256,
+                    _ => return Err(invalid_environment("ROBINE_S3_SERVER_SIDE_ENCRYPTION")),
+                }
+            };
+            let part_timeout = std::time::Duration::from_millis(environment_u64(
+                "ROBINE_S3_PART_TIMEOUT_MS",
+                60_000,
+            )?);
+            let store = S3BlobStore::new(S3Config {
+                endpoint: endpoint.clone(),
+                region,
+                bucket: bucket.clone(),
+                prefix: prefix.clone(),
+                path_style: environment_bool("ROBINE_S3_PATH_STYLE", false)?,
+                allow_http_loopback: environment_bool("ROBINE_S3_ALLOW_HTTP_LOOPBACK", false)?,
+                max_object_bytes,
+                part_size: environment_usize("ROBINE_S3_PART_SIZE_BYTES", 8_388_608)?,
+                request_timeout: std::time::Duration::from_millis(environment_u64(
+                    "ROBINE_S3_REQUEST_TIMEOUT_MS",
+                    120_000,
+                )?),
+                attempt_timeout: part_timeout,
+                connect_timeout: std::time::Duration::from_millis(environment_u64(
+                    "ROBINE_S3_CONNECT_TIMEOUT_MS",
+                    5_000,
+                )?),
+                spool_root: storage_root.join(".s3-spool"),
+                encryption,
+            })
+            .await
+            .map_err(io::Error::other)?;
+            store.health().await.map_err(io::Error::other)?;
+            let locator = format!(
+                "s3:{}/{}/{}",
+                endpoint.trim_end_matches('/'),
+                bucket,
+                prefix.trim_matches('/')
+            );
+            Ok((
+                Arc::new(store),
+                "s3".into(),
+                storage_namespace_digest(&locator),
+            ))
+        }
+        _ => Err(invalid_environment("ROBINE_BLOB_STORE")),
+    }
+}
+
+fn storage_namespace_digest(locator: &str) -> String {
+    format!("{:x}", Sha256::digest(locator.as_bytes()))
+}
+
+fn required_environment(name: &str) -> io::Result<String> {
+    std::env::var(name)
+        .ok()
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| invalid_environment(name))
+}
+
+fn environment_bool(name: &str, default: bool) -> io::Result<bool> {
+    match std::env::var(name) {
+        Ok(value) if matches!(value.as_str(), "1" | "true") => Ok(true),
+        Ok(value) if matches!(value.as_str(), "0" | "false") => Ok(false),
+        Ok(_) => Err(invalid_environment(name)),
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(_) => Err(invalid_environment(name)),
+    }
+}
+
+fn environment_u64(name: &str, default: u64) -> io::Result<u64> {
+    std::env::var(name).ok().map_or(Ok(default), |value| {
+        value
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| invalid_environment(name))
+    })
+}
+
+fn invalid_environment(name: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, format!("invalid {name}"))
 }
 
 fn environment_usize(name: &str, default: usize) -> io::Result<usize> {

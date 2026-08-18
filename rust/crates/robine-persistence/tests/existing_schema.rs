@@ -16,7 +16,9 @@ use robine_core::{
     },
     ports::{IdentityRepository, OidcProvider, PipelineRepository, PortError},
 };
-use robine_persistence::{Database, Readiness};
+use robine_persistence::{
+    Database, PersistenceError, Readiness, storage_transition_ack,
+};
 use robine_secrets::SecretRepository;
 use robine_source::{Provider, RepositoryStore};
 use robine_storage::{
