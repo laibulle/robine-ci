@@ -281,21 +281,23 @@ async fn execute_offer(
             },
         )
         .await;
-    let (status, reason) = match result {
-        Ok(result) if result.status == ExecutionStatus::Succeeded => ("succeeded", None),
-        Ok(result) if result.status == ExecutionStatus::Cancelled => {
-            ("cancelled", Some("cancelled".to_owned()))
-        }
-        Ok(result) if result.status == ExecutionStatus::TimedOut => {
-            ("failed", Some("timeout".to_owned()))
-        }
-        Ok(result) if result.status == ExecutionStatus::ServiceUnavailable => {
+    let (status, reason) = remote_outcome(result.as_ref().map(|result| result.status));
+    event(client, config, &token, 3, status, reason.as_deref()).await
+}
+
+fn remote_outcome(
+    result: Result<ExecutionStatus, &ExecutionError>,
+) -> (&'static str, Option<String>) {
+    match result {
+        Ok(ExecutionStatus::Succeeded) => ("succeeded", None),
+        Ok(ExecutionStatus::Cancelled) => ("cancelled", Some("cancelled".to_owned())),
+        Ok(ExecutionStatus::TimedOut) => ("failed", Some("timeout".to_owned())),
+        Ok(ExecutionStatus::ServiceUnavailable) => {
             ("failed", Some("service_unavailable".to_owned()))
         }
-        Ok(_) => ("failed", Some("command_failed".to_owned())),
+        Ok(ExecutionStatus::Failed) => ("failed", Some("command_failed".to_owned())),
         Err(_) => ("failed", Some("system_failure".to_owned())),
-    };
-    event(client, config, &token, 3, status, reason.as_deref()).await
+    }
 }
 
 async fn event(
@@ -345,12 +347,12 @@ impl CancellationSignal for RemoteCancellation {
             return Ok(true);
         }
         {
-            let mut last_check = self
-                .last_check
-                .lock()
-                .map_err(|_| ExecutionError::Unavailable {
-                    phase: "cancellation_state",
-                })?;
+            let mut last_check =
+                self.last_check
+                    .lock()
+                    .map_err(|_| ExecutionError::Unavailable {
+                        phase: "cancellation_state",
+                    })?;
             if last_check.is_some_and(|instant| instant.elapsed() < Duration::from_secs(2)) {
                 return Ok(false);
             }
@@ -393,19 +395,15 @@ struct RemoteBuiltins {
 #[async_trait]
 impl BuiltinHandler for RemoteBuiltins {
     async fn restore(&self, step: &ExecutionStep) -> Result<BuiltinRestore, ExecutionError> {
-        let mut endpoint = url::Url::parse(&url(
-            &self.config,
-            match step.value.as_str() {
-                "cache/restore" => {
-                    &format!("/api/v1/runners/attempts/{}/cache", self.attempt_id)
-                }
-                "artifacts/download" => {
-                    &format!("/api/v1/runners/attempts/{}/artifacts", self.attempt_id)
-                }
-                _ => return Err(ExecutionError::Unsupported("builtin restore")),
-            },
-        ))
-        .map_err(|_| ExecutionError::InvalidSpecification("runner URL"))?;
+        let path = match step.value.as_str() {
+            "cache/restore" => format!("/api/v1/runners/attempts/{}/cache", self.attempt_id),
+            "artifacts/download" => {
+                format!("/api/v1/runners/attempts/{}/artifacts", self.attempt_id)
+            }
+            _ => return Err(ExecutionError::Unsupported("builtin restore")),
+        };
+        let mut endpoint = url::Url::parse(&url(&self.config, &path))
+            .map_err(|_| ExecutionError::InvalidSpecification("runner URL"))?;
         match step.value.as_str() {
             "cache/restore" => endpoint
                 .query_pairs_mut()
@@ -438,7 +436,10 @@ impl BuiltinHandler for RemoteBuiltins {
             .ok_or(ExecutionError::Runner {
                 phase: "builtin_digest",
             })?;
-        if response.content_length().is_some_and(|size| size > 104_857_600) {
+        if response
+            .content_length()
+            .is_some_and(|size| size > 104_857_600)
+        {
             return Err(ExecutionError::Runner {
                 phase: "builtin_download_size",
             });
@@ -458,29 +459,21 @@ impl BuiltinHandler for RemoteBuiltins {
         Ok(BuiltinRestore::Archive(content))
     }
 
-    async fn publish(
-        &self,
-        step: &ExecutionStep,
-        archive: Vec<u8>,
-    ) -> Result<(), ExecutionError> {
+    async fn publish(&self, step: &ExecutionStep, archive: Vec<u8>) -> Result<(), ExecutionError> {
         if archive.len() > 104_857_600 {
             return Err(ExecutionError::Runner {
                 phase: "builtin_upload_size",
             });
         }
-        let mut endpoint = url::Url::parse(&url(
-            &self.config,
-            match step.value.as_str() {
-                "cache/save" => {
-                    &format!("/api/v1/runners/attempts/{}/cache", self.attempt_id)
-                }
-                "artifacts/upload" => {
-                    &format!("/api/v1/runners/attempts/{}/artifacts", self.attempt_id)
-                }
-                _ => return Err(ExecutionError::Unsupported("builtin publish")),
-            },
-        ))
-        .map_err(|_| ExecutionError::InvalidSpecification("runner URL"))?;
+        let path = match step.value.as_str() {
+            "cache/save" => format!("/api/v1/runners/attempts/{}/cache", self.attempt_id),
+            "artifacts/upload" => {
+                format!("/api/v1/runners/attempts/{}/artifacts", self.attempt_id)
+            }
+            _ => return Err(ExecutionError::Unsupported("builtin publish")),
+        };
+        let mut endpoint = url::Url::parse(&url(&self.config, &path))
+            .map_err(|_| ExecutionError::InvalidSpecification("runner URL"))?;
         match step.value.as_str() {
             "cache/save" => endpoint
                 .query_pairs_mut()
@@ -599,9 +592,121 @@ fn private_file(path: &Path) -> Result<(), (u8, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use robine_execution::StepCondition;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{header, method, path, query_param},
+    };
+
+    fn test_config(server_url: String) -> Config {
+        Config {
+            server_url,
+            runner_id: Uuid::new_v4(),
+            credential: format!("rrc_{}", "a".repeat(43)),
+            name: "test-runner".into(),
+        }
+    }
+
+    fn builtin(value: &str, with: &[(&str, serde_json::Value)]) -> ExecutionStep {
+        ExecutionStep {
+            name: value.into(),
+            kind: robine_execution::StepKind::Builtin,
+            value: value.into(),
+            condition: StepCondition::Success,
+            with: with
+                .iter()
+                .map(|(key, value)| ((*key).to_owned(), value.clone()))
+                .collect(),
+        }
+    }
     #[test]
     fn refuses_cleartext_remote_server() {
         assert!(ensure_secure_server("http://example.com").is_err());
         assert!(ensure_secure_server("http://localhost:4000").is_ok());
+    }
+
+    #[test]
+    fn remote_terminal_outcomes_use_protocol_reasons() {
+        assert_eq!(
+            remote_outcome(Ok(ExecutionStatus::Succeeded)),
+            ("succeeded", None)
+        );
+        assert_eq!(
+            remote_outcome(Ok(ExecutionStatus::Cancelled)),
+            ("cancelled", Some("cancelled".into()))
+        );
+        assert_eq!(
+            remote_outcome(Ok(ExecutionStatus::TimedOut)),
+            ("failed", Some("timeout".into()))
+        );
+        assert_eq!(
+            remote_outcome(Ok(ExecutionStatus::ServiceUnavailable)),
+            ("failed", Some("service_unavailable".into()))
+        );
+        assert_eq!(
+            remote_outcome(Ok(ExecutionStatus::Failed)),
+            ("failed", Some("command_failed".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_cancellation_renews_and_observes_the_owned_attempt() {
+        let server = MockServer::start().await;
+        let config = test_config(server.uri());
+        let attempt_id = Uuid::new_v4();
+        Mock::given(method("POST"))
+            .and(path("/api/v1/runners/heartbeat"))
+            .and(header("x-robine-runner-id", config.runner_id.to_string()))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "renewed_attempts": 1,
+                "pending_offer_attempt_ids": [],
+                "cancellation_requested_attempt_ids": [attempt_id]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let cancellation = RemoteCancellation {
+            client: Client::new(),
+            config,
+            attempt_id,
+            last_check: Mutex::new(None),
+            requested: AtomicBool::new(false),
+        };
+        assert!(cancellation.requested().await.expect("heartbeat"));
+        assert!(cancellation.requested().await.expect("cached cancellation"));
+    }
+
+    #[tokio::test]
+    async fn remote_cache_restore_is_scoped_bounded_and_digest_verified() {
+        let server = MockServer::start().await;
+        let config = test_config(server.uri());
+        let attempt_id = Uuid::new_v4();
+        let archive = b"bounded archive".to_vec();
+        let digest = format!("{:x}", Sha256::digest(&archive));
+        Mock::given(method("GET"))
+            .and(path(format!("/api/v1/runners/attempts/{attempt_id}/cache")))
+            .and(query_param("key", "cargo lock"))
+            .and(header("x-robine-runner-id", config.runner_id.to_string()))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("x-content-sha256", digest)
+                    .set_body_bytes(archive.clone()),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let handler = RemoteBuiltins {
+            client: Client::new(),
+            config,
+            attempt_id,
+        };
+        let result = handler
+            .restore(&builtin(
+                "cache/restore",
+                &[("key", serde_json::json!("cargo lock"))],
+            ))
+            .await
+            .expect("restore cache");
+        assert_eq!(result, BuiltinRestore::Archive(archive));
     }
 }

@@ -169,6 +169,10 @@ async fn main() -> io::Result<()> {
         control_plane.clone(),
         shutdown_receiver.clone(),
     ));
+    let lease_worker = tokio::spawn(run_lease_worker(
+        control_plane.clone(),
+        shutdown_receiver.clone(),
+    ));
     let retention_worker = tokio::spawn(run_retention_worker(
         control_plane.clone(),
         shutdown_receiver,
@@ -184,6 +188,7 @@ async fn main() -> io::Result<()> {
     let _ = shutdown_sender.send(true);
     let _ = outbox_worker.await;
     let _ = execution_worker.await;
+    let _ = lease_worker.await;
     let _ = retention_worker.await;
     result
 }
@@ -351,6 +356,22 @@ async fn run_outbox_worker(control_plane: Arc<ControlPlane>, mut shutdown: watch
                 let _ = control_plane.process_all_tenant_outboxes(25).await;
                 let _ = control_plane.process_all_tenant_source_control(25).await;
                 let _ = control_plane.process_all_tenant_dispatches(25).await;
+            }
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+async fn run_lease_worker(control_plane: Arc<ControlPlane>, mut shutdown: watch::Receiver<bool>) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                let _ = control_plane.reconcile_all_expired_attempts(100).await;
             }
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {

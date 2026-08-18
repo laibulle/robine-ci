@@ -18,5 +18,8 @@ url.workspace = true
 uuid.workspace = true
 zeroize.workspace = true
 
+[dev-dependencies]
+wiremock = "0.6"
+
 [lints]
 workspace = true

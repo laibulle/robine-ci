@@ -1540,6 +1540,39 @@ impl ControlPlane {
             .map_err(|_| ApplicationError::Unavailable)
     }
 
+    /// Reconciles a bounded number of expired attempts for every registered tenant.
+    ///
+    /// This operation is owned by the runtime worker rather than an HTTP actor. Durable row locks
+    /// and terminal-event idempotency make concurrent worker ticks safe.
+    ///
+    /// # Errors
+    ///
+    /// Returns unavailable when tenant discovery or graph reconciliation fails.
+    pub async fn reconcile_all_expired_attempts(
+        &self,
+        per_tenant_limit: i64,
+    ) -> Result<u64, ApplicationError> {
+        let tenants = self
+            .pipelines
+            .list_tenants()
+            .await
+            .map_err(|_| ApplicationError::Unavailable)?;
+        let mut reconciled = 0_u64;
+        for tenant_id in tenants {
+            reconciled = reconciled.saturating_add(
+                self.pipelines
+                    .reconcile_expired_attempts(
+                        &tenant_id,
+                        per_tenant_limit.clamp(1, 1_000),
+                        Utc::now(),
+                    )
+                    .await
+                    .map_err(|_| ApplicationError::Unavailable)?,
+            );
+        }
+        Ok(reconciled)
+    }
+
     /// Authenticates a remote runner and renews every active attempt it owns.
     ///
     /// # Errors
