@@ -1512,7 +1512,7 @@ async fn heartbeat_and_expiry_reconciliation_are_atomic_and_tenant_scoped() {
     let claim = SchedulerClaim {
         global_limit: 4,
         repository_limit: 4,
-        lease_seconds: 1,
+        lease_seconds: 60,
         attempt_id: Uuid::new_v4(),
         idempotency_token: Uuid::new_v4(),
         event_id: Uuid::new_v4(),
@@ -1571,8 +1571,20 @@ async fn heartbeat_and_expiry_reconciliation_are_atomic_and_tenant_scoped() {
         .await
         .expect("assign attempt to runner");
     fixture.commit().await.expect("commit runner fixture");
+    let transfer_root =
+        std::env::temp_dir().join(format!("robine-rust-transfer-{}", Uuid::new_v4()));
+    let transfer_blobs =
+        LocalBlobStore::new(transfer_root.clone(), 100_000_000).expect("transfer blobs");
     let control_plane = ControlPlane::new(Arc::new(database.clone()), Arc::new(database.clone()))
-        .with_runner_secret_key_base(secret_key_base);
+        .with_runner_secret_key_base(secret_key_base)
+        .with_storage_runtime(
+            Arc::new(database.clone()),
+            Arc::new(transfer_blobs),
+            StorageQuotas {
+                instance_bytes: 1_000_000_000,
+                repository_bytes: 500_000_000,
+            },
+        );
     assert!(matches!(
         control_plane
             .heartbeat_runner_attempts(&tenant, runner_id, "rrc_invalid", 120)
@@ -1583,7 +1595,7 @@ async fn heartbeat_and_expiry_reconciliation_are_atomic_and_tenant_scoped() {
         .heartbeat_runner_attempts(&tenant, runner_id, &credential, 120)
         .await
         .expect("authenticated runner heartbeat");
-    assert_eq!(runner_heartbeat.renewed_attempts, 1);
+    assert_eq!(runner_heartbeat.renewed_attempts, 0);
     assert_eq!(runner_heartbeat.pending_offer_attempt_ids, vec![attempt.id]);
     assert!(
         runner_heartbeat
@@ -1762,6 +1774,64 @@ async fn heartbeat_and_expiry_reconciliation_are_atomic_and_tenant_scoped() {
         offer_heartbeat.pending_offer_attempt_ids,
         vec![remote_attempt.id]
     );
+    let transfer_archive = robine_source::create_source_tar_gz(
+        &[robine_source::SourceFile {
+            path: std::path::PathBuf::from("cache.bin"),
+            contents: b"bounded remote transfer".to_vec(),
+        }],
+        robine_source::ArchiveLimits::default(),
+    )
+    .expect("valid transfer archive");
+    let cache_upload = control_plane
+        .remote_save_cache(
+            &tenant,
+            runner_id,
+            &credential,
+            remote_attempt.id,
+            "remote-cache-v1",
+            transfer_archive.clone(),
+        )
+        .await
+        .expect("attempt-scoped cache upload");
+    let cache_download = control_plane
+        .remote_restore_cache(
+            &tenant,
+            runner_id,
+            &credential,
+            remote_attempt.id,
+            "remote-cache-v1",
+        )
+        .await
+        .expect("attempt-scoped cache restore")
+        .expect("cache hit");
+    assert_eq!(cache_download.content, transfer_archive);
+    assert_eq!(cache_download.digest, cache_upload.digest);
+    let artifact_upload = control_plane
+        .remote_upload_artifact(
+            &tenant,
+            runner_id,
+            &credential,
+            remote_attempt.id,
+            "remote-report",
+            7,
+            transfer_archive,
+        )
+        .await
+        .expect("attempt-scoped artifact upload");
+    assert!(artifact_upload.id.is_some());
+    assert!(matches!(
+        control_plane
+            .remote_download_artifact(
+                &tenant,
+                runner_id,
+                &credential,
+                remote_attempt.id,
+                "undeclared",
+                "remote-report",
+            )
+            .await,
+        Err(ApplicationError::PipelineNotFound)
+    ));
     assert!(matches!(
         database
             .remote_job_offer(&tenant, Uuid::new_v4(), remote_attempt.id)
@@ -1902,6 +1972,7 @@ async fn heartbeat_and_expiry_reconciliation_are_atomic_and_tenant_scoped() {
     assert_eq!(stored, ("failed".into(), 3, Some("runner_lost".into())));
     assert_eq!(pipeline_status, "failed");
     assert_eq!(receipt_count, 2);
+    std::fs::remove_dir_all(&transfer_root).expect("remove transfer fixture storage");
 }
 
 #[tokio::test]

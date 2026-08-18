@@ -703,7 +703,7 @@ async fn restore_remote_cache(
     {
         Ok(Some(download)) => transfer_download(download),
         Ok(None) => HttpResponse::NoContent().finish(),
-        Err(error) => remote_transfer_error(error),
+        Err(error) => remote_transfer_error(&error),
     }
 }
 
@@ -730,7 +730,7 @@ async fn save_remote_cache(
         .await
     {
         Ok(upload) => HttpResponse::Created().json(upload),
-        Err(error) => remote_transfer_error(error),
+        Err(error) => remote_transfer_error(&error),
     }
 }
 
@@ -766,7 +766,7 @@ async fn download_remote_artifact(
         .await
     {
         Ok(download) => transfer_download(download),
-        Err(error) => remote_transfer_error(error),
+        Err(error) => remote_transfer_error(&error),
     }
 }
 
@@ -794,7 +794,7 @@ async fn upload_remote_artifact(
         .await
     {
         Ok(upload) => HttpResponse::Created().json(upload),
-        Err(error) => remote_transfer_error(error),
+        Err(error) => remote_transfer_error(&error),
     }
 }
 
@@ -821,7 +821,7 @@ fn transfer_download(download: robine_application::RemoteTransferDownload) -> Ht
         .body(download.content)
 }
 
-fn remote_transfer_error(error: ApplicationError) -> HttpResponse {
+fn remote_transfer_error(error: &ApplicationError) -> HttpResponse {
     match error {
         ApplicationError::Unauthenticated => HttpResponse::Unauthorized().finish(),
         ApplicationError::Forbidden => HttpResponse::Forbidden().finish(),

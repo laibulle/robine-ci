@@ -1197,14 +1197,42 @@ impl ControlPlane {
     ) -> Result<serde_json::Value, ApplicationError> {
         self.authenticate_runner(tenant_id, runner_id, credential, Utc::now())
             .await?;
-        self.pipelines
+        let mut offer = self
+            .pipelines
             .remote_job_offer(tenant_id, runner_id, attempt_id)
             .await
             .map_err(|error| match error {
                 PortError::NotFound => ApplicationError::PipelineNotFound,
                 PortError::AttemptNotAssigned => ApplicationError::Forbidden,
                 _ => ApplicationError::Unavailable,
-            })
+            })?;
+        let checkout = offer
+            .get("steps")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|steps| {
+                steps.iter().any(|step| {
+                    step.get("kind").and_then(serde_json::Value::as_str) == Some("builtin")
+                        && step.get("value").and_then(serde_json::Value::as_str) == Some("checkout")
+                })
+            });
+        if let Some(object) = offer.as_object_mut() {
+            let base = format!("/api/v1/runners/attempts/{attempt_id}");
+            object.insert(
+                "builtins_url".into(),
+                serde_json::Value::String(base.clone()),
+            );
+            object.insert(
+                "secrets_url".into(),
+                serde_json::Value::String(format!("{base}/secrets")),
+            );
+            if checkout {
+                object.insert(
+                    "source_url".into(),
+                    serde_json::Value::String(format!("{base}/source")),
+                );
+            }
+        }
+        Ok(offer)
     }
 
     /// Returns a bounded source archive only to the authenticated runner owning the attempt.
@@ -1497,15 +1525,23 @@ impl ControlPlane {
             created_at: now,
             expires_at: now + chrono::Duration::days(7),
         };
-        if self
+        let repository = self
             .storage_repository
             .as_ref()
-            .ok_or(ApplicationError::Unavailable)?
+            .ok_or(ApplicationError::Unavailable)?;
+        if repository
             .save_cache(tenant_id, &cache, self.storage_quotas)
             .await
             .is_err()
         {
-            let _ = blobs.delete(tenant_id, &object.blob_id).await;
+            let _ = repository
+                .stage_blob_gc(
+                    tenant_id,
+                    &object.blob_id,
+                    now + chrono::Duration::hours(1),
+                    now,
+                )
+                .await;
             return Err(ApplicationError::Unavailable);
         }
         Ok(RemoteTransferUpload {
@@ -1616,15 +1652,23 @@ impl ControlPlane {
             created_at: now,
             expires_at: now + chrono::Duration::days(retention_days),
         };
-        if self
+        let repository = self
             .storage_repository
             .as_ref()
-            .ok_or(ApplicationError::Unavailable)?
+            .ok_or(ApplicationError::Unavailable)?;
+        if repository
             .upload_artifact(tenant_id, &artifact, self.storage_quotas)
             .await
             .is_err()
         {
-            let _ = blobs.delete(tenant_id, &object.blob_id).await;
+            let _ = repository
+                .stage_blob_gc(
+                    tenant_id,
+                    &object.blob_id,
+                    now + chrono::Duration::hours(1),
+                    now,
+                )
+                .await;
             return Err(ApplicationError::Unavailable);
         }
         Ok(RemoteTransferUpload {

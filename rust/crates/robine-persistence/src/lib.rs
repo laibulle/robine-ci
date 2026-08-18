@@ -1550,7 +1550,11 @@ impl PipelineRepository for Database {
         .await
         .map_err(|_| PortError::Unavailable)?;
         let renewed_lease = now + chrono::Duration::seconds(lease_seconds);
-        for (attempt_id, _, _, _) in &attempts {
+        let renewable = attempts
+            .iter()
+            .filter(|(_, status, _, _)| status != "queued")
+            .collect::<Vec<_>>();
+        for (attempt_id, _, _, _) in &renewable {
             sqlx::query(
                 "UPDATE job_attempts SET lease_expires_at = GREATEST(lease_expires_at, $2), \
                  updated_at = $3 WHERE id = $1 AND tenant_id = $4",
@@ -1563,6 +1567,9 @@ impl PipelineRepository for Database {
             .await
             .map_err(|_| PortError::Unavailable)?;
         }
+        let renewed_attempts =
+            u64::try_from(renewable.len()).map_err(|_| PortError::Unavailable)?;
+        drop(renewable);
         sqlx::query(
             "UPDATE remote_runners SET last_authenticated_at = $2, last_seen_at = $2, \
              updated_at = $2 WHERE id = $1 AND tenant_id = $3",
@@ -1578,7 +1585,7 @@ impl PipelineRepository for Database {
             .await
             .map_err(|_| PortError::Unavailable)?;
         Ok(RunnerLeaseHeartbeat {
-            renewed_attempts: u64::try_from(attempts.len()).map_err(|_| PortError::Unavailable)?,
+            renewed_attempts,
             pending_offer_attempt_ids: attempts
                 .iter()
                 .filter_map(|(id, status, sequence, _)| {
@@ -1670,6 +1677,9 @@ impl PipelineRepository for Database {
         let attempt = load_attempt_for_update(&mut transaction, tenant_id, event.idempotency_token)
             .await?
             .ok_or(PortError::NotFound)?;
+        if attempt.lease_expires_at.and_utc() <= now {
+            return Err(PortError::AttemptNotAssigned);
+        }
         let assigned_runner = sqlx::query_scalar::<_, Option<String>>(
             "SELECT runner_id FROM job_attempts WHERE id = $1 AND tenant_id = $2",
         )
@@ -1793,7 +1803,8 @@ impl PipelineRepository for Database {
             .await
             .map_err(|_| PortError::Unavailable)?;
         let row = sqlx::query_as::<_, RemoteOfferRow>(
-            "SELECT attempt.id AS attempt_id, attempt.idempotency_token, job.id AS job_id, \
+            "SELECT attempt.id AS attempt_id, attempt.idempotency_token, \
+                    attempt.lease_expires_at AS acceptance_deadline, job.id AS job_id, \
                     job.job_key, job.needs, job.execution_spec, pipeline.id AS pipeline_id, \
                     pipeline.correlation_id, pipeline.commit_sha, pipeline.repository_id, \
                     pipeline.source_ref, pipeline.trigger, pipeline.started_at, pipeline.inserted_at \
@@ -1802,7 +1813,9 @@ impl PipelineRepository for Database {
                AND job.tenant_id = attempt.tenant_id \
              JOIN pipelines AS pipeline ON pipeline.id = job.pipeline_id \
                AND pipeline.tenant_id = attempt.tenant_id \
-             WHERE attempt.id = $1 AND attempt.runner_id = $2 AND attempt.tenant_id = $3",
+             WHERE attempt.id = $1 AND attempt.runner_id = $2 AND attempt.tenant_id = $3 \
+               AND attempt.status IN ('queued', 'preparing', 'running', 'cancelling') \
+               AND attempt.lease_expires_at > NOW()",
         )
         .bind(attempt_id)
         .bind(runner_id.to_string())
@@ -2339,6 +2352,10 @@ fn execution_offer(row: &RemoteOfferRow) -> Result<serde_json::Value, PortError>
         (
             "idempotency_token".into(),
             serde_json::json!(row.idempotency_token),
+        ),
+        (
+            "acceptance_deadline".into(),
+            serde_json::json!(row.acceptance_deadline.and_utc()),
         ),
         ("pipeline_id".into(), serde_json::json!(row.pipeline_id)),
         (
@@ -3353,6 +3370,7 @@ struct RunnerEventReceiptRow {
 struct RemoteOfferRow {
     attempt_id: Uuid,
     idempotency_token: Uuid,
+    acceptance_deadline: NaiveDateTime,
     job_id: Uuid,
     job_key: String,
     needs: Vec<String>,
