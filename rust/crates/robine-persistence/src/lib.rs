@@ -1978,7 +1978,8 @@ impl PipelineRepository for Database {
             .await
             .map_err(|_| PortError::Unavailable)?;
         let row = sqlx::query_as::<_, RemoteOfferRow>(
-            "SELECT attempt.id AS attempt_id, attempt.idempotency_token, job.id AS job_id, \
+            "SELECT attempt.id AS attempt_id, attempt.idempotency_token, \
+                    attempt.lease_expires_at AS acceptance_deadline, job.id AS job_id, \
                     job.job_key, job.needs, job.execution_spec, pipeline.id AS pipeline_id, \
                     pipeline.correlation_id, pipeline.commit_sha, pipeline.repository_id, \
                     pipeline.source_ref, pipeline.trigger, pipeline.started_at, pipeline.inserted_at \
