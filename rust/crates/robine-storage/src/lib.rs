@@ -166,17 +166,9 @@ pub trait RetentionRepository: Send + Sync {
         batch_size: i64,
     ) -> Result<Vec<String>, StorageError>;
 
-    async fn blob_referenced(
-        &self,
-        tenant_id: &str,
-        blob_id: &str,
-    ) -> Result<bool, StorageError>;
+    async fn blob_referenced(&self, tenant_id: &str, blob_id: &str) -> Result<bool, StorageError>;
 
-    async fn acknowledge_gc(
-        &self,
-        tenant_id: &str,
-        blob_id: &str,
-    ) -> Result<(), StorageError>;
+    async fn acknowledge_gc(&self, tenant_id: &str, blob_id: &str) -> Result<(), StorageError>;
 
     async fn referenced_objects(
         &self,
@@ -269,6 +261,32 @@ impl BlobStore for LocalBlobStore {
             .await
             .map_err(|_| StorageError::Unavailable)?
     }
+
+    async fn delete(&self, tenant_id: &str, blob_id: &str) -> Result<(), StorageError> {
+        let root = self.tenant_root(tenant_id)?;
+        let blob_id = blob_id.to_owned();
+        tokio::task::spawn_blocking(move || delete_local(&root, &blob_id))
+            .await
+            .map_err(|_| StorageError::Unavailable)?
+    }
+
+    async fn inventory(&self, tenant_id: &str) -> Result<BlobInventory, StorageError> {
+        let root = self.tenant_root(tenant_id)?;
+        tokio::task::spawn_blocking(move || inventory_local(&root))
+            .await
+            .map_err(|_| StorageError::Unavailable)?
+    }
+
+    async fn delete_temporary_before(
+        &self,
+        tenant_id: &str,
+        cutoff: DateTime<Utc>,
+    ) -> Result<u64, StorageError> {
+        let root = self.tenant_root(tenant_id)?;
+        tokio::task::spawn_blocking(move || delete_temporary_local(&root, cutoff))
+            .await
+            .map_err(|_| StorageError::Unavailable)?
+    }
 }
 
 fn put_local(root: &Path, content: &[u8]) -> Result<StoredObject, StorageError> {
@@ -333,6 +351,93 @@ fn get_local(root: &Path, object: &StoredObject, maximum: usize) -> Result<Vec<u
     Ok(content)
 }
 
+fn delete_local(root: &Path, blob_id: &str) -> Result<(), StorageError> {
+    let path = LocalBlobStore::object_path(root, blob_id)?;
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.file_type().is_file() => {
+            std::fs::remove_file(path).map_err(|_| StorageError::Unavailable)
+        }
+        Ok(_) => Err(StorageError::InvalidInput),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(StorageError::Unavailable),
+    }
+}
+
+fn inventory_local(root: &Path) -> Result<BlobInventory, StorageError> {
+    let objects_root = root.join("objects");
+    let shards = match std::fs::read_dir(&objects_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(BlobInventory::default());
+        }
+        Err(_) => return Err(StorageError::Unavailable),
+    };
+    let mut inventory = BlobInventory::default();
+    for shard in shards {
+        let shard = shard.map_err(|_| StorageError::Unavailable)?;
+        let shard_name = shard.file_name();
+        let shard_name = shard_name.to_str().unwrap_or_default();
+        let shard_metadata =
+            std::fs::symlink_metadata(shard.path()).map_err(|_| StorageError::Unavailable)?;
+        if !shard_metadata.file_type().is_dir()
+            || shard_name.len() != 2
+            || !shard_name.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            inventory.unsafe_objects = inventory.unsafe_objects.saturating_add(1);
+            continue;
+        }
+        for object in std::fs::read_dir(shard.path()).map_err(|_| StorageError::Unavailable)? {
+            let object = object.map_err(|_| StorageError::Unavailable)?;
+            let blob_id = object.file_name();
+            let blob_id = blob_id.to_str().unwrap_or_default();
+            let metadata =
+                std::fs::symlink_metadata(object.path()).map_err(|_| StorageError::Unavailable)?;
+            if metadata.file_type().is_file()
+                && blob_id.starts_with(shard_name)
+                && LocalBlobStore::object_path(root, blob_id).is_ok()
+            {
+                inventory.objects.push(InventoryObject {
+                    blob_id: blob_id.to_owned(),
+                    size: i64::try_from(metadata.len()).map_err(|_| StorageError::Unavailable)?,
+                });
+            } else {
+                inventory.unsafe_objects = inventory.unsafe_objects.saturating_add(1);
+            }
+        }
+    }
+    inventory
+        .objects
+        .sort_by(|left, right| left.blob_id.cmp(&right.blob_id));
+    Ok(inventory)
+}
+
+fn delete_temporary_local(root: &Path, cutoff: DateTime<Utc>) -> Result<u64, StorageError> {
+    let temporary_root = root.join(".tmp");
+    let entries = match std::fs::read_dir(temporary_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(_) => return Err(StorageError::Unavailable),
+    };
+    let cutoff = std::time::UNIX_EPOCH
+        .checked_add(std::time::Duration::from_secs(
+            u64::try_from(cutoff.timestamp()).map_err(|_| StorageError::InvalidInput)?,
+        ))
+        .ok_or(StorageError::InvalidInput)?;
+    let mut deleted = 0_u64;
+    for entry in entries {
+        let entry = entry.map_err(|_| StorageError::Unavailable)?;
+        let metadata =
+            std::fs::symlink_metadata(entry.path()).map_err(|_| StorageError::Unavailable)?;
+        if metadata.file_type().is_file()
+            && metadata.modified().map_err(|_| StorageError::Unavailable)? <= cutoff
+        {
+            std::fs::remove_file(entry.path()).map_err(|_| StorageError::Unavailable)?;
+            deleted = deleted.saturating_add(1);
+        }
+    }
+    Ok(deleted)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -343,6 +448,17 @@ mod tests {
         let store = LocalBlobStore::new(root.clone(), 1_024).unwrap();
         let object = store.put("standalone", b"archive".to_vec()).await.unwrap();
         assert_eq!(store.get("standalone", &object).await.unwrap(), b"archive");
+        let inventory = store.inventory("standalone").await.unwrap();
+        assert_eq!(inventory.objects.len(), 1);
+        assert_eq!(inventory.objects[0].blob_id, object.blob_id);
+        std::fs::write(root.join(".tmp").join("abandoned"), b"partial").unwrap();
+        assert_eq!(
+            store
+                .delete_temporary_before("standalone", Utc::now() + chrono::Duration::seconds(1))
+                .await
+                .unwrap(),
+            1
+        );
         std::fs::write(
             LocalBlobStore::object_path(&root, &object.blob_id).unwrap(),
             b"tampered",
@@ -351,6 +467,15 @@ mod tests {
         assert_eq!(
             store.get("standalone", &object).await,
             Err(StorageError::DigestMismatch)
+        );
+        store.delete("standalone", &object.blob_id).await.unwrap();
+        assert!(
+            store
+                .inventory("standalone")
+                .await
+                .unwrap()
+                .objects
+                .is_empty()
         );
         std::fs::remove_dir_all(root).unwrap();
     }

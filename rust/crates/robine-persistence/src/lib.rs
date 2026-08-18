@@ -17,7 +17,8 @@ use robine_core::{
 use robine_secrets::{EncryptedSecret, SecretError, SecretRepository, SecretScope};
 use robine_source::{Provider, Repository, RepositoryStore, SourceError};
 use robine_storage::{
-    Artifact, CacheEntry, MetadataRepository, StorageError, StorageQuotas, StoredObject,
+    Artifact, CacheEntry, InventoryObject, MetadataRepository, RetentionRepository, RetentionStage,
+    StorageError, StorageQuotas, StoredObject,
 };
 use sqlx::{PgPool, Postgres, Transaction, postgres::PgPoolOptions};
 use thiserror::Error;
@@ -744,6 +745,174 @@ impl MetadataRepository for Database {
             .commit()
             .await
             .map_err(|_| StorageError::Unavailable)
+    }
+}
+
+#[async_trait]
+impl RetentionRepository for Database {
+    async fn stage_expired(
+        &self,
+        tenant_id: &str,
+        now: DateTime<Utc>,
+        log_cutoff: DateTime<Utc>,
+        not_before: DateTime<Utc>,
+        batch_size: i64,
+    ) -> Result<RetentionStage, StorageError> {
+        if batch_size <= 0 || batch_size > 10_000 {
+            return Err(StorageError::InvalidInput);
+        }
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| StorageError::Unavailable)?;
+        let artifact_blobs =
+            delete_expired_storage_rows(&mut transaction, "artifacts", tenant_id, now, batch_size)
+                .await?;
+        let cache_blobs = delete_expired_storage_rows(
+            &mut transaction,
+            "cache_entries",
+            tenant_id,
+            now,
+            batch_size,
+        )
+        .await?;
+        let logs_deleted = sqlx::query(
+            "DELETE FROM log_chunks WHERE id IN ( \
+               SELECT id FROM log_chunks WHERE tenant_id = $1 AND inserted_at <= $2 \
+               ORDER BY inserted_at LIMIT $3 FOR UPDATE SKIP LOCKED)",
+        )
+        .bind(tenant_id)
+        .bind(log_cutoff)
+        .bind(batch_size)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| StorageError::Unavailable)?
+        .rows_affected();
+        let mut blobs = artifact_blobs.clone();
+        blobs.extend(cache_blobs.iter().cloned());
+        blobs.sort();
+        blobs.dedup();
+        stage_gc_candidates(&mut transaction, tenant_id, &blobs, not_before, now).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| StorageError::Unavailable)?;
+        Ok(RetentionStage {
+            artifacts_deleted: artifact_blobs.len() as u64,
+            caches_deleted: cache_blobs.len() as u64,
+            logs_deleted,
+        })
+    }
+
+    async fn eligible_gc(
+        &self,
+        tenant_id: &str,
+        now: DateTime<Utc>,
+        batch_size: i64,
+    ) -> Result<Vec<String>, StorageError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| StorageError::Unavailable)?;
+        let candidates = sqlx::query_scalar::<_, String>(
+            "SELECT blob_id FROM storage_gc_candidates \
+             WHERE tenant_id = $1 AND not_before <= $2 ORDER BY not_before, blob_id LIMIT $3",
+        )
+        .bind(tenant_id)
+        .bind(now)
+        .bind(batch_size)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(|_| StorageError::Unavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| StorageError::Unavailable)?;
+        Ok(candidates)
+    }
+
+    async fn blob_referenced(&self, tenant_id: &str, blob_id: &str) -> Result<bool, StorageError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| StorageError::Unavailable)?;
+        let referenced = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM artifacts WHERE tenant_id = $1 AND blob_id = $2) \
+                    OR EXISTS(SELECT 1 FROM cache_entries WHERE tenant_id = $1 AND blob_id = $2)",
+        )
+        .bind(tenant_id)
+        .bind(blob_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| StorageError::Unavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| StorageError::Unavailable)?;
+        Ok(referenced)
+    }
+
+    async fn acknowledge_gc(&self, tenant_id: &str, blob_id: &str) -> Result<(), StorageError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| StorageError::Unavailable)?;
+        sqlx::query("DELETE FROM storage_gc_candidates WHERE tenant_id = $1 AND blob_id = $2")
+            .bind(tenant_id)
+            .bind(blob_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| StorageError::Unavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| StorageError::Unavailable)
+    }
+
+    async fn referenced_objects(
+        &self,
+        tenant_id: &str,
+    ) -> Result<Vec<InventoryObject>, StorageError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| StorageError::Unavailable)?;
+        let rows = sqlx::query_as::<_, (String, i64)>(
+            "SELECT blob_id, size FROM artifacts WHERE tenant_id = $1 \
+             UNION ALL SELECT blob_id, size FROM cache_entries WHERE tenant_id = $1",
+        )
+        .bind(tenant_id)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(|_| StorageError::Unavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| StorageError::Unavailable)?;
+        Ok(rows
+            .into_iter()
+            .map(|(blob_id, size)| InventoryObject { blob_id, size })
+            .collect())
+    }
+
+    async fn stage_orphans(
+        &self,
+        tenant_id: &str,
+        blob_ids: &[String],
+        not_before: DateTime<Utc>,
+        now: DateTime<Utc>,
+    ) -> Result<u64, StorageError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| StorageError::Unavailable)?;
+        let count =
+            stage_gc_candidates(&mut transaction, tenant_id, blob_ids, not_before, now).await?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| StorageError::Unavailable)?;
+        Ok(count)
     }
 }
 
@@ -2941,6 +3110,64 @@ async fn storage_quota_lock(
         .await
         .map_err(|_| StorageError::Unavailable)?;
     Ok(())
+}
+
+async fn delete_expired_storage_rows(
+    transaction: &mut Transaction<'_, Postgres>,
+    table: &'static str,
+    tenant_id: &str,
+    now: DateTime<Utc>,
+    batch_size: i64,
+) -> Result<Vec<String>, StorageError> {
+    let query = match table {
+        "artifacts" => {
+            "WITH expired AS ( \
+               SELECT id FROM artifacts WHERE tenant_id = $1 AND expires_at <= $2 \
+               ORDER BY expires_at LIMIT $3 FOR UPDATE SKIP LOCKED) \
+             DELETE FROM artifacts AS row USING expired \
+             WHERE row.id = expired.id AND row.tenant_id = $1 RETURNING row.blob_id"
+        }
+        "cache_entries" => {
+            "WITH expired AS ( \
+               SELECT id FROM cache_entries WHERE tenant_id = $1 AND expires_at <= $2 \
+               ORDER BY expires_at LIMIT $3 FOR UPDATE SKIP LOCKED) \
+             DELETE FROM cache_entries AS row USING expired \
+             WHERE row.id = expired.id AND row.tenant_id = $1 RETURNING row.blob_id"
+        }
+        _ => return Err(StorageError::InvalidInput),
+    };
+    sqlx::query_scalar::<_, String>(query)
+        .bind(tenant_id)
+        .bind(now)
+        .bind(batch_size)
+        .fetch_all(&mut **transaction)
+        .await
+        .map_err(|_| StorageError::Unavailable)
+}
+
+async fn stage_gc_candidates(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    blob_ids: &[String],
+    not_before: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Result<u64, StorageError> {
+    if blob_ids.is_empty() {
+        return Ok(0);
+    }
+    let result = sqlx::query(
+        "INSERT INTO storage_gc_candidates (blob_id, not_before, inserted_at, tenant_id) \
+         SELECT blob_id, $3, $4, $1 FROM UNNEST($2::text[]) AS blob_id \
+         ON CONFLICT (tenant_id, blob_id) DO NOTHING",
+    )
+    .bind(tenant_id)
+    .bind(blob_ids)
+    .bind(not_before)
+    .bind(now)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|_| StorageError::Unavailable)?;
+    Ok(result.rows_affected())
 }
 
 async fn enforce_storage_quota(

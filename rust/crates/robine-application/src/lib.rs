@@ -32,7 +32,10 @@ use robine_secrets::{SecretDecryptor, SecretRepository};
 use robine_source::{
     ArchiveFetcher, ArchiveLimits, RepositoryStore, extract_tar_gz, valid_commit_sha,
 };
-use robine_storage::{Artifact, BlobStore, CacheEntry, MetadataRepository, StorageQuotas};
+use robine_storage::{
+    Artifact, BlobStore, CacheEntry, MetadataRepository, RetentionRepository, RetentionResult,
+    StorageQuotas,
+};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
@@ -59,8 +62,27 @@ pub struct ControlPlane {
     source_repositories: Option<Arc<dyn RepositoryStore>>,
     source_fetcher: Option<Arc<dyn ArchiveFetcher>>,
     storage_repository: Option<Arc<dyn MetadataRepository>>,
+    retention_repository: Option<Arc<dyn RetentionRepository>>,
     blob_store: Option<Arc<dyn BlobStore>>,
     storage_quotas: StorageQuotas,
+    retention: RetentionConfig,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RetentionConfig {
+    pub log_seconds: i64,
+    pub gc_grace_seconds: i64,
+    pub batch_size: i64,
+}
+
+impl Default for RetentionConfig {
+    fn default() -> Self {
+        Self {
+            log_seconds: 2_592_000,
+            gc_grace_seconds: 3_600,
+            batch_size: 1_000,
+        }
+    }
 }
 
 struct BootstrapConfig {
@@ -344,11 +366,13 @@ impl ControlPlane {
             source_repositories: None,
             source_fetcher: None,
             storage_repository: None,
+            retention_repository: None,
             blob_store: None,
             storage_quotas: StorageQuotas {
                 instance_bytes: 53_687_091_200,
                 repository_bytes: 10_737_418_240,
             },
+            retention: RetentionConfig::default(),
         }
     }
 
@@ -390,6 +414,17 @@ impl ControlPlane {
         self.storage_repository = Some(repository);
         self.blob_store = Some(blobs);
         self.storage_quotas = quotas;
+        self
+    }
+
+    #[must_use]
+    pub fn with_retention_runtime(
+        mut self,
+        repository: Arc<dyn RetentionRepository>,
+        config: RetentionConfig,
+    ) -> Self {
+        self.retention_repository = Some(repository);
+        self.retention = config;
         self
     }
 
@@ -1329,6 +1364,49 @@ impl ControlPlane {
         Ok(batch)
     }
 
+    /// Applies bounded retention and reference-safe blob reconciliation for every tenant.
+    ///
+    /// # Errors
+    ///
+    /// Returns unavailable when metadata or the configured blob backend cannot complete a full
+    /// reconciliation. No orphan is staged from an incomplete inventory.
+    pub async fn process_all_tenant_retention(&self) -> Result<RetentionResult, ApplicationError> {
+        let tenants = self
+            .pipelines
+            .list_tenants()
+            .await
+            .map_err(|_| ApplicationError::Unavailable)?;
+        let mut total = RetentionResult::default();
+        for tenant_id in tenants {
+            let result = self.prune_tenant_retention(&tenant_id, Utc::now()).await?;
+            merge_retention_result(&mut total, &result);
+        }
+        Ok(total)
+    }
+
+    async fn prune_tenant_retention(
+        &self,
+        tenant_id: &str,
+        now: chrono::DateTime<Utc>,
+    ) -> Result<RetentionResult, ApplicationError> {
+        let repository = self
+            .retention_repository
+            .as_ref()
+            .ok_or(ApplicationError::Unavailable)?;
+        let blobs = self
+            .blob_store
+            .as_ref()
+            .ok_or(ApplicationError::Unavailable)?;
+        prune_retention(
+            repository.as_ref(),
+            blobs.as_ref(),
+            self.retention,
+            tenant_id,
+            now,
+        )
+        .await
+    }
+
     async fn process_tenant_execution(
         &self,
         tenant_id: &str,
@@ -1884,6 +1962,146 @@ fn merge_execution_batch(total: &mut ExecutionBatch, batch: &ExecutionBatch) {
     total.recovered_terminal += batch.recovered_terminal;
 }
 
+async fn prune_retention(
+    repository: &dyn RetentionRepository,
+    blobs: &dyn BlobStore,
+    config: RetentionConfig,
+    tenant_id: &str,
+    now: chrono::DateTime<Utc>,
+) -> Result<RetentionResult, ApplicationError> {
+    let stage = repository
+        .stage_expired(
+            tenant_id,
+            now,
+            now - chrono::Duration::seconds(config.log_seconds),
+            now + chrono::Duration::seconds(config.gc_grace_seconds),
+            config.batch_size,
+        )
+        .await
+        .map_err(|_| ApplicationError::Unavailable)?;
+    let blobs_deleted = drain_retention_gc(repository, blobs, config, tenant_id, now).await?;
+    let mut result = reconcile_retention(repository, blobs, config, tenant_id, now).await?;
+    result.artifacts_deleted = stage.artifacts_deleted;
+    result.caches_deleted = stage.caches_deleted;
+    result.logs_deleted = stage.logs_deleted;
+    result.blobs_deleted = blobs_deleted;
+    Ok(result)
+}
+
+async fn drain_retention_gc(
+    repository: &dyn RetentionRepository,
+    blobs: &dyn BlobStore,
+    config: RetentionConfig,
+    tenant_id: &str,
+    now: chrono::DateTime<Utc>,
+) -> Result<u64, ApplicationError> {
+    let candidates = repository
+        .eligible_gc(tenant_id, now, config.batch_size)
+        .await
+        .map_err(|_| ApplicationError::Unavailable)?;
+    let mut deleted = 0_u64;
+    for blob_id in candidates {
+        let referenced = repository
+            .blob_referenced(tenant_id, &blob_id)
+            .await
+            .map_err(|_| ApplicationError::Unavailable)?;
+        if !referenced {
+            blobs
+                .delete(tenant_id, &blob_id)
+                .await
+                .map_err(|_| ApplicationError::Unavailable)?;
+            deleted = deleted.saturating_add(1);
+        }
+        repository
+            .acknowledge_gc(tenant_id, &blob_id)
+            .await
+            .map_err(|_| ApplicationError::Unavailable)?;
+    }
+    Ok(deleted)
+}
+
+async fn reconcile_retention(
+    repository: &dyn RetentionRepository,
+    blobs: &dyn BlobStore,
+    config: RetentionConfig,
+    tenant_id: &str,
+    now: chrono::DateTime<Utc>,
+) -> Result<RetentionResult, ApplicationError> {
+    let inventory = blobs
+        .inventory(tenant_id)
+        .await
+        .map_err(|_| ApplicationError::Unavailable)?;
+    let referenced = repository
+        .referenced_objects(tenant_id)
+        .await
+        .map_err(|_| ApplicationError::Unavailable)?;
+    let physical_ids = inventory
+        .objects
+        .iter()
+        .map(|object| object.blob_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let referenced_ids = referenced
+        .iter()
+        .map(|object| object.blob_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let orphan_count = physical_ids.difference(&referenced_ids).count();
+    let orphan_ids = physical_ids
+        .difference(&referenced_ids)
+        .take(usize::try_from(config.batch_size).unwrap_or(0))
+        .map(|blob_id| (*blob_id).to_owned())
+        .collect::<Vec<_>>();
+    let orphans_staged = repository
+        .stage_orphans(
+            tenant_id,
+            &orphan_ids,
+            now + chrono::Duration::seconds(config.gc_grace_seconds),
+            now,
+        )
+        .await
+        .map_err(|_| ApplicationError::Unavailable)?;
+    let temporary_deleted = blobs
+        .delete_temporary_before(
+            tenant_id,
+            now - chrono::Duration::seconds(config.gc_grace_seconds),
+        )
+        .await
+        .map_err(|_| ApplicationError::Unavailable)?;
+    Ok(RetentionResult {
+        logical_bytes: referenced
+            .iter()
+            .fold(0_i64, |total, object| total.saturating_add(object.size)),
+        physical_bytes: inventory
+            .objects
+            .iter()
+            .fold(0_i64, |total, object| total.saturating_add(object.size)),
+        orphan_objects: u64::try_from(orphan_count).unwrap_or(u64::MAX),
+        missing_objects: u64::try_from(referenced_ids.difference(&physical_ids).count())
+            .unwrap_or(u64::MAX),
+        unsafe_objects: inventory.unsafe_objects,
+        temporary_deleted,
+        orphans_staged,
+        ..RetentionResult::default()
+    })
+}
+
+fn merge_retention_result(total: &mut RetentionResult, result: &RetentionResult) {
+    total.artifacts_deleted = total
+        .artifacts_deleted
+        .saturating_add(result.artifacts_deleted);
+    total.caches_deleted = total.caches_deleted.saturating_add(result.caches_deleted);
+    total.logs_deleted = total.logs_deleted.saturating_add(result.logs_deleted);
+    total.blobs_deleted = total.blobs_deleted.saturating_add(result.blobs_deleted);
+    total.logical_bytes = total.logical_bytes.saturating_add(result.logical_bytes);
+    total.physical_bytes = total.physical_bytes.saturating_add(result.physical_bytes);
+    total.orphan_objects = total.orphan_objects.saturating_add(result.orphan_objects);
+    total.missing_objects = total.missing_objects.saturating_add(result.missing_objects);
+    total.unsafe_objects = total.unsafe_objects.saturating_add(result.unsafe_objects);
+    total.temporary_deleted = total
+        .temporary_deleted
+        .saturating_add(result.temporary_deleted);
+    total.orphans_staged = total.orphans_staged.saturating_add(result.orphans_staged);
+}
+
 fn authentication_error(error: &PortError) -> ApplicationError {
     match error {
         PortError::NotFound | PortError::InvalidData => ApplicationError::Unauthenticated,
@@ -2007,7 +2225,110 @@ fn valid_email(email: &str) -> bool {
 mod tests {
     use super::*;
     use robine_execution::{ExecutionStep, SourceFile, StepCondition, StepKind};
+    use robine_storage::{
+        BlobInventory, InventoryObject, RetentionStage, StorageError, StoredObject,
+    };
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::{collections::BTreeMap, path::PathBuf};
+
+    struct IncompleteBlobStore;
+
+    #[async_trait::async_trait]
+    impl BlobStore for IncompleteBlobStore {
+        async fn put(
+            &self,
+            _tenant_id: &str,
+            _content: Vec<u8>,
+        ) -> Result<StoredObject, StorageError> {
+            Err(StorageError::Unavailable)
+        }
+
+        async fn get(
+            &self,
+            _tenant_id: &str,
+            _object: &StoredObject,
+        ) -> Result<Vec<u8>, StorageError> {
+            Err(StorageError::Unavailable)
+        }
+
+        async fn delete(&self, _tenant_id: &str, _blob_id: &str) -> Result<(), StorageError> {
+            Err(StorageError::Unavailable)
+        }
+
+        async fn inventory(&self, _tenant_id: &str) -> Result<BlobInventory, StorageError> {
+            Err(StorageError::Unavailable)
+        }
+
+        async fn delete_temporary_before(
+            &self,
+            _tenant_id: &str,
+            _cutoff: chrono::DateTime<Utc>,
+        ) -> Result<u64, StorageError> {
+            panic!("temporary cleanup must not run after incomplete inventory")
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingRetention {
+        staged: AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl RetentionRepository for RecordingRetention {
+        async fn stage_expired(
+            &self,
+            _tenant_id: &str,
+            _now: chrono::DateTime<Utc>,
+            _log_cutoff: chrono::DateTime<Utc>,
+            _not_before: chrono::DateTime<Utc>,
+            _batch_size: i64,
+        ) -> Result<RetentionStage, StorageError> {
+            Ok(RetentionStage::default())
+        }
+
+        async fn eligible_gc(
+            &self,
+            _tenant_id: &str,
+            _now: chrono::DateTime<Utc>,
+            _batch_size: i64,
+        ) -> Result<Vec<String>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn blob_referenced(
+            &self,
+            _tenant_id: &str,
+            _blob_id: &str,
+        ) -> Result<bool, StorageError> {
+            Ok(false)
+        }
+
+        async fn acknowledge_gc(
+            &self,
+            _tenant_id: &str,
+            _blob_id: &str,
+        ) -> Result<(), StorageError> {
+            Ok(())
+        }
+
+        async fn referenced_objects(
+            &self,
+            _tenant_id: &str,
+        ) -> Result<Vec<InventoryObject>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn stage_orphans(
+            &self,
+            _tenant_id: &str,
+            _blob_ids: &[String],
+            _not_before: chrono::DateTime<Utc>,
+            _now: chrono::DateTime<Utc>,
+        ) -> Result<u64, StorageError> {
+            self.staged.store(true, Ordering::SeqCst);
+            Ok(0)
+        }
+    }
 
     #[test]
     fn cache_checksum_and_runner_artifact_templates_resolve_without_expression_evaluation() {
@@ -2065,5 +2386,24 @@ mod tests {
                 .unwrap()
                 .starts_with("release-linux-")
         );
+    }
+
+    #[tokio::test]
+    async fn incomplete_inventory_never_stages_reconciliation_garbage() {
+        let repository = RecordingRetention::default();
+        let result = prune_retention(
+            &repository,
+            &IncompleteBlobStore,
+            RetentionConfig {
+                log_seconds: 60,
+                gc_grace_seconds: 0,
+                batch_size: 100,
+            },
+            "tenant",
+            Utc::now(),
+        )
+        .await;
+        assert!(matches!(result, Err(ApplicationError::Unavailable)));
+        assert!(!repository.staged.load(Ordering::SeqCst));
     }
 }

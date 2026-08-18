@@ -7,7 +7,7 @@ use argon2::{
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
 use hmac::{Hmac, Mac};
-use robine_application::{ApplicationError, ControlPlane};
+use robine_application::{ApplicationError, ControlPlane, RetentionConfig};
 use robine_core::{
     identity::{OidcAuthorization, OidcClaims, Role, User},
     pipelines::{
@@ -20,7 +20,8 @@ use robine_persistence::{Database, Readiness};
 use robine_secrets::SecretRepository;
 use robine_source::{Provider, RepositoryStore};
 use robine_storage::{
-    Artifact, CacheEntry, MetadataRepository, StorageError, StorageQuotas, StoredObject,
+    Artifact, BlobStore, CacheEntry, LocalBlobStore, MetadataRepository, StorageError,
+    StorageQuotas, StoredObject,
 };
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
@@ -203,6 +204,102 @@ async fn cache_and_dependency_artifact_metadata_are_tenant_scoped_and_quota_lock
         .await
         .expect("delete pipeline fixture");
     cleanup.commit().await.expect("commit storage cleanup");
+}
+
+#[tokio::test]
+async fn retention_rechecks_shared_references_and_deletes_only_staged_orphans() {
+    let Ok(database_url) = std::env::var("ROBINE_DATABASE_INTEGRATION_URL") else {
+        return;
+    };
+    let database = Arc::new(
+        Database::connect(&database_url, 2)
+            .await
+            .expect("connect migrated database"),
+    );
+    let tenant = format!("rust-retention-{}", Uuid::new_v4());
+    let repository_id = Uuid::new_v4();
+    let root = std::env::temp_dir().join(format!("robine-retention-{}", Uuid::new_v4()));
+    let blobs = Arc::new(LocalBlobStore::new(root.clone(), 1_024).expect("local blob store"));
+    let shared = blobs
+        .put(&tenant, b"shared".to_vec())
+        .await
+        .expect("shared blob");
+    let orphan = blobs
+        .put(&tenant, b"orphan".to_vec())
+        .await
+        .expect("orphan blob");
+    let now = Utc::now();
+    let quotas = StorageQuotas {
+        instance_bytes: 10_000,
+        repository_bytes: 10_000,
+    };
+    for (key, expires_at) in [
+        ("expired", now - Duration::seconds(1)),
+        ("live", now + Duration::days(7)),
+    ] {
+        MetadataRepository::save_cache(
+            database.as_ref(),
+            &tenant,
+            &CacheEntry {
+                id: Uuid::new_v4(),
+                repository_id,
+                key: key.into(),
+                object: shared.clone(),
+                created_at: now - Duration::days(1),
+                expires_at,
+            },
+            quotas,
+        )
+        .await
+        .expect("cache fixture");
+    }
+    let control_plane = ControlPlane::new(database.clone(), database.clone())
+        .with_storage_runtime(database.clone(), blobs.clone(), quotas)
+        .with_retention_runtime(
+            database.clone(),
+            RetentionConfig {
+                log_seconds: 60,
+                gc_grace_seconds: 0,
+                batch_size: 100,
+            },
+        );
+    let first = control_plane
+        .process_all_tenant_retention()
+        .await
+        .expect("first retention pass");
+    assert!(first.caches_deleted >= 1);
+    assert!(first.orphan_objects >= 1);
+    assert_eq!(blobs.get(&tenant, &shared).await.unwrap(), b"shared");
+    assert_eq!(blobs.get(&tenant, &orphan).await.unwrap(), b"orphan");
+
+    let second = control_plane
+        .process_all_tenant_retention()
+        .await
+        .expect("second retention pass");
+    assert!(second.blobs_deleted >= 1);
+    assert_eq!(blobs.get(&tenant, &shared).await.unwrap(), b"shared");
+    assert_eq!(
+        blobs.get(&tenant, &orphan).await,
+        Err(StorageError::NotFound)
+    );
+
+    let mut cleanup = database
+        .tenant_transaction(&tenant)
+        .await
+        .expect("retention cleanup transaction");
+    sqlx::query("DELETE FROM cache_entries WHERE tenant_id = $1 AND repository_id = $2")
+        .bind(&tenant)
+        .bind(repository_id)
+        .execute(&mut *cleanup)
+        .await
+        .expect("delete retention cache fixtures");
+    sqlx::query("DELETE FROM storage_gc_candidates WHERE tenant_id = $1")
+        .bind(&tenant)
+        .execute(&mut *cleanup)
+        .await
+        .expect("delete retention candidates");
+    cleanup.commit().await.expect("commit retention cleanup");
+    std::fs::remove_dir_all(root).expect("remove retention blobs");
 }
 
 #[tokio::test]

@@ -2,7 +2,7 @@ use std::{io, sync::Arc};
 
 use actix_web::{App, HttpServer, web};
 use chrono::{Duration, Utc};
-use robine_application::ControlPlane;
+use robine_application::{ControlPlane, RetentionConfig};
 use robine_execution::{DockerCli, DockerConfig};
 use robine_oidc::OidcClient;
 use robine_persistence::Database;
@@ -58,6 +58,14 @@ async fn main() -> io::Result<()> {
         LocalBlobStore::new(storage_root, max_object_bytes).map_err(io::Error::other)?;
     control_plane =
         control_plane.with_storage_runtime(database.clone(), Arc::new(blob_store), storage_quotas);
+    control_plane = control_plane.with_retention_runtime(
+        database.clone(),
+        RetentionConfig {
+            log_seconds: environment_i64("ROBINE_LOG_RETENTION_SECONDS", 2_592_000)?,
+            gc_grace_seconds: environment_i64("ROBINE_GC_GRACE_SECONDS", 3_600)?,
+            batch_size: environment_i64("ROBINE_RETENTION_BATCH_SIZE", 1_000)?,
+        },
+    );
     control_plane = control_plane.with_execution_runner(Arc::new(DockerCli::new(DockerConfig {
         instance: std::env::var("ROBINE_RUNNER_RESOURCE_NAMESPACE")
             .unwrap_or_else(|_| "production".into()),
@@ -114,6 +122,10 @@ async fn main() -> io::Result<()> {
     ));
     let execution_worker = tokio::spawn(run_execution_worker(
         control_plane.clone(),
+        shutdown_receiver.clone(),
+    ));
+    let retention_worker = tokio::spawn(run_retention_worker(
+        control_plane.clone(),
         shutdown_receiver,
     ));
     let server = HttpServer::new(move || {
@@ -127,6 +139,7 @@ async fn main() -> io::Result<()> {
     let _ = shutdown_sender.send(true);
     let _ = outbox_worker.await;
     let _ = execution_worker.await;
+    let _ = retention_worker.await;
     result
 }
 
@@ -176,6 +189,26 @@ async fn run_outbox_worker(control_plane: Arc<ControlPlane>, mut shutdown: watch
             _ = interval.tick() => {
                 let _ = control_plane.process_all_tenant_outboxes(25).await;
                 let _ = control_plane.process_all_tenant_dispatches(25).await;
+            }
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+async fn run_retention_worker(
+    control_plane: Arc<ControlPlane>,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let start = tokio::time::Instant::now() + std::time::Duration::from_hours(1);
+    let mut interval = tokio::time::interval_at(start, std::time::Duration::from_hours(1));
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                let _ = control_plane.process_all_tenant_retention().await;
             }
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
