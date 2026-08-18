@@ -1510,6 +1510,42 @@ impl PipelineRepository for Database {
         })
     }
 
+    async fn record_runner_session(
+        &self,
+        tenant_id: &str,
+        runner_id: Uuid,
+        protocol_version: i32,
+        software_version: &str,
+        capabilities: &serde_json::Value,
+        now: DateTime<Utc>,
+    ) -> Result<(), PortError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        let updated = sqlx::query(
+            "UPDATE remote_runners SET protocol_version = $3, software_version = $4, \
+             capabilities = $5, last_authenticated_at = $6, last_seen_at = $6, updated_at = $6 \
+             WHERE id = $1 AND tenant_id = $2 AND admin_state <> 'revoked'",
+        )
+        .bind(runner_id)
+        .bind(tenant_id)
+        .bind(protocol_version)
+        .bind(software_version)
+        .bind(capabilities)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| PortError::Unavailable)?;
+        if updated.rows_affected() != 1 {
+            return Err(PortError::NotFound);
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PortError::Unavailable)
+    }
+
     async fn heartbeat_runner_attempts(
         &self,
         tenant_id: &str,

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use actix_web::{HttpRequest, HttpResponse, Responder, web};
+use futures_util::StreamExt;
 use robine_application::{ApplicationError, ControlPlane};
 use robine_core::{
     identity::Role,
@@ -46,6 +47,212 @@ async fn ready(state: web::Data<AppState>) -> impl Responder {
 
 async fn not_found() -> impl Responder {
     HttpResponse::NotFound().finish()
+}
+
+const RUNNER_TOPIC: &str = "runner:v1";
+
+#[derive(Deserialize)]
+struct RunnerHello {
+    supported_protocol_versions: Vec<i32>,
+    software_version: String,
+    capabilities: serde_json::Value,
+    #[serde(default)]
+    active_attempt_ids: Vec<Uuid>,
+}
+
+async fn runner_socket(
+    request: HttpRequest,
+    body: web::Payload,
+    state: web::Data<AppState>,
+) -> Result<HttpResponse, actix_web::Error> {
+    let runner_id = request
+        .headers()
+        .get("x-robine-runner-id")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| Uuid::parse_str(value).ok());
+    let credential = request
+        .headers()
+        .get("x-robine-runner-credential")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let (Some(runner_id), Some(credential)) = (runner_id, credential) else {
+        return Ok(HttpResponse::Unauthorized().finish());
+    };
+    let (response, mut session, mut messages) = actix_ws::handle(&request, body)?;
+    let control_plane = state.control_plane.clone();
+    actix_web::rt::spawn(async move {
+        let mut joined = false;
+        while let Some(Ok(message)) = messages.next().await {
+            match message {
+                actix_ws::Message::Text(text) if text.len() <= 262_144 => {
+                    let Ok(frame) = serde_json::from_str::<Vec<serde_json::Value>>(&text) else {
+                        let _ = session
+                            .close(Some(actix_ws::CloseReason {
+                                code: actix_ws::CloseCode::Protocol,
+                                description: Some("malformed_message".into()),
+                            }))
+                            .await;
+                        break;
+                    };
+                    if frame.len() != 5 {
+                        continue;
+                    }
+                    let join_ref = frame[0].clone();
+                    let message_ref = frame[1].clone();
+                    let topic = frame[2].as_str().unwrap_or_default();
+                    let event = frame[3].as_str().unwrap_or_default();
+                    if !joined && topic == RUNNER_TOPIC && event == "phx_join" {
+                        let hello = serde_json::from_value::<RunnerHello>(frame[4].clone());
+                        let response_body = match hello {
+                            Ok(hello) => match control_plane
+                                .negotiate_runner_session(
+                                    "standalone",
+                                    runner_id,
+                                    &credential,
+                                    &hello.supported_protocol_versions,
+                                    &hello.software_version,
+                                    &hello.capabilities,
+                                )
+                                .await
+                            {
+                                Ok(protocol_version) => {
+                                    match control_plane
+                                        .reconcile_runner_attempts(
+                                            "standalone",
+                                            runner_id,
+                                            &credential,
+                                            hello.active_attempt_ids,
+                                        )
+                                        .await
+                                    {
+                                        Ok(reconciliation) => {
+                                            joined = true;
+                                            serde_json::json!({"status":"ok","response":{
+                                                "protocol_version":protocol_version,
+                                                "heartbeat_interval_seconds":20,
+                                                "stale_after_seconds":60,
+                                                "resume":reconciliation.resume,
+                                                "lease_lost":reconciliation.lease_lost
+                                            }})
+                                        }
+                                        Err(_) => {
+                                            serde_json::json!({"status":"error","response":{"code":"unavailable"}})
+                                        }
+                                    }
+                                }
+                                Err(ApplicationError::InvalidAttemptEvent) => serde_json::json!({
+                                    "status":"error","response":{"code":"incompatible_protocol","supported_protocol_versions":[1]}
+                                }),
+                                Err(ApplicationError::Unauthenticated) => {
+                                    serde_json::json!({"status":"error","response":{"code":"unauthorized"}})
+                                }
+                                Err(_) => {
+                                    serde_json::json!({"status":"error","response":{"code":"unavailable"}})
+                                }
+                            },
+                            Err(_) => {
+                                serde_json::json!({"status":"error","response":{"code":"invalid_hello"}})
+                            }
+                        };
+                        let reply = serde_json::json!([
+                            join_ref,
+                            message_ref,
+                            RUNNER_TOPIC,
+                            "phx_reply",
+                            response_body
+                        ]);
+                        if session.text(reply.to_string()).await.is_err() {
+                            break;
+                        }
+                    } else if joined && topic == RUNNER_TOPIC && event == "heartbeat" {
+                        let heartbeat = control_plane
+                            .heartbeat_runner_attempts("standalone", runner_id, &credential, 60)
+                            .await;
+                        let body = match &heartbeat {
+                            Ok(heartbeat) => {
+                                serde_json::json!({"status":"ok","response":heartbeat})
+                            }
+                            Err(_) => {
+                                serde_json::json!({"status":"error","response":{"code":"unauthorized"}})
+                            }
+                        };
+                        let reply = serde_json::json!([
+                            join_ref,
+                            message_ref,
+                            RUNNER_TOPIC,
+                            "phx_reply",
+                            body
+                        ]);
+                        if session.text(reply.to_string()).await.is_err() {
+                            break;
+                        }
+                        if let Ok(heartbeat) = heartbeat {
+                            for attempt_id in heartbeat.pending_offer_attempt_ids {
+                                if let Ok(offer) = control_plane
+                                    .remote_job_offer(
+                                        "standalone",
+                                        runner_id,
+                                        &credential,
+                                        attempt_id,
+                                    )
+                                    .await
+                                {
+                                    let push = serde_json::json!([
+                                        null,
+                                        null,
+                                        RUNNER_TOPIC,
+                                        "job_offer",
+                                        offer
+                                    ]);
+                                    if session.text(push.to_string()).await.is_err() {
+                                        break;
+                                    }
+                                }
+                            }
+                            for attempt_id in heartbeat.cancellation_requested_attempt_ids {
+                                let push = serde_json::json!([null,null,RUNNER_TOPIC,"cancel",{"attempt_id":attempt_id}]);
+                                if session.text(push.to_string()).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                    } else {
+                        let body = serde_json::json!({"status":"error","response":{"code":"unsupported_message"}});
+                        let reply = serde_json::json!([
+                            join_ref,
+                            message_ref,
+                            RUNNER_TOPIC,
+                            "phx_reply",
+                            body
+                        ]);
+                        if session.text(reply.to_string()).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                actix_ws::Message::Ping(bytes) => {
+                    if session.pong(&bytes).await.is_err() {
+                        break;
+                    }
+                }
+                actix_ws::Message::Close(reason) => {
+                    let _ = session.close(reason).await;
+                    break;
+                }
+                actix_ws::Message::Text(_) | actix_ws::Message::Binary(_) => {
+                    let _ = session
+                        .close(Some(actix_ws::CloseReason {
+                            code: actix_ws::CloseCode::Size,
+                            description: Some("message_too_large".into()),
+                        }))
+                        .await;
+                    break;
+                }
+                _ => {}
+            }
+        }
+    });
+    Ok(response)
 }
 
 #[derive(Deserialize)]
@@ -1222,6 +1429,7 @@ fn bearer_token(request: &HttpRequest) -> Option<&str> {
 
 pub fn configure(config: &mut web::ServiceConfig) {
     config
+        .route("/runner/socket/websocket", web::get().to(runner_socket))
         .route("/health/live", web::get().to(live))
         .route("/health/ready", web::get().to(ready))
         .route("/api/v1/auth/bootstrap", web::post().to(bootstrap))

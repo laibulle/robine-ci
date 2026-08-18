@@ -7,8 +7,10 @@ rust-version.workspace = true
 
 [dependencies]
 actix-web.workspace = true
+actix-ws.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
+futures-util.workspace = true
 robine-application = { path = "../robine-application" }
 robine-core = { path = "../robine-core" }
 robine-execution = { path = "../robine-execution" }

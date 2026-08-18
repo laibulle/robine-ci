@@ -1087,6 +1087,38 @@ impl ControlPlane {
             .map_err(|_| ApplicationError::Unavailable)
     }
 
+    /// Authenticates and records a bounded protocol-v1 remote-runner session.
+    pub async fn negotiate_runner_session(
+        &self,
+        tenant_id: &str,
+        runner_id: Uuid,
+        credential: &str,
+        supported_versions: &[i32],
+        software_version: &str,
+        capabilities: &serde_json::Value,
+    ) -> Result<i32, ApplicationError> {
+        let valid_capabilities = capabilities.is_object()
+            && serde_json::to_vec(capabilities).is_ok_and(|encoded| encoded.len() <= 32_768);
+        if !supported_versions.contains(&1)
+            || software_version.is_empty()
+            || software_version.len() > 128
+            || !valid_capabilities
+        {
+            return Err(ApplicationError::InvalidAttemptEvent);
+        }
+        let now = Utc::now();
+        self.authenticate_runner(tenant_id, runner_id, credential, now)
+            .await?;
+        self.pipelines
+            .record_runner_session(tenant_id, runner_id, 1, software_version, capabilities, now)
+            .await
+            .map_err(|error| match error {
+                PortError::NotFound => ApplicationError::Unauthenticated,
+                _ => ApplicationError::Unavailable,
+            })?;
+        Ok(1)
+    }
+
     /// Reconciles a reconnecting runner's reported work with durable active ownership.
     ///
     /// # Errors

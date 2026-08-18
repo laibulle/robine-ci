@@ -178,6 +178,16 @@ pub trait PipelineRepository: Send + Sync {
         now: DateTime<Utc>,
     ) -> Result<RunnerAuthenticationMaterial, PortError>;
 
+    async fn record_runner_session(
+        &self,
+        tenant_id: &str,
+        runner_id: Uuid,
+        protocol_version: i32,
+        software_version: &str,
+        capabilities: &serde_json::Value,
+        now: DateTime<Utc>,
+    ) -> Result<(), PortError>;
+
     async fn heartbeat_runner_attempts(
         &self,
         tenant_id: &str,
