@@ -1636,13 +1636,89 @@ async fn build_information() -> HttpResponse {
 }
 
 async fn browser_admin(request: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
-    match browser_administrator(&request, &state).await {
+    let (actor, token) = match browser_administrator(&request, &state).await {
+        Ok(authentication) => authentication,
+        Err(ApplicationError::Forbidden) => return HttpResponse::Forbidden().finish(),
+        Err(_) => {
+            return HttpResponse::SeeOther()
+                .insert_header((header::LOCATION, "/sign-in"))
+                .finish();
+        }
+    };
+    let Ok(users) = state.control_plane.list_users(&actor).await else {
+        return HttpResponse::ServiceUnavailable().finish();
+    };
+    let metrics = state
+        .control_plane
+        .operational_metrics()
+        .await
+        .unwrap_or_else(|_| serde_json::json!({}));
+    let csrf = csrf_token(&token);
+    let rows = users.iter().fold(String::new(), |mut output, user| {
+        let selected = |role| if user.role == role { " selected" } else { "" };
+        let _ = write!(output, "<tr id=\"user-{}\"><td>{}</td><td>{}</td><td>{}</td><td><form method=\"post\" action=\"/admin/users/{}/role\"><input type=\"hidden\" name=\"csrf_token\" value=\"{}\"><select name=\"role\"><option value=\"viewer\"{}>Viewer</option><option value=\"maintainer\"{}>Maintainer</option><option value=\"administrator\"{}>Administrator</option></select><button type=\"submit\">Save role</button></form></td></tr>", user.id, escape_html(&user.email), role_label(user.role), if user.disabled { "disabled" } else { "active" }, user.id, csrf, selected(Role::Viewer), selected(Role::Maintainer), selected(Role::Administrator));
+        output
+    });
+    html_page(
+        "Administration",
+        &format!(
+            "<section id=\"admin-dashboard\"><p class=\"eyebrow\">Instance administration</p><h1>Health and identities</h1><p><a class=\"primary\" href=\"/admin/runners\">Operate runner fleet</a></p><dl id=\"admin-health\"><dt>Queued pipelines</dt><dd>{}</dd><dt>Running pipelines</dt><dd>{}</dd><dt>Pending outbox</dt><dd>{}</dd><dt>Available durable jobs</dt><dd>{}</dd><dt>Online runners</dt><dd>{}</dd></dl><h2>Users</h2><table><thead><tr><th>Email</th><th>Role</th><th>State</th><th>Change role</th></tr></thead><tbody>{rows}</tbody></table></section>",
+            metric_value(&metrics, "pipelines_queued"),
+            metric_value(&metrics, "pipelines_running"),
+            metric_value(&metrics, "outbox_pending"),
+            metric_value(&metrics, "durable_available"),
+            metric_value(&metrics, "runners_online")
+        ),
+    )
+}
+
+fn metric_value(metrics: &serde_json::Value, name: &str) -> i64 {
+    metrics
+        .get(name)
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0)
+}
+
+const fn role_label(role: Role) -> &'static str {
+    match role {
+        Role::Viewer => "Viewer",
+        Role::Maintainer => "Maintainer",
+        Role::Administrator => "Administrator",
+    }
+}
+
+#[derive(Deserialize)]
+struct BrowserRoleForm {
+    csrf_token: String,
+    role: Role,
+}
+
+async fn browser_change_user_role(
+    request: HttpRequest,
+    user_id: web::Path<Uuid>,
+    input: web::Form<BrowserRoleForm>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let (actor, token) = match browser_administrator(&request, &state).await {
+        Ok(authentication) => authentication,
+        Err(ApplicationError::Forbidden) => return HttpResponse::Forbidden().finish(),
+        Err(_) => return HttpResponse::Unauthorized().finish(),
+    };
+    if !valid_csrf(&input.csrf_token, &token) {
+        return HttpResponse::Forbidden().finish();
+    }
+    match state
+        .control_plane
+        .change_user_role(&actor, *user_id, input.role)
+        .await
+    {
         Ok(_) => HttpResponse::SeeOther()
-            .insert_header((header::LOCATION, "/admin/runners"))
+            .insert_header((header::LOCATION, "/admin"))
             .finish(),
-        Err(_) => HttpResponse::SeeOther()
-            .insert_header((header::LOCATION, "/sign-in"))
-            .finish(),
+        Err(ApplicationError::LastAdministrator) => HttpResponse::Conflict().finish(),
+        Err(ApplicationError::Forbidden) => HttpResponse::Forbidden().finish(),
+        Err(ApplicationError::Unauthenticated) => HttpResponse::NotFound().finish(),
+        Err(_) => HttpResponse::ServiceUnavailable().finish(),
     }
 }
 
@@ -3284,6 +3360,10 @@ pub fn configure(config: &mut web::ServiceConfig) {
         )
         .route("/build-information", web::get().to(build_information))
         .route("/admin", web::get().to(browser_admin))
+        .route(
+            "/admin/users/{user_id}/role",
+            web::post().to(browser_change_user_role),
+        )
         .route("/metrics", web::get().to(metrics))
         .route(
             "/badges/{provider}/{owner}/{repository}/build.svg",
@@ -3625,11 +3705,23 @@ mod tests {
         }
 
         async fn list_users(&self) -> Result<Vec<User>, PortError> {
-            Ok(Vec::new())
+            Ok(vec![User {
+                id: Uuid::nil(),
+                email: "user@example.com".into(),
+                role: self.role,
+                disabled: false,
+                inserted_at: Utc::now(),
+            }])
         }
 
-        async fn change_user_role(&self, _user_id: Uuid, _role: Role) -> Result<User, PortError> {
-            Err(PortError::NotFound)
+        async fn change_user_role(&self, user_id: Uuid, role: Role) -> Result<User, PortError> {
+            Ok(User {
+                id: user_id,
+                email: "user@example.com".into(),
+                role,
+                disabled: false,
+                inserted_at: Utc::now(),
+            })
         }
 
         async fn find_or_provision_oidc_user(
@@ -4345,6 +4437,58 @@ mod tests {
             .to_request();
         let response = test::call_service(&maintainer, request).await;
         assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    }
+
+    #[actix_web::test]
+    async fn administrator_dashboard_exposes_health_and_csrf_protected_identity_roles() {
+        let viewer =
+            test::init_service(App::new().app_data(state(true)).configure(configure)).await;
+        let request = test::TestRequest::get()
+            .uri("/admin")
+            .insert_header((header::COOKIE, "robine_session=session"))
+            .to_request();
+        assert_eq!(
+            test::call_service(&viewer, request).await.status(),
+            StatusCode::FORBIDDEN
+        );
+
+        let admin = test::init_service(
+            App::new()
+                .app_data(state_with_role(true, Role::Administrator))
+                .configure(configure),
+        )
+        .await;
+        let request = test::TestRequest::get()
+            .uri("/admin")
+            .insert_header((header::COOKIE, "robine_session=session"))
+            .to_request();
+        let response = test::call_service(&admin, request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = test::read_body(response).await;
+        assert!(
+            std::str::from_utf8(&body)
+                .expect("HTML")
+                .contains("admin-dashboard")
+        );
+
+        let request = test::TestRequest::post()
+            .uri(&format!("/admin/users/{}/role", Uuid::nil()))
+            .insert_header((header::COOKIE, "robine_session=session"))
+            .insert_header((header::CONTENT_TYPE, "application/x-www-form-urlencoded"))
+            .set_payload(format!(
+                "csrf_token={}&role=maintainer",
+                csrf_token("session")
+            ))
+            .to_request();
+        let response = test::call_service(&admin, request).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("/admin")
+        );
     }
 
     #[actix_web::test]
@@ -5252,8 +5396,12 @@ mod tests {
         let source_files =
             robine_source::extract_tar_gz(&source_body, robine_source::ArchiveLimits::default())
                 .expect("safe transferred source");
-        assert_eq!(source_files[0].path, PathBuf::from("README.md"));
-        assert_eq!(source_files[0].contents, b"remote source\n");
+        assert_eq!(source_files.len(), 1);
+        assert_eq!(
+            source_files[0].path,
+            PathBuf::from(".robine-ci/workflows/ci.yml")
+        );
+        assert!(source_files[0].contents.starts_with(b"version: 1\n"));
 
         let secrets_request = test::TestRequest::get()
             .uri(&format!(

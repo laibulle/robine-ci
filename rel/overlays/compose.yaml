@@ -22,13 +22,12 @@ services:
     working_dir: /opt/robine
     env_file:
       - .env
+    environment:
+      PATH: /opt/robine:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
     depends_on:
       postgres:
         condition: service_healthy
-    command:
-      - /bin/sh
-      - -ec
-      - bin/robine eval 'Robine.Runtime.Release.migrate()' && exec bin/robine start
+    command: ["./robine-server"]
     healthcheck:
       test:
         - CMD-SHELL

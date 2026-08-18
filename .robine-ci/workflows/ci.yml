@@ -9,14 +9,11 @@ on:
 
 jobs:
   verify:
-    image: elixir@sha256:7ee41a9a8a8427dbd40c9133ee5b9047f585b58db4968fd675fbcd9498e3b22e
+    image: rust:1.97-bookworm
     shell: /bin/bash
-    timeout: 20m
+    timeout: 30m
     env:
-      MIX_ENV: test
-      ERL_FLAGS: "+S 4:4"
-      MAKEFLAGS: "-j4"
-      ROBINE_TEST_DATABASE_HOST: postgres
+      ROBINE_DATABASE_INTEGRATION_URL: postgres://postgres:postgres@postgres/robine_test
       DOCKER_HOST: tcp://docker:2375
       DOCKER_TLS_CERTDIR: ""
     services:
@@ -42,48 +39,43 @@ jobs:
     steps:
       - name: Checkout
         uses: checkout
-      - name: Prepare Mix tooling
+      - name: Install Docker client
         run: |
           curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-28.5.2.tgz -o /tmp/docker.tgz
           echo "ea90cfd12e1eeb12aa1c971741adb8bd4ed88e2a574eaac13f5029a1dbc6300d  /tmp/docker.tgz" | sha256sum -c -
           tar --no-same-owner -xzf /tmp/docker.tgz -C /usr/local/bin --strip-components=1 docker/docker
           rm /tmp/docker.tgz
           docker version
-          mix local.hex --force
-          mix local.rebar --force
-      - name: Restore Mix cache
+      - name: Restore Cargo cache
         uses: cache/restore
         with:
-          key: robine-mix-${{ checksum('mix.lock') }}
-          paths: [deps]
-      - name: Install dependencies
-        run: mix deps.get
-      - name: Run project verification and coverage
+          key: robine-cargo-${{ checksum('Cargo.lock') }}
+          paths: [target, /usr/local/cargo/registry, /usr/local/cargo/git]
+      - name: Verify formatting, lint and tests
         run: |
-          set -euo pipefail
-          mix format --check-formatted
-          mix compile --warnings-as-errors
-
-          set +e
-          mix coverage | tee /tmp/robine-coverage.log
-          coverage_status=${PIPESTATUS[0]}
-          set -e
-
-          coverage_total=$(awk '/^\[TOTAL\]/{gsub(/%/, "", $2); print $2}' /tmp/robine-coverage.log | tail -1)
-          if [[ -n "${coverage_total}" ]]; then
-            printf 'ROBINE_COVERAGE total=%s threshold=75 report=coverage-report\n' "${coverage_total}"
-          fi
-
-          exit "${coverage_status}"
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --workspace --all-targets
+      - name: Audit Rust dependencies and licenses
+        run: |
+          cargo install cargo-deny --locked
+          cargo deny check advisories licenses bans sources
+      - name: Publish coverage marker
+        run: |
+          cargo install cargo-llvm-cov --locked
+          cargo llvm-cov --workspace --all-features --lcov --output-path coverage.lcov
+          coverage_total=$(cargo llvm-cov report --summary-only | awk '/TOTAL/{gsub(/%/, "", $10); print $10}' | tail -1)
+          test -n "$coverage_total"
+          printf 'ROBINE_COVERAGE total=%s threshold=75 report=coverage-report\n' "$coverage_total"
       - name: Upload coverage report
         if: always
         uses: artifacts/upload
         with:
           name: coverage-report
-          paths: [cover]
+          paths: [coverage.lcov]
           retention-days: 14
-      - name: Save Mix cache
+      - name: Save Cargo cache
         uses: cache/save
         with:
-          key: robine-mix-${{ checksum('mix.lock') }}
-          paths: [deps]
+          key: robine-cargo-${{ checksum('Cargo.lock') }}
+          paths: [target, /usr/local/cargo/registry, /usr/local/cargo/git]

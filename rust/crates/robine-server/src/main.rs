@@ -17,6 +17,10 @@ use tokio::sync::watch;
 
 #[actix_web::main]
 async fn main() -> io::Result<()> {
+    if std::env::args().nth(1).as_deref() == Some("--version") {
+        println!("robine-server {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     let bind_address = std::env::var("ROBINE_BIND").unwrap_or_else(|_| "127.0.0.1:4000".into());
     let database_url = std::env::var("DATABASE_URL")
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "DATABASE_URL must be set"))?;
@@ -25,6 +29,10 @@ async fn main() -> io::Result<()> {
             .await
             .map_err(io::Error::other)?,
     );
+    database
+        .bootstrap_schema()
+        .await
+        .map_err(io::Error::other)?;
     let mut control_plane = ControlPlane::new(database.clone(), database.clone());
     control_plane = control_plane.with_workflow_limits(robine_workflows::WorkflowLimits {
         max_bytes: environment_usize("ROBINE_WORKFLOW_MAX_BYTES", 262_144)?,

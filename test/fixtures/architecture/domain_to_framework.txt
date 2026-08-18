@@ -1,3 +1,0 @@
-defmodule Robine.Pipelines.Domain.ForbiddenFixture do
-  use Ecto.Schema
-end

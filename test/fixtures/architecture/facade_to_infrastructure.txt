@@ -1,3 +1,0 @@
-defmodule Robine.ForbiddenFacadeFixture do
-  alias Oban.Job
-end

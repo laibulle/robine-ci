@@ -74,10 +74,8 @@ set +C
 {
   echo "ROBINE_HOST=$host"
   echo "ROBINE_PUBLIC_URL=https://$host"
-  echo "PHX_HOST=$host"
-  echo "PHX_SERVER=true"
-  echo "PORT=4000"
-  echo "DATABASE_URL=ecto://robine:$postgres_password@postgres/robine"
+  echo "ROBINE_BIND=0.0.0.0:4000"
+  echo "DATABASE_URL=postgres://robine:$postgres_password@postgres/robine"
   echo "POSTGRES_PASSWORD=$postgres_password"
   echo "SECRET_KEY_BASE=$secret_key_base"
   echo "ROBINE_CI_SECRET_KEY=$encryption_key"

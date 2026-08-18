@@ -25,12 +25,12 @@ To inspect the generated configuration without starting services, use `./install
 
 ## Manual configuration
 
-For custom orchestration, create persistent PostgreSQL and blob-storage volumes. Generate `SECRET_KEY_BASE`, a 32-byte base64 `ROBINE_CI_SECRET_KEY`, and a one-use random `ROBINE_BOOTSTRAP_TOKEN`. Configure `DATABASE_URL`, `ROBINE_PUBLIC_URL`, `PHX_HOST`, `PORT`, and `PHX_SERVER=true`. Keep encryption keys outside the database and back them up separately.
+For custom orchestration, create persistent PostgreSQL and blob-storage volumes. Generate `SECRET_KEY_BASE`, a 32-byte base64 `ROBINE_CI_SECRET_KEY`, and a one-use random `ROBINE_BOOTSTRAP_TOKEN`. Configure `DATABASE_URL`, `ROBINE_PUBLIC_URL`, and `ROBINE_BIND`. Keep encryption keys outside the database and back them up separately.
 
-Apply migrations before switching traffic:
+The Actix server creates the Rust-owned schema on an empty database and validates upgraded databases before serving:
 
 ```bash
-bin/robine eval 'Robine.Runtime.Release.migrate()'
+./robine-server
 ```
 
 Start the release behind an HTTPS reverse proxy, then require HTTP 200 from `/health/live` and `/health/ready`. Visit `/setup` within 15 minutes and create the first administrator. Configure at least one source-control provider, trust one exact repository through the UI, and add `.robine-ci/workflows/ci.yml` at the tested commit.
@@ -50,7 +50,7 @@ Use `<ROBINE_PUBLIC_URL>/api/gitlab/webhooks` for GitLab push and merge-request 
 
 Before upgrading a provider or changing a reverse proxy, contributors can run the pinned adapter contracts documented in the README. The Forgejo 16.0.2 smoke is lightweight; the GitLab CE 19.2.1 smoke is opt-in with `ROBINE_GITLAB_INTEGRATION=1` because its cold Omnibus startup can take several minutes. Both use loopback-only ports and remove their temporary containers and data after the test.
 
-For Prometheus, set `ROBINE_METRICS_TOKEN` and scrape `/metrics` with a Bearer token. Leave it unset to disable export. Never expose Docker's socket, PostgreSQL, the metrics endpoint, or the Phoenix origin directly to the public internet.
+For Prometheus, set `ROBINE_METRICS_TOKEN` and scrape `/metrics` with a Bearer token. Leave it unset to disable export. Never expose Docker's socket, PostgreSQL, the metrics endpoint, or the Actix origin directly to the public internet.
 
 ## Optional S3-compatible blob storage
 
@@ -84,13 +84,14 @@ The acknowledgement authorizes only that exact old/new namespace-digest pair; it
 
 ## Source installation for contributors
 
-Install the pinned Elixir/Erlang, Node.js, Docker, and PostgreSQL versions, then run:
+Install Rust 1.97+, Docker, and PostgreSQL 18, then run:
 
 ```bash
 docker compose up -d --wait postgres
-mix setup
-mix qa
-mix phx.server
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-targets
+DATABASE_URL=postgres://postgres:postgres@localhost/robine_dev cargo run -p robine-server
 ```
 
 The application is ready only when the complete QA command passes. Dependency compiler warnings under newer toolchains are upstream notices; Robine's own compilation must remain warning-free.

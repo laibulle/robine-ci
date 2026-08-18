@@ -38,6 +38,8 @@ pub enum PersistenceError {
     UnknownPipelineState(#[from] UnknownPipelineState),
     #[error("storage backend migration acknowledgement is required: {0}")]
     StorageMigrationAcknowledgementRequired(String),
+    #[error("database schema is older than the Rust cutover baseline")]
+    SchemaUpgradeRequired,
 }
 
 impl From<sqlx::Error> for PersistenceError {
@@ -68,6 +70,47 @@ impl Database {
     #[must_use]
     pub fn from_pool(pool: PgPool) -> Self {
         Self { pool }
+    }
+
+    /// Creates the complete Rust-owned baseline on an empty database and validates legacy schemas.
+    ///
+    /// Existing Ecto-migrated databases are never replayed or modified by the baseline. They must
+    /// already contain the final cutover contract; future Rust migrations can build from it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a database error when bootstrap fails or [`PersistenceError::SchemaUpgradeRequired`]
+    /// when an existing installation predates the Rust cutover schema.
+    pub async fn bootstrap_schema(&self) -> Result<(), PersistenceError> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock(90464863604399)")
+            .execute(&mut *transaction)
+            .await?;
+        let existing =
+            sqlx::query_scalar::<_, bool>("SELECT to_regclass('public.pipelines') IS NOT NULL")
+                .fetch_one(&mut *transaction)
+                .await?;
+        if !existing {
+            sqlx::raw_sql(include_str!("../migrations/0001_baseline.sql"))
+                .execute(&mut *transaction)
+                .await?;
+        }
+        let current = sqlx::query_scalar::<_, bool>(
+            "SELECT to_regclass('public.pipelines') IS NOT NULL \
+             AND to_regclass('public.durable_jobs') IS NOT NULL \
+             AND to_regclass('public.workflow_revisions') IS NOT NULL \
+             AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' \
+               AND table_name = 'outbox_events' AND column_name = 'available_at') \
+             AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' \
+               AND table_name = 'github_repositories' AND column_name = 'provider_instance')",
+        )
+        .fetch_one(&mut *transaction)
+        .await?;
+        if !current {
+            return Err(PersistenceError::SchemaUpgradeRequired);
+        }
+        transaction.commit().await?;
+        Ok(())
     }
 
     /// Lists tenants whose storage namespace must be checked at startup.

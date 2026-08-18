@@ -3,16 +3,16 @@
 [![build](https://ci.base59.dev/badges/github/laibulle/robine-ci/build.svg)](https://ci.base59.dev/repositories)
 [![coverage](https://ci.base59.dev/badges/github/laibulle/robine-ci/coverage.svg)](https://ci.base59.dev/repositories)
 
-Robine CI is an open-source, self-hosted continuous integration service built with Elixir and Phoenix. It targets explicitly trusted GitHub, GitLab, and Forgejo repositories and executes jobs in isolated local or outbound-only remote Docker runners.
+Robine CI is an open-source, self-hosted continuous integration service built in Rust with Actix Web. It targets explicitly trusted GitHub, GitLab, and Forgejo repositories and executes jobs in isolated local or outbound-only remote Docker runners.
 
 The project is under active development. The product contract is documented in [the specification index](docs/specs/README.md), implementation work is tracked in [TASKS.md](TASKS.md), and contributors must follow [AGENTS.md](AGENTS.md).
 
 ## Current implementation
 
-- Phoenix 1.8 application with LiveView and Tailwind
-- PostgreSQL persistence through Ecto
-- Oban durable-work foundation
-- Clean Architecture reference slice for pipeline creation
+- Actix Web control plane with server-rendered pages and authenticated real-time updates
+- PostgreSQL persistence through SQLx with a Rust-owned forward-only schema baseline
+- SQL-backed durable work, leases, reconciliation, and transactional outbox delivery
+- Framework-independent Rust domain and application crates
 - Atomic pipeline and outbox persistence
 - Workflow schema v1 parsing, semantic validation, and exact-revision reusable workflows
 - Deterministic `success`, `failure`, and `always` conditions plus bounded static job matrices
@@ -21,18 +21,17 @@ The project is under active development. The product contract is documented in [
 - Encrypted secrets, immutable artifacts, local or S3-compatible caches/artifacts, and cursor-based redacted logs
 - Authenticated GitHub, GitLab, and Forgejo webhooks, exact-SHA workflows, and durable check/status projection
 - Local Argon2id authentication, revocable sessions, and optional OpenID Connect SSO
-- Authenticated LiveView pipeline, job, log, cancellation, and retry experiences
+- Authenticated browser pipeline, job, bounded log, cancellation, and retry experiences
 - Outbound-only remote Docker runners with versioned restart-safe sessions and fleet administration
 
 Untrusted-workload isolation remains post-MVP. Release validation that requires a real GitHub installation or external first-use participants remains tracked in `TASKS.md`.
 
 ## Requirements
 
-- Elixir 1.20 and Erlang/OTP 29
+- Rust 1.97 or newer
 - Ubuntu Server 24.04 LTS or 26.04 LTS on x86-64 or ARM64
 - Docker Engine 29.x
 - Docker Compose v2
-- Node.js 24 for asset development
 
 These are the initial supported MVP versions.
 
@@ -62,30 +61,34 @@ export ROBINE_CI_SECRET_KEY_VERSION="2"
 
 Restart Robine, then run bounded rotation batches from Instance Administration. Keep old keys configured until the UI reports completion and a backup has been verified.
 
-Install dependencies, create the database, and build assets:
+Build and verify the native workspace:
 
 ```bash
-mix setup
+cargo build --workspace
+cargo test --workspace --all-targets
 ```
 
-Start Phoenix:
+Start the Actix control plane (it bootstraps an empty PostgreSQL schema itself):
 
 ```bash
-mix phx.server
+DATABASE_URL=postgres://postgres:postgres@localhost/robine_dev \
+ROBINE_BIND=127.0.0.1:4004 cargo run -p robine-server
 ```
 
-Run the complete test suite with local coverage enforcement:
+Run strict local verification:
 
 ```bash
-mix coverage
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-targets
 ```
 
-The command fails below 75% total coverage and writes the browsable report to
-`cover/excoveralls.html`. The self-hosted workflow runs the same command, retains `cover/` as the
+The CI command fails below 75% total coverage and writes `coverage.lcov` through `cargo llvm-cov`.
+The self-hosted workflow retains that file as the
 `coverage-report` artifact for 14 days, and publishes the measured percentage, threshold, and a
 direct authenticated download link in the provider pipeline and job checks. A stable SVG badge is
 available at `/badges/:provider/:owner/:repository/coverage.svg`; it exposes only the latest retained
-percentage. The metric covers application code; test-support fixtures and release-oriented Mix tasks
+percentage. The metric covers application code; test-support fixtures and release tooling
 are excluded. Jobs never receive a provider token for this projection.
 
 Open [http://localhost:4004](http://localhost:4004).
@@ -98,14 +101,14 @@ The event outbox is reconciled every minute. Delivery retries use bounded expone
 
 ## Publishing a GitHub release
 
-Push a semantic version tag matching the version in `mix.exs`:
+Push a semantic version tag matching the workspace version in `Cargo.toml`:
 
 ```bash
 git tag v0.1.0
 git push origin v0.1.0
 ```
 
-The tag-only `Robine Release` workflow builds the production OTP server, CLI, and standalone runner,
+The tag-only `Robine Release` workflow builds the native Actix server, CLI, and standalone runner,
 retains them as three independent `github-release` artifacts, then creates the matching GitHub Release
 with generated notes and attaches stable `robine-server-<os>-<architecture>.tar.gz`,
 `robine-cli-<os>-<architecture>.tar.gz`, and `robine-runner-<os>-<architecture>.tar.gz` assets. The
@@ -261,18 +264,7 @@ Forgejo tokens require repository content read and commit-status write access. C
 
 The environment token and webhook variables are bootstrap and recovery fallbacks. Administrators can replace all four values from Instance Administration; stored values are encrypted, write-only, and take precedence. Repository discovery is always repeated server-side before an exact project ID/name selection becomes trusted.
 
-Provider adapters have opt-in contract smokes against pinned official containers. Each smoke creates an isolated temporary provider, user, repository, exact commit, and terminal status, then removes the container:
-
-```bash
-docker pull codeberg.org/forgejo/forgejo:16.0.2-rootless
-mix test test/robine/adapters/source_control/forgejo_integration_test.exs
-
-docker pull gitlab/gitlab-ce:19.2.1-ce.0
-ROBINE_GITLAB_INTEGRATION=1 mix test \
-  test/robine/adapters/source_control/git_lab_integration_test.exs
-```
-
-The GitLab smoke is excluded from ordinary QA because a cold Omnibus startup takes several minutes and materially more resources. Unit and provider-neutral vertical tests remain part of every QA run.
+Provider-neutral webhook, exact-SHA normalization, archive-fetching, and durable pipeline tests run with the Rust workspace. Before a production upgrade, verify GitLab and Forgejo credentials against a staging installation using the same provider origin and reverse-proxy policy as production.
 
 ## OpenID Connect
 
@@ -290,17 +282,17 @@ OIDC uses Authorization Code with PKCE, state, nonce, issuer/audience/signature 
 
 CLI release bundles include `SHA256SUMS`. Build, platform verification, installation, and stable exit-code instructions are documented in [Install and verify the Robine CLI](docs/cli-installation.md).
 
-With PostgreSQL running:
+With PostgreSQL available through `ROBINE_DATABASE_INTEGRATION_URL`, run:
 
 ```bash
-mix verify
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-targets
 ```
-
-The verification alias checks formatting, compiles with warnings as errors, and runs the complete test suite.
 
 ## Architecture
 
-Each bounded context exposes one facade such as `Robine.Pipelines`. Public operations delegate explicitly to use cases. Use cases coordinate pure domain rules and context-owned ports. PostgreSQL, Docker, GitHub, filesystem, Phoenix, LiveView, and Oban remain adapters around the application.
+Framework-independent domain crates define state and policy. `robine-application` coordinates typed ports, while SQLx, Docker, source providers, storage, Actix Web, the CLI, and the runner remain boundary crates. Actix handlers invoke the application service rather than embedding business state transitions.
 
 See [PLAT-002](docs/specs/platform/plat-002-clean-application-architecture.md) for the normative architecture.
 

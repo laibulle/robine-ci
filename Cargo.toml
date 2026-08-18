@@ -23,13 +23,13 @@ license = "AGPL-3.0-or-later"
 rust-version = "1.97"
 
 [workspace.dependencies]
-actix-web = "4.11"
+actix-web = { version = "4.11", default-features = false, features = ["compress-gzip", "cookies", "macros", "unicode", "ws"] }
 actix-ws = "0.3"
 aes-gcm = "0.10"
 argon2 = "0.5"
 async-trait = "0.1"
-aws-config = "1.8"
-aws-sdk-s3 = "1.142"
+aws-config = { version = "1.8", default-features = false, features = ["behavior-version-latest", "credentials-process", "default-https-client", "rt-tokio", "sso"] }
+aws-sdk-s3 = { version = "1.142", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
 base64 = "0.22"
 flate2 = "1.1"
 futures-util = "0.3"

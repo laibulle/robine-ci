@@ -7,45 +7,38 @@ on:
 
 jobs:
   package:
-    image: hexpm/elixir@sha256:1d7b070659ac993d5778b605bf767bc2477faedaea26f09bfa945d5e91d5fa14
+    image: rust:1.97-bookworm
     shell: /bin/bash
-    timeout: 20m
-    env:
-      ERL_FLAGS: "+S 4:4"
-      MAKEFLAGS: "-j4"
+    timeout: 30m
     steps:
       - name: Checkout tagged revision
         uses: checkout
-      - name: Install build tooling
+      - name: Install pinned static Docker client
         run: |
-          mkdir -p /tmp/robine-apt/cache/archives/partial /tmp/robine-apt/state/lists/partial /tmp/robine-apt/log
-          APT_OPTIONS="-o APT::Sandbox::User=root -o Dir::Cache=/tmp/robine-apt/cache -o Dir::State=/tmp/robine-apt/state -o Dir::State::status=/var/lib/dpkg/status -o Dir::Log=/tmp/robine-apt/log"
-          apt-get $APT_OPTIONS update
-          apt-get $APT_OPTIONS install --yes --no-install-recommends build-essential ca-certificates git
-          mix local.hex --force
-          mix local.rebar --force
-          mix deps.get
-      - name: Build CLI release
-        run: MIX_ENV=cli mix robine.release --output dist/cli
-      - name: Build runner release
-        run: MIX_ENV=cli mix robine.runner_release --output dist/runner
-      - name: Build server release
+          curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-28.5.2.tgz -o /tmp/docker.tgz
+          echo "ea90cfd12e1eeb12aa1c971741adb8bd4ed88e2a574eaac13f5029a1dbc6300d  /tmp/docker.tgz" | sha256sum -c -
+          tar --no-same-owner -xzf /tmp/docker.tgz -C /usr/local/bin --strip-components=1 docker/docker
+          rm /tmp/docker.tgz
+      - name: Build native release
+        run: cargo run --release -p robine-package -- --output dist
+      - name: Verify native checksums
         run: |
-          mkdir -p "$PWD/.robine-tmp"
-          TMPDIR="$PWD/.robine-tmp" MIX_ENV=prod mix robine.server_release --output dist/server
-      - name: Upload server release archive
+          cd dist
+          sha256sum --check SHA256SUMS
+          for component in cli server runner; do (cd "$component" && sha256sum --check SHA256SUMS); done
+      - name: Upload server release
         uses: artifacts/upload
         with:
           name: github-release-robine-server-${{ runner.os }}-${{ runner.arch }}
           paths: [dist/server]
           retention-days: 30
-      - name: Upload CLI release archive
+      - name: Upload CLI release
         uses: artifacts/upload
         with:
           name: github-release-robine-cli-${{ runner.os }}-${{ runner.arch }}
           paths: [dist/cli]
           retention-days: 30
-      - name: Upload runner release archive
+      - name: Upload runner release
         uses: artifacts/upload
         with:
           name: github-release-robine-runner-${{ runner.os }}-${{ runner.arch }}

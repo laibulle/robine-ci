@@ -5,11 +5,11 @@
 - **State:** Shipped
 - **Owner:** Robine maintainers
 - **Target:** Post-MVP
-- **Last updated:** 2026-08-09
+- **Last updated:** 2026-08-18
 
 ## Summary
 
-Robine measures its own Elixir test coverage locally with a 75% quality gate and publishes the same durable result through CI provider checks.
+Robine measures its Rust workspace coverage with a 75% quality gate and publishes the same durable result through CI provider checks.
 
 ## Problem
 
@@ -17,7 +17,7 @@ Contributors cannot currently measure coverage with one documented command, enfo
 
 ## Goals
 
-- Provide one deterministic local command that prepares the test database and generates an HTML report.
+- Provide one deterministic local command that measures the complete Rust workspace and writes an LCOV report.
 - Fail the command when total coverage is below 75%.
 - Retain the HTML report and summarize the measured result in Robine CI provider checks.
 
@@ -35,15 +35,15 @@ A Robine contributor validating a change before pushing it to CI.
 
 ### Use cases
 
-1. Run `mix coverage` from a local checkout, receive a blocking pass/fail result, and open the generated HTML report.
-2. Inspect the same measured result and retained HTML report after a CI run.
+1. Run `cargo llvm-cov --workspace --all-features --lcov --output-path coverage.lcov` from a local checkout and receive a blocking pass/fail result.
+2. Inspect the same measured result and retained LCOV report after a CI run.
 
 ## Requirements
 
 ### Functional requirements
 
-- **FR-1:** The repository MUST expose `mix coverage` in the test environment.
-- **FR-2:** The command MUST prepare the test database, run the complete test suite, and generate an HTML report under ignored local output.
+- **FR-1:** The repository MUST run `cargo llvm-cov` for the complete workspace in CI.
+- **FR-2:** The command MUST run the complete Rust test suite and generate `coverage.lcov` under ignored local output.
 - **FR-3:** Total coverage below 75% MUST fail the command.
 - **FR-4:** Coverage publication MUST consume the same measurement contract in CI.
 - **FR-5:** A completed coverage run MUST emit one bounded marker containing the total, threshold, and retained report name.
@@ -67,9 +67,9 @@ A Robine contributor validating a change before pushing it to CI.
 
 ## Proposed design
 
-ExCoveralls runs as a test-only dependency through the `coverage` Mix alias. `coveralls.json` owns the 75% global threshold, treats modules with no relevant executable lines as covered, and limits the metric to application code by excluding test-support fixtures and release-oriented Mix tasks. The alias creates and migrates the test database before invoking the complete suite with `coveralls.html --raise`. The generated `cover/excoveralls.html` report remains ignored locally.
+`cargo-llvm-cov` instruments the workspace and writes `coverage.lcov`. CI extracts the total, enforces the 75% threshold, and keeps generated coverage output outside version control. Database compatibility tests use `ROBINE_DATABASE_INTEGRATION_URL`; the Rust persistence suite bootstraps a fresh schema and exercises existing-schema compatibility.
 
-The self-hosted workflow runs formatting and warning checks before the same coverage alias. It emits `ROBINE_COVERAGE total=<percentage> threshold=75 report=coverage-report`, then uploads `cover/` as a 14-day artifact even after an ordinary coverage failure. The repositories context parses only this bounded marker from at most 50 pages of retained job logs and enriches provider-neutral pipeline and job summaries with an authenticated artifact download link. A public, cacheable SVG badge resolves a trusted repository by provider and owner/name and exposes only the latest retained percentage. GitHub publication uses the existing GitHub App installation token in the control plane and its `Checks: write` permission; no token enters the execution container.
+The self-hosted workflow runs rustfmt, Clippy, tests, and dependency audit before coverage. It emits `ROBINE_COVERAGE total=<percentage> threshold=75 report=coverage-report`, then uploads `coverage.lcov` as a 14-day artifact. The repositories context parses only this bounded marker from retained job logs and enriches provider-neutral summaries with an authenticated artifact link. A public SVG badge resolves a trusted repository and exposes only its latest retained percentage. Provider credentials remain in the control plane.
 
 ## Failure modes and recovery
 
@@ -77,7 +77,7 @@ The self-hosted workflow runs formatting and warning checks before the same cove
 |---|---|---|
 | Coverage is below 75% | The command exits non-zero after printing the report | Add meaningful tests and rerun |
 | A test fails | Coverage is still summarized, but the command exits non-zero | Fix the failing test or implementation |
-| Test database is absent | The alias creates and migrates it | Correct PostgreSQL connectivity if setup fails |
+| Test database is absent | Fresh-schema bootstrap creates it for compatibility tests | Correct PostgreSQL connectivity if setup fails |
 | Marker is absent or malformed | The provider check retains its ordinary status summary | Inspect the coverage step and rerun |
 | Checks permission is revoked | Local coverage and artifacts remain valid; projection retries | Restore `Checks: write` and approve the installation update |
 
@@ -91,7 +91,7 @@ The local command prints per-file and total percentages. CI retains the logs and
 
 ## Acceptance criteria
 
-- [x] `mix coverage` prepares the database and generates `cover/excoveralls.html`.
+- [x] `cargo llvm-cov` measures the workspace and generates `coverage.lcov`.
 - [x] The configured threshold is exactly 75% and is enforced with a non-zero exit below it.
 - [x] The report directory is ignored and the command is documented.
 - [x] A real Robine CI run retains the report and publishes its summary to the provider check.

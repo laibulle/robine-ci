@@ -5,15 +5,15 @@
 - **State:** Shipped
 - **Owner:** Platform
 - **Target:** MVP
-- **Last updated:** 2026-08-09
+- **Last updated:** 2026-08-18
 
 ## Summary
 
-Robine uses an Elixir/Phoenix control plane backed by PostgreSQL and a logically separate runner interface. The MVP runner executes on the same Docker host, while the protocol and ownership boundaries allow remote runners to be added later without exposing Erlang distribution.
+Robine uses a Rust/Actix Web control plane backed by PostgreSQL and a logically separate runner interface. The default runner executes on the same Docker host, while outbound HTTPS runner sessions support remote execution without exposing an inbound runner port.
 
 ## Problem
 
-The system must provide responsive real-time behavior and durable orchestration today without coupling product semantics to a single-machine topology or treating an in-memory OTP process as durable state.
+The system must provide responsive real-time behavior and durable orchestration without coupling product semantics to a single-machine topology or treating in-memory process state as durable state.
 
 ## Goals
 
@@ -25,7 +25,7 @@ The system must provide responsive real-time behavior and durable orchestration 
 ## Non-goals
 
 - Multi-region control-plane clustering.
-- Direct Erlang distribution between untrusted networks.
+- A language-runtime distribution protocol between control plane and runners.
 - Exactly-once execution; Robine provides at-least-once dispatch with attempt identity.
 - A generic workflow engine independent of CI.
 
@@ -47,12 +47,12 @@ An operator deploying Robine on a Linux Docker host and a contributor implementi
 ### Functional requirements
 
 - **FR-1:** PostgreSQL MUST be the source of truth for repositories, workflow revisions, pipelines, jobs, attempts, steps, secrets metadata, caches, and artifacts metadata.
-- **FR-2:** OTP processes MAY coordinate active work but MUST NOT be the sole owners of durable state.
+- **FR-2:** Async runtime tasks MAY coordinate active work but MUST NOT be the sole owners of durable state.
 - **FR-3:** Every execution dispatch MUST use a unique attempt ID and an idempotency token.
 - **FR-4:** A job MUST have at most one active attempt according to durable control-plane state.
 - **FR-5:** State transitions MUST be validated against an explicit state machine.
-- **FR-6:** The runner boundary MUST use a versioned application protocol; future remote runners MUST communicate over authenticated HTTPS and WebSocket connections, not Erlang distribution.
-- **FR-7:** LiveView clients MUST receive updates through Phoenix PubSub after the corresponding durable transition commits.
+- **FR-6:** The runner boundary MUST use a versioned application protocol over authenticated HTTPS; it MUST NOT depend on language-runtime distribution.
+- **FR-7:** Browser clients MUST receive authenticated SSE updates only after the corresponding durable transition commits.
 
 ### UX requirements
 
@@ -69,7 +69,7 @@ An operator deploying Robine on a Linux Docker host and a contributor implementi
 
 ## Proposed design
 
-The Phoenix application contains bounded contexts for source control, workflows, pipelines, identity, secrets, and storage. Their internal dependency rules, use cases, ports, adapters, and public facades are defined by [PLAT-002](plat-002-clean-application-architecture.md). A durable background-job mechanism handles webhook processing, reconciliation, and outbound GitHub updates. A scheduler claims ready jobs using transactional database locking and sends an execution specification to a local runner adapter. Event-driven dispatch provides low latency; the minute reconciler also schedules an idempotent dispatch pass to recover committed queued jobs after lost or conflicted notifications.
+Rust crates separate source control, workflows, pipelines, identity, secrets, storage, execution, persistence, and Actix delivery. Their dependency rules, application services, traits, and adapters are defined by [PLAT-002](plat-002-clean-application-architecture.md). SQL-backed durable jobs handle webhook processing, reconciliation, and provider projections. A scheduler claims ready jobs using transactional database locking and sends an execution specification to a local or remote runner. Reconciliation recovers committed queued work after lost or conflicted notifications.
 
 Pipeline states are `created`, `queued`, `running`, `cancelling`, and terminal states `succeeded`, `failed`, `cancelled`, or `invalid`. Job attempts distinguish command failure, cancellation, timeout, runner loss, and system failure. Retrying creates a new attempt; it never mutates the history of the previous attempt.
 
@@ -81,7 +81,7 @@ The runner emits ordered, sequence-numbered events. The control plane deduplicat
 
 | Failure | Expected behavior | Recovery |
 |---|---|---|
-| Phoenix process crashes | Committed state remains available | Supervisors restart processes; reconciler resumes work |
+| Actix process crashes | Committed state remains available | The service manager restarts it; reconcilers resume work |
 | Duplicate dispatch | Runner recognizes the attempt token | Existing attempt is returned; no second container is created |
 | Runner disappears | Attempt becomes `runner_lost` after lease expiry | Job may be retried explicitly or by policy |
 | Event arrives twice | No duplicate transition or log segment | Sequence/idempotency key is ignored after first commit |
@@ -92,11 +92,11 @@ Runner execution specifications contain only secrets required by the job. Future
 
 ## Observability
 
-Telemetry MUST cover queue latency, dispatch latency, active jobs, state-transition failures, retry counts, runner leases, PubSub delivery, and reconciliation outcomes. Correlation IDs connect webhook, pipeline, job, attempt, and outbound check events.
+Telemetry MUST cover queue latency, dispatch latency, active jobs, state-transition failures, retry counts, runner leases, SSE delivery, and reconciliation outcomes. Correlation IDs connect webhook, pipeline, job, attempt, and outbound check events.
 
 ## Acceptance criteria
 
-- [x] Killing and restarting the Phoenix application does not corrupt or forget accepted pipeline state.
+- [x] Killing and restarting the Actix application does not corrupt or forget accepted pipeline state.
 - [x] Duplicate dispatch of the same attempt cannot create two active containers.
 - [x] A configured concurrency limit is never exceeded.
 - [x] A runner loss is visibly distinct from a failed build command.
@@ -104,7 +104,7 @@ Telemetry MUST cover queue latency, dispatch latency, active jobs, state-transit
 
 ## Open questions
 
-None blocking. Oban owns durable work; attempts use 60-second leases and 20-second heartbeats, with five-minute resource reconciliation. `Robine.Runtime.Dependencies` is the composition root and focused ExUnit checks enforce the PLAT-002 dependency rules.
+None blocking. PostgreSQL owns durable work; attempts use bounded leases and heartbeats with periodic resource reconciliation. `robine-application` is the orchestration boundary and focused Rust tests enforce the PLAT-002 dependency rules.
 
 ## Out of scope / future work
 

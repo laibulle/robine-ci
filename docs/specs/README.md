@@ -4,7 +4,7 @@ Robine CI is an open-source, self-hosted continuous integration service for indi
 
 ## Product decisions
 
-- The server is built with Elixir, Phoenix LiveView, and Tailwind CSS.
+- The server is built in Rust with Actix Web and a locally bundled browser enhancement layer.
 - The MVP runs trusted repositories in local Docker containers.
 - GitHub is the only source-code provider in the MVP.
 - Workflows live under `.robine-ci/workflows/*.yml`.
@@ -29,7 +29,7 @@ New specifications MUST start from [TEMPLATE.md](TEMPLATE.md). A feature is not 
 | Execution | [EXEC-001 local Docker runner](execution/exec-001-local-docker-runner.md) | Container lifecycle and job semantics |
 | CLI | [CLI-001 local developer experience](cli/cli-001-local-developer-experience.md) | Init, validation, and local execution |
 | GitHub | [GH-001 GitHub integration](github/gh-001-github-integration.md) | App installation, webhooks, and checks |
-| Web | [WEB-001 pipeline experience](web/web-001-pipeline-experience.md) | LiveView UI and real-time logs |
+| Web | [WEB-001 pipeline experience](web/web-001-pipeline-experience.md) | Accessible browser UI and real-time logs |
 | Identity | [IAM-001 authentication and SSO](identity/iam-001-authentication-and-sso.md) | Local auth, OIDC, and authorization |
 | Security | [SEC-001 secrets and trust model](security/sec-001-secrets-and-trust-model.md) | Encryption, masking, and trusted code policy |
 | Storage | [DATA-001 cache and artifacts](storage/data-001-cache-and-artifacts.md) | Dependency cache and job outputs |

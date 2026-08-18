@@ -1,23 +1,21 @@
 # Build and verify a server release
 
-Build the production assets, OTP release, license payload, compressed archive, and SHA-256 manifest with:
+Build all native release artifacts, license payloads, deployment overlays, and SHA-256 manifests with:
 
 ```bash
-mix robine.server_release --output dist/server
+cargo run --release -p robine-package -- --output dist
 ```
 
-The task selects `MIX_ENV=prod` automatically and refuses to overwrite an existing versioned archive. It must run on a supported Ubuntu 24.04 or 26.04 target and produces `robine-server-<version>-ubuntu-<version>-<architecture>.tar.gz` plus `SHA256SUMS`. Publish both files together and never relabel an archive for another OS version: its ERTS and native libraries are target-specific. The archive records its target in `RELEASE_PLATFORM` and the installer selects the matching pinned Ubuntu runtime container. It also includes the complete AGPL license, locked third-party inventory, production Compose/Caddy configuration, and a secret-generating installer.
+The server bundle is under `dist/server/`. It contains the Actix executable, pinned Docker client, complete AGPL license, third-party notices, Compose/Caddy configuration, and secret-generating installer. It contains no BEAM, ERTS, EPMD, or Erlang Distribution configuration.
 
-`mix qa` builds this production archive from scratch and verifies its checksum, extraction, exact license payloads, executable version, and disabled Erlang Distribution configuration through `mix robine.server_release_smoke`.
-
-Verify before extraction:
+Verify it before installation:
 
 ```bash
 cd dist/server
 sha256sum --check SHA256SUMS
-tar -tzf robine-server-*.tar.gz >/dev/null
+./robine-server --version
 ```
 
-Extract into a new versioned directory, preserve the prior artifact for rollback, configure runtime secrets through the environment or secret files, run `bin/robine eval 'Robine.Runtime.Release.migrate()'`, and then start `bin/robine start`. Never copy secrets into the release archive.
+Preserve the prior bundle for rollback. The server creates the complete baseline on an empty PostgreSQL database and validates an existing cutover schema before serving traffic. Never copy secrets into a release artifact.
 
-The checksum proves integrity relative to the published manifest; it does not establish publisher identity. A future signing policy may add Sigstore or GPG without changing the archive format.
+Before production cutover, rehearse [upgrade, backup, recovery, and rollback](operations/upgrade-backup-and-recovery.md) on a restored database. A release smoke must start the packaged executable on an empty database, receive HTTP 200 from both health probes, stop it cleanly, restart it on the created schema, and receive readiness again.

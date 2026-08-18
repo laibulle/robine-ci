@@ -28,12 +28,61 @@ use robine_storage::{
     StorageQuotas, StoredObject,
 };
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
+use sqlx::{
+    PgPool,
+    postgres::{PgConnectOptions, PgPoolOptions},
+};
 use uuid::Uuid;
 
 struct FakeOidc(OidcClaims);
 
 struct WorkflowArchive(Vec<u8>);
+
+#[tokio::test]
+async fn rust_bootstrap_creates_and_revalidates_a_fresh_database() {
+    let Ok(database_url) = std::env::var("ROBINE_DATABASE_INTEGRATION_URL") else {
+        return;
+    };
+    let options = database_url
+        .parse::<PgConnectOptions>()
+        .expect("database URL");
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .connect_with(options.clone().database("postgres"))
+        .await
+        .expect("admin database");
+    let database_name = format!("robine_rust_{}", Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE DATABASE \"{database_name}\""))
+        .execute(&admin)
+        .await
+        .expect("create fresh database");
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(options.database(&database_name))
+        .await
+        .expect("fresh database");
+    let database = Database::from_pool(pool.clone());
+    database.bootstrap_schema().await.expect("bootstrap schema");
+    database
+        .bootstrap_schema()
+        .await
+        .expect("idempotent schema validation");
+    assert_eq!(
+        database
+            .storage_tenants()
+            .await
+            .expect("list fresh tenants"),
+        vec!["standalone"]
+    );
+    let tables = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name IN ('pipelines', 'durable_jobs', 'secrets', 'remote_runners')").fetch_one(&pool).await.expect("schema tables");
+    assert_eq!(tables, 4);
+    pool.close().await;
+    drop(database);
+    sqlx::query(&format!("DROP DATABASE \"{database_name}\" WITH (FORCE)"))
+        .execute(&admin)
+        .await
+        .expect("drop fresh database");
+}
 
 #[tokio::test]
 async fn repository_secrets_are_encrypted_upserted_and_listed_with_audit() {
