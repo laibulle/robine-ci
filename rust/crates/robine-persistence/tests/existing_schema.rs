@@ -551,6 +551,36 @@ async fn cache_and_dependency_artifact_metadata_are_tenant_scoped_and_quota_lock
     .expect("insert successful attempt");
     fixture.commit().await.expect("commit storage fixture");
 
+    let mut coverage_fixture = database
+        .tenant_transaction(&tenant)
+        .await
+        .expect("coverage fixture transaction");
+    sqlx::query("UPDATE pipelines SET status = 'succeeded' WHERE id = $1 AND tenant_id = $2")
+        .bind(pipeline_id)
+        .bind(&tenant)
+        .execute(&mut *coverage_fixture)
+        .await
+        .expect("finish coverage pipeline");
+    sqlx::query("INSERT INTO log_chunks (id, attempt_id, sequence, step_position, step_name, step_status, duration_ms, content, inserted_at, tenant_id) VALUES ($1, $2, 1, 0, 'coverage', 'succeeded', 1, $3, $4, $5)")
+        .bind(Uuid::new_v4()).bind(attempt_id)
+        .bind("ROBINE_COVERAGE total=91.2 threshold=90 report=coverage.json\n")
+        .bind(now).bind(&tenant).execute(&mut *coverage_fixture).await.expect("insert coverage marker");
+    coverage_fixture
+        .commit()
+        .await
+        .expect("commit coverage fixture");
+    let coverage = PipelineRepository::latest_coverage(&database, &tenant, repository_id)
+        .await
+        .expect("latest coverage")
+        .expect("coverage report");
+    assert_eq!(coverage["total"], "91.2");
+    assert_eq!(coverage["pipeline_id"], pipeline_id.to_string());
+    let operational = PipelineRepository::operational_metrics(&database, &tenant)
+        .await
+        .expect("operational metrics");
+    assert!(operational["outbox_pending"].as_i64().is_some());
+    assert!(operational["runners_online"].as_i64().is_some());
+
     let artifact = Artifact {
         id: Uuid::new_v4(),
         repository_id,

@@ -830,6 +830,63 @@ impl ControlPlane {
             .map_err(|_| ApplicationError::Unavailable)
     }
 
+    /// Resolves public badge data only for an explicitly trusted repository.
+    ///
+    /// # Errors
+    ///
+    /// Returns not-found for unknown public identities or unavailable on persistence failure.
+    pub async fn public_badge_data(
+        &self,
+        provider: &str,
+        owner: &str,
+        name: &str,
+    ) -> Result<serde_json::Value, ApplicationError> {
+        let repositories = self
+            .source_repositories
+            .as_ref()
+            .ok_or(ApplicationError::Unavailable)?
+            .list_trusted("standalone")
+            .await
+            .map_err(|_| ApplicationError::Unavailable)?;
+        let repository = repositories
+            .into_iter()
+            .find(|repository| {
+                let candidate = match repository.provider {
+                    Provider::GitHub => "github",
+                    Provider::GitLab => "gitlab",
+                    Provider::Forgejo => "forgejo",
+                };
+                candidate == provider && repository.owner == owner && repository.name == name
+            })
+            .ok_or(ApplicationError::PipelineNotFound)?;
+        let status = self
+            .pipelines
+            .list_recent("standalone", Some(repository.id), 1)
+            .await
+            .map_err(|_| ApplicationError::Unavailable)?
+            .into_iter()
+            .next()
+            .map(|pipeline| pipeline.status);
+        let coverage = self
+            .pipelines
+            .latest_coverage("standalone", repository.id)
+            .await
+            .map_err(|_| ApplicationError::Unavailable)?;
+        Ok(serde_json::json!({"status": status, "coverage": coverage}))
+    }
+
+    /// Returns bounded aggregate values for the authenticated Prometheus endpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns unavailable when persistence cannot produce a consistent snapshot.
+    pub async fn operational_metrics(&self) -> Result<serde_json::Value, ApplicationError> {
+        self.pipelines
+            .operational_metrics("standalone")
+            .await
+            .map_err(|_| ApplicationError::Unavailable)
+    }
+
     /// Discovers manually enabled workflows at one immutable branch head.
     ///
     /// # Errors

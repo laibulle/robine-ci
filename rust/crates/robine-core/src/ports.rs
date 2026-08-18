@@ -147,6 +147,14 @@ pub trait PipelineRepository: Send + Sync {
         job_id: Uuid,
     ) -> Result<String, PortError>;
 
+    async fn latest_coverage(
+        &self,
+        tenant_id: &str,
+        repository_id: Uuid,
+    ) -> Result<Option<serde_json::Value>, PortError>;
+
+    async fn operational_metrics(&self, tenant_id: &str) -> Result<serde_json::Value, PortError>;
+
     async fn queue(
         &self,
         tenant_id: &str,

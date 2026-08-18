@@ -981,7 +981,14 @@ fn html_page(title: &str, body: &str) -> HttpResponse {
     HttpResponse::Ok()
         .insert_header((header::CACHE_CONTROL, "no-store"))
         .content_type("text/html; charset=utf-8")
-        .body(format!("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{} · Robine</title><link rel=\"stylesheet\" href=\"/assets/app.css\"></head><body><header class=\"topbar\"><a href=\"/\"><strong>Robine CI</strong></a><nav><a href=\"/pipelines\">Pipelines</a><a href=\"/repositories\">Repositories</a><a href=\"/build-information\">Build</a><a href=\"/admin\">Admin</a></nav></header><main>{body}</main></body></html>", escape_html(title)))
+        .body(format!("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{} · Robine</title><link rel=\"stylesheet\" href=\"/assets/app.css\"><script defer src=\"/assets/app.js\"></script></head><body><header class=\"topbar\"><a href=\"/\"><strong>Robine CI</strong></a><nav><a href=\"/pipelines\">Pipelines</a><a href=\"/repositories\">Repositories</a><a href=\"/build-information\">Build</a><a href=\"/admin\">Admin</a></nav></header><main>{body}</main></body></html>", escape_html(title)))
+}
+
+async fn application_js() -> HttpResponse {
+    HttpResponse::Ok()
+        .insert_header((header::CACHE_CONTROL, "public, max-age=3600"))
+        .content_type("text/javascript; charset=utf-8")
+        .body(include_str!("../assets/app.js"))
 }
 
 async fn home_page(request: HttpRequest) -> HttpResponse {
@@ -1059,7 +1066,7 @@ async fn browser_pipeline(
     html_page(
         "Pipeline",
         &format!(
-            "<section id=\"pipeline-detail\"><p class=\"eyebrow\">Pipeline</p><h1>{}</h1><dl><dt>Status</dt><dd>{}</dd><dt>Commit</dt><dd><code>{}</code></dd><dt>Source</dt><dd>{}</dd><dt>Trigger</dt><dd>{}</dd></dl><p><a href=\"/pipelines/{pipeline_id}/workflow\">Workflow revision</a></p><h2>Jobs</h2><div id=\"pipeline-jobs\">{jobs}</div></section>",
+            "<section id=\"pipeline-detail\" data-live-pipeline data-events-url=\"/pipelines/{pipeline_id}/events\"><p class=\"eyebrow\">Pipeline</p><h1>{}</h1><dl><dt>Status</dt><dd>{}</dd><dt>Commit</dt><dd><code>{}</code></dd><dt>Source</dt><dd>{}</dd><dt>Trigger</dt><dd>{}</dd></dl><p><a href=\"/pipelines/{pipeline_id}/workflow\">Workflow revision</a></p><h2>Jobs</h2><div id=\"pipeline-jobs\">{jobs}</div></section>",
             escape_html(text("workflow_name")),
             escape_html(text("status")),
             escape_html(text("commit_sha")),
@@ -1067,6 +1074,53 @@ async fn browser_pipeline(
             escape_html(text("trigger")),
         ),
     )
+}
+
+async fn pipeline_events(
+    request: HttpRequest,
+    pipeline_id: web::Path<Uuid>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let Ok(user) = authenticated_user(&request, &state).await else {
+        return HttpResponse::Unauthorized().finish();
+    };
+    let control_plane = state.control_plane.clone();
+    let stream = futures_util::stream::unfold(
+        (control_plane, user, *pipeline_id, None::<String>, true),
+        |(control_plane, user, pipeline_id, previous, initial)| async move {
+            if !initial {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            let (body, next) = match control_plane
+                .pipeline_browser_projection(&user, pipeline_id)
+                .await
+            {
+                Ok(projection) => {
+                    let serialized =
+                        serde_json::to_string(&projection).unwrap_or_else(|_| "{}".into());
+                    if previous.as_deref() == Some(&serialized) {
+                        (": keepalive\n\n".into(), previous)
+                    } else {
+                        (
+                            format!("event: pipeline\ndata: {serialized}\n\n"),
+                            Some(serialized),
+                        )
+                    }
+                }
+                Err(_) => ("event: unavailable\ndata: {}\n\n".into(), previous),
+            };
+            Some((
+                Ok::<_, actix_web::Error>(web::Bytes::from(body)),
+                (control_plane, user, pipeline_id, next, false),
+            ))
+        },
+    );
+    HttpResponse::Ok()
+        .insert_header((header::CACHE_CONTROL, "no-store"))
+        .insert_header((header::CONNECTION, "keep-alive"))
+        .insert_header(("x-accel-buffering", "no"))
+        .content_type("text/event-stream; charset=utf-8")
+        .streaming(stream)
 }
 
 async fn browser_workflow(
@@ -1143,10 +1197,25 @@ async fn browser_job(
             .unwrap_or(&serde_json::Value::Null),
     )
     .unwrap_or_default();
+    let logs = projection
+        .get("logs")
+        .and_then(serde_json::Value::as_array)
+        .map_or_else(String::new, |logs| {
+            logs.iter().fold(String::new(), |mut output, log| {
+                let attempt = log.get("attempt_number").and_then(serde_json::Value::as_i64).unwrap_or(0);
+                let sequence = log.get("sequence").and_then(serde_json::Value::as_i64).unwrap_or(0);
+                let phase = log.get("phase").and_then(serde_json::Value::as_str).unwrap_or("execution");
+                let step = log.get("step_name").and_then(serde_json::Value::as_str).unwrap_or("step");
+                let stream = log.get("stream").and_then(serde_json::Value::as_str).unwrap_or("combined");
+                let content = log.get("content").and_then(serde_json::Value::as_str).unwrap_or("");
+                let _ = write!(output, "<li id=\"log-{attempt}-{sequence}\" class=\"surface-panel\"><header><strong>{} · {}</strong><span>attempt {attempt} · {} · sequence {sequence}</span></header><pre>{}</pre></li>", escape_html(phase), escape_html(step), escape_html(stream), escape_html(content));
+                output
+            })
+        });
     html_page(
         "Job",
         &format!(
-            "<section id=\"job-detail\"><p class=\"eyebrow\">Pipeline job</p><h1>{}</h1><p class=\"status\">{}</p><p><a id=\"job-logs-download\" href=\"/pipelines/{pipeline_id}/jobs/{job_id}/logs\">Download complete log</a></p><h2>Attempts</h2><pre>{}</pre><h2>Artifacts</h2><pre>{}</pre></section>",
+            "<section id=\"job-detail\" data-live-pipeline data-events-url=\"/pipelines/{pipeline_id}/events\"><p class=\"eyebrow\">Pipeline job</p><h1>{}</h1><p class=\"status\">{}</p><p><a id=\"job-logs-download\" href=\"/pipelines/{pipeline_id}/jobs/{job_id}/logs\">Download complete log</a></p><h2>Attempts</h2><pre>{}</pre><h2>Artifacts</h2><pre>{}</pre><h2>Recent structured logs</h2><p>The newest 200 persisted chunks are shown; the complete retained log remains downloadable.</p><ol id=\"job-log-window\">{logs}</ol></section>",
             escape_html(text("key")),
             escape_html(text("status")),
             escape_html(&attempts),
@@ -1577,7 +1646,7 @@ async fn browser_admin(request: HttpRequest, state: web::Data<AppState>) -> Http
     }
 }
 
-async fn metrics(request: HttpRequest) -> HttpResponse {
+async fn metrics(request: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     let Ok(expected) = std::env::var("ROBINE_METRICS_TOKEN") else {
         return HttpResponse::NotFound().body("Not Found");
     };
@@ -1593,29 +1662,123 @@ async fn metrics(request: HttpRequest) -> HttpResponse {
             .insert_header((header::WWW_AUTHENTICATE, "Bearer realm=\"Robine metrics\""))
             .body("Unauthorized");
     }
-    HttpResponse::Ok().insert_header((header::CACHE_CONTROL, "no-store")).content_type("text/plain; version=0.0.4; charset=utf-8").body("# HELP robine_up Whether the Rust control plane is serving.\n# TYPE robine_up gauge\nrobine_up 1\n")
+    let Ok(snapshot) = state.control_plane.operational_metrics().await else {
+        return HttpResponse::ServiceUnavailable().finish();
+    };
+    let value = |name| {
+        snapshot
+            .get(name)
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0)
+    };
+    let body = format!(
+        "# HELP robine_up Whether the Rust control plane is serving.\n# TYPE robine_up gauge\nrobine_up 1\n# HELP robine_pipelines Current pipelines by lifecycle bucket.\n# TYPE robine_pipelines gauge\nrobine_pipelines{{status=\"created\"}} {}\nrobine_pipelines{{status=\"queued\"}} {}\nrobine_pipelines{{status=\"running\"}} {}\n# HELP robine_outbox_events Durable outbox events by state.\n# TYPE robine_outbox_events gauge\nrobine_outbox_events{{status=\"pending\"}} {}\nrobine_outbox_events{{status=\"dead_lettered\"}} {}\n# HELP robine_durable_jobs Durable jobs by state.\n# TYPE robine_durable_jobs gauge\nrobine_durable_jobs{{status=\"available\"}} {}\nrobine_durable_jobs{{status=\"executing\"}} {}\nrobine_durable_jobs{{status=\"discarded\"}} {}\n# HELP robine_runners Remote runners by connectivity.\n# TYPE robine_runners gauge\nrobine_runners{{connectivity=\"online\"}} {}\nrobine_runners{{connectivity=\"offline\"}} {}\n",
+        value("pipelines_created"),
+        value("pipelines_queued"),
+        value("pipelines_running"),
+        value("outbox_pending"),
+        value("outbox_dead_lettered"),
+        value("durable_available"),
+        value("durable_executing"),
+        value("durable_discarded"),
+        value("runners_online"),
+        value("runners_offline")
+    );
+    HttpResponse::Ok()
+        .insert_header((header::CACHE_CONTROL, "no-store"))
+        .content_type("text/plain; version=0.0.4; charset=utf-8")
+        .body(body)
 }
 
-fn badge_response(label: &str) -> HttpResponse {
+fn badge_response(label: &str, message: &str, color: &str, max_age: u32) -> HttpResponse {
+    let label_width = if label == "coverage" { 76 } else { 52 };
+    let message_width = (message.len().saturating_mul(8).saturating_add(16)).max(54);
+    let width = label_width + message_width;
     let svg = format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"120\" height=\"20\" role=\"img\" aria-label=\"{label}: unknown\"><rect width=\"52\" height=\"20\" fill=\"#172033\"/><rect x=\"52\" width=\"68\" height=\"20\" fill=\"#64748b\"/><g fill=\"#fff\" text-anchor=\"middle\" font-family=\"Verdana\" font-size=\"11\"><text x=\"26\" y=\"14\">{label}</text><text x=\"86\" y=\"14\">unknown</text></g></svg>"
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{width}\" height=\"20\" role=\"img\" aria-label=\"{}: {}\"><title>{}: {}</title><rect width=\"{label_width}\" height=\"20\" rx=\"4\" fill=\"#172033\"/><rect x=\"{label_width}\" width=\"{message_width}\" height=\"20\" rx=\"4\" fill=\"{color}\"/><g fill=\"#fff\" text-anchor=\"middle\" font-family=\"Verdana,Geneva,DejaVu Sans,sans-serif\" font-size=\"11\"><text x=\"{}\" y=\"14\">{}</text><text x=\"{}\" y=\"14\">{}</text></g></svg>",
+        escape_html(label),
+        escape_html(message),
+        escape_html(label),
+        escape_html(message),
+        label_width / 2,
+        escape_html(label),
+        label_width + message_width / 2,
+        escape_html(message)
     );
     HttpResponse::Ok()
         .insert_header((
             header::CACHE_CONTROL,
-            "public, max-age=30, stale-while-revalidate=120",
+            format!(
+                "public, max-age={max_age}, stale-while-revalidate={}",
+                max_age * 4
+            ),
         ))
         .insert_header(("x-content-type-options", "nosniff"))
         .content_type("image/svg+xml")
         .body(svg)
 }
 
-async fn build_badge() -> HttpResponse {
-    badge_response("build")
+async fn build_badge(
+    path: web::Path<(String, String, String)>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let (provider, owner, repository) = path.into_inner();
+    let status = state
+        .control_plane
+        .public_badge_data(&provider, &owner, &repository)
+        .await
+        .ok()
+        .and_then(|data| {
+            data.get("status")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        });
+    let (message, color) = match status.as_deref() {
+        Some("succeeded") => ("passing", "#059669"),
+        Some("failed") => ("failing", "#dc2626"),
+        Some("cancelled") => ("cancelled", "#64748b"),
+        Some("running" | "cancelling") => ("running", "#2563eb"),
+        Some("created") => ("created", "#d97706"),
+        Some("queued") => ("queued", "#d97706"),
+        _ => ("unknown", "#64748b"),
+    };
+    badge_response("build", message, color, 30)
 }
 
-async fn coverage_badge() -> HttpResponse {
-    badge_response("coverage")
+async fn coverage_badge(
+    path: web::Path<(String, String, String)>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let (provider, owner, repository) = path.into_inner();
+    let coverage = state
+        .control_plane
+        .public_badge_data(&provider, &owner, &repository)
+        .await
+        .ok()
+        .and_then(|data| data.get("coverage").cloned())
+        .filter(|value| !value.is_null());
+    let Some(coverage) = coverage else {
+        return badge_response("coverage", "unknown", "#64748b", 60);
+    };
+    let total = coverage
+        .get("total")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    let passing = coverage
+        .get("total_value")
+        .and_then(serde_json::Value::as_f64)
+        .zip(
+            coverage
+                .get("threshold_value")
+                .and_then(serde_json::Value::as_f64),
+        )
+        .is_some_and(|(total, threshold)| total >= threshold);
+    badge_response(
+        "coverage",
+        &format!("{total}%"),
+        if passing { "#059669" } else { "#dc2626" },
+        60,
+    )
 }
 
 async fn browser_setup_page() -> HttpResponse {
@@ -3066,6 +3229,7 @@ pub fn configure(config: &mut web::ServiceConfig) {
         .route("/runner/socket/websocket", web::get().to(runner_socket))
         .route("/health/live", web::get().to(live))
         .route("/assets/app.css", web::get().to(application_css))
+        .route("/assets/app.js", web::get().to(application_js))
         .route("/sign-in", web::get().to(browser_sign_in_page))
         .route("/sign-in", web::post().to(browser_sign_in))
         .route("/sign-out", web::delete().to(sign_out))
@@ -3073,6 +3237,10 @@ pub fn configure(config: &mut web::ServiceConfig) {
         .route("/setup", web::post().to(browser_setup))
         .route("/pipelines", web::get().to(browser_pipelines))
         .route("/pipelines/{pipeline_id}", web::get().to(browser_pipeline))
+        .route(
+            "/pipelines/{pipeline_id}/events",
+            web::get().to(pipeline_events),
+        )
         .route(
             "/pipelines/{pipeline_id}/workflow",
             web::get().to(browser_workflow),
@@ -3622,7 +3790,14 @@ mod tests {
             _repository_id: Option<Uuid>,
             _limit: i64,
         ) -> Result<Vec<PipelineProjection>, PortError> {
-            Ok(Vec::new())
+            Ok(vec![PipelineProjection {
+                id: Uuid::nil(),
+                repository_id: Uuid::nil(),
+                workflow_name: "CI".into(),
+                commit_sha: "a".repeat(40),
+                status: "succeeded".into(),
+                inserted_at: Utc::now(),
+            }])
         }
 
         async fn pipeline_browser_projection(
@@ -3652,7 +3827,7 @@ mod tests {
             job_id: Uuid,
         ) -> Result<serde_json::Value, PortError> {
             Ok(
-                serde_json::json!({"id":job_id,"pipeline_id":pipeline_id,"key":"test","status":"succeeded","needs":[],"attempts":[],"artifacts":[]}),
+                serde_json::json!({"id":job_id,"pipeline_id":pipeline_id,"key":"test","status":"succeeded","needs":[],"attempts":[],"artifacts":[],"logs":[{"attempt_id":Uuid::nil(),"attempt_number":1,"sequence":1,"phase":"execution","step_position":0,"step_name":"test","step_status":"succeeded","stream":"stdout","content":"test output\n"}]}),
             )
         }
 
@@ -3663,6 +3838,25 @@ mod tests {
             _job_id: Uuid,
         ) -> Result<String, PortError> {
             Ok("[stdout] test output\n".into())
+        }
+
+        async fn latest_coverage(
+            &self,
+            _tenant_id: &str,
+            _repository_id: Uuid,
+        ) -> Result<Option<serde_json::Value>, PortError> {
+            Ok(Some(
+                serde_json::json!({"total":"87.5","total_value":87.5,"threshold":"80","threshold_value":80.0,"report":"coverage.json"}),
+            ))
+        }
+
+        async fn operational_metrics(
+            &self,
+            _tenant_id: &str,
+        ) -> Result<serde_json::Value, PortError> {
+            Ok(
+                serde_json::json!({"pipelines_created":1,"pipelines_queued":2,"pipelines_running":3,"outbox_pending":4,"outbox_dead_lettered":0,"durable_available":5,"durable_executing":1,"durable_discarded":0,"runners_online":2,"runners_offline":1}),
+            )
         }
 
         async fn queue(
@@ -4037,7 +4231,7 @@ mod tests {
             ),
             (
                 format!("/pipelines/{pipeline_id}/jobs/{job_id}"),
-                "job-detail",
+                "job-log-window",
             ),
             (
                 format!("/repositories/{}", Uuid::nil()),
@@ -4071,6 +4265,41 @@ mod tests {
         assert!(response.headers().contains_key(header::CONTENT_DISPOSITION));
         let body = test::read_body(response).await;
         assert_eq!(body, "[stdout] test output\n");
+    }
+
+    #[actix_web::test]
+    async fn pipeline_event_stream_is_cookie_authenticated_and_locally_bundled() {
+        let app = test::init_service(App::new().app_data(state(true)).configure(configure)).await;
+        let uri = format!("/pipelines/{}/events", Uuid::new_v4());
+        let response =
+            test::call_service(&app, test::TestRequest::get().uri(&uri).to_request()).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let response = test::call_service(
+            &app,
+            test::TestRequest::get()
+                .uri(&uri)
+                .insert_header((header::COOKIE, "robine_session=session"))
+                .to_request(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/event-stream; charset=utf-8")
+        );
+        let script = test::call_and_read_body(
+            &app,
+            test::TestRequest::get().uri("/assets/app.js").to_request(),
+        )
+        .await;
+        assert!(
+            std::str::from_utf8(&script)
+                .expect("JavaScript")
+                .contains("EventSource")
+        );
     }
 
     #[actix_web::test]
@@ -4184,6 +4413,38 @@ mod tests {
         let response =
             test::call_service(&app, test::TestRequest::get().uri("/metrics").to_request()).await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[actix_web::test]
+    async fn public_badges_reflect_latest_trusted_repository_data() {
+        let app = test::init_service(App::new().app_data(state(true)).configure(configure)).await;
+        for (uri, marker) in [
+            ("/badges/github/robine/fixture/build.svg", "build: passing"),
+            (
+                "/badges/github/robine/fixture/coverage.svg",
+                "coverage: 87.5%",
+            ),
+            (
+                "/badges/github/unknown/repository/build.svg",
+                "build: unknown",
+            ),
+        ] {
+            let response =
+                test::call_service(&app, test::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                response
+                    .headers()
+                    .get(header::CONTENT_TYPE)
+                    .and_then(|value| value.to_str().ok()),
+                Some("image/svg+xml")
+            );
+            let body = test::read_body(response).await;
+            assert!(
+                std::str::from_utf8(&body).expect("SVG").contains(marker),
+                "{uri}"
+            );
+        }
     }
 
     #[actix_web::test]

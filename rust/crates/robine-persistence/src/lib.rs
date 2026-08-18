@@ -1510,7 +1510,15 @@ impl PipelineRepository for Database {
              'artifacts', COALESCE((SELECT jsonb_agg(jsonb_build_object('name', r.name, 'size', \
              r.size, 'digest', r.digest, 'created_at', r.created_at) ORDER BY r.name) FROM artifacts r \
              JOIN job_attempts a ON a.id = r.attempt_id AND a.tenant_id = r.tenant_id WHERE \
-             r.tenant_id = j.tenant_id AND a.job_id = j.id), '[]'::jsonb)) FROM pipeline_jobs j \
+             r.tenant_id = j.tenant_id AND a.job_id = j.id), '[]'::jsonb), \
+             'logs', COALESCE((SELECT jsonb_agg(recent.entry ORDER BY recent.attempt_number, recent.sequence) \
+             FROM (SELECT a.number AS attempt_number, l.sequence, jsonb_build_object('attempt_id', a.id, \
+             'attempt_number', a.number, 'sequence', l.sequence, 'phase', l.phase, 'step_position', \
+             l.step_position, 'step_name', l.step_name, 'step_status', l.step_status, 'stream', \
+             l.stream, 'content', l.content) AS entry FROM log_chunks l JOIN job_attempts a ON \
+             a.id = l.attempt_id AND a.tenant_id = l.tenant_id WHERE l.tenant_id = j.tenant_id \
+             AND a.job_id = j.id ORDER BY a.number DESC, l.sequence DESC LIMIT 200) recent), \
+             '[]'::jsonb)) FROM pipeline_jobs j \
              WHERE j.tenant_id = $1 AND j.pipeline_id = $2 AND j.id = $3",
         ).bind(tenant_id).bind(pipeline_id).bind(job_id).fetch_optional(&mut *transaction).await.map_err(|_| PortError::Unavailable)?.ok_or(PortError::NotFound)?;
         transaction
@@ -1550,6 +1558,70 @@ impl PipelineRepository for Database {
                 let _ = write!(output, "[{stream}] {content}");
                 output
             }))
+    }
+
+    async fn latest_coverage(
+        &self,
+        tenant_id: &str,
+        repository_id: Uuid,
+    ) -> Result<Option<serde_json::Value>, PortError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        let logs = sqlx::query_as::<_, (Uuid, String)>(
+            "SELECT p.id, string_agg(l.content, '' ORDER BY j.position, a.number, l.sequence) \
+             FROM pipelines p JOIN pipeline_jobs j ON j.pipeline_id = p.id AND j.tenant_id = p.tenant_id \
+             JOIN job_attempts a ON a.job_id = j.id AND a.tenant_id = j.tenant_id \
+             JOIN log_chunks l ON l.attempt_id = a.id AND l.tenant_id = a.tenant_id \
+             WHERE p.tenant_id = $1 AND p.repository_id = $2 AND p.status IN ('succeeded', 'failed', 'cancelled') \
+             GROUP BY p.id, p.inserted_at ORDER BY p.inserted_at DESC LIMIT 100",
+        )
+        .bind(tenant_id)
+        .bind(repository_id)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(|_| PortError::Unavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        Ok(logs.into_iter().find_map(|(pipeline_id, content)| {
+            parse_coverage_marker(&content).map(|mut report| {
+                report["pipeline_id"] = serde_json::json!(pipeline_id);
+                report
+            })
+        }))
+    }
+
+    async fn operational_metrics(&self, tenant_id: &str) -> Result<serde_json::Value, PortError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        let metrics = sqlx::query_scalar::<_, serde_json::Value>(
+            "SELECT jsonb_build_object( \
+               'pipelines_created', (SELECT COUNT(*) FROM pipelines WHERE tenant_id = $1 AND status = 'created'), \
+               'pipelines_queued', (SELECT COUNT(*) FROM pipelines WHERE tenant_id = $1 AND status = 'queued'), \
+               'pipelines_running', (SELECT COUNT(*) FROM pipelines WHERE tenant_id = $1 AND status IN ('running', 'cancelling')), \
+               'outbox_pending', (SELECT COUNT(*) FROM outbox_events WHERE tenant_id = $1 AND delivered_at IS NULL AND dead_lettered_at IS NULL), \
+               'outbox_dead_lettered', (SELECT COUNT(*) FROM outbox_events WHERE tenant_id = $1 AND dead_lettered_at IS NOT NULL), \
+               'durable_available', (SELECT COUNT(*) FROM durable_jobs WHERE tenant_id = $1 AND status = 'available'), \
+               'durable_executing', (SELECT COUNT(*) FROM durable_jobs WHERE tenant_id = $1 AND status = 'executing'), \
+               'durable_discarded', (SELECT COUNT(*) FROM durable_jobs WHERE tenant_id = $1 AND status = 'discarded'), \
+               'runners_online', (SELECT COUNT(*) FROM remote_runners WHERE tenant_id = $1 AND admin_state != 'revoked' AND last_seen_at >= NOW() - INTERVAL '60 seconds'), \
+               'runners_offline', (SELECT COUNT(*) FROM remote_runners WHERE tenant_id = $1 AND admin_state != 'revoked' AND (last_seen_at IS NULL OR last_seen_at < NOW() - INTERVAL '60 seconds')) \
+             )",
+        )
+        .bind(tenant_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| PortError::Unavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        Ok(metrics)
     }
 
     async fn queue(
@@ -3603,6 +3675,20 @@ fn pipeline_projection(pipeline: &NewPipeline) -> PipelineProjection {
     }
 }
 
+fn parse_coverage_marker(content: &str) -> Option<serde_json::Value> {
+    content.lines().rev().find_map(|line| {
+        let fields = line.strip_prefix("ROBINE_COVERAGE ")?.split_whitespace().collect::<Vec<_>>();
+        if fields.len() != 3 { return None; }
+        let total = fields[0].strip_prefix("total=")?;
+        let threshold = fields[1].strip_prefix("threshold=")?;
+        let report = fields[2].strip_prefix("report=")?;
+        let total_value = total.parse::<f64>().ok().filter(|value| (0.0..=100.0).contains(value))?;
+        let threshold_value = threshold.parse::<f64>().ok().filter(|value| (0.0..=100.0).contains(value))?;
+        if report.is_empty() || report.len() > 128 || !report.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-')) { return None; }
+        Some(serde_json::json!({"total": total, "total_value": total_value, "threshold": threshold, "threshold_value": threshold_value, "report": report}))
+    })
+}
+
 async fn validate_retry_dependencies(
     transaction: &mut Transaction<'_, Postgres>,
     row: &RetryJobRow,
@@ -4359,5 +4445,20 @@ mod tests {
             PipelineProjection::try_from(row),
             Err(PersistenceError::UnknownPipelineState(_))
         ));
+    }
+
+    #[test]
+    fn coverage_markers_are_bounded_and_percentage_checked() {
+        let report = parse_coverage_marker(
+            "noise\nROBINE_COVERAGE total=87.5 threshold=80 report=coverage.json\n",
+        )
+        .expect("coverage marker");
+        assert_eq!(report["total"], "87.5");
+        assert_eq!(report["threshold_value"], 80.0);
+        assert!(parse_coverage_marker("ROBINE_COVERAGE total=101 threshold=80 report=x").is_none());
+        assert!(
+            parse_coverage_marker("ROBINE_COVERAGE total=80 threshold=70 report=../../secret")
+                .is_none()
+        );
     }
 }
