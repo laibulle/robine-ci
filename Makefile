@@ -1,16 +1,17 @@
 .DEFAULT_GOAL := dev
 
-DATABASE_URL ?= postgres://postgres:postgres@localhost/robine_dev
-ROBINE_BIND ?= 127.0.0.1:4004
-ROBINE_PUBLIC_URL ?= http://localhost:4004
+ENV_FILE ?= .env
 
-.PHONY: dev postgres
+.PHONY: dev postgres check-env
 
-dev: postgres
-	DATABASE_URL="$(DATABASE_URL)" \
-	ROBINE_BIND="$(ROBINE_BIND)" \
-	ROBINE_PUBLIC_URL="$(ROBINE_PUBLIC_URL)" \
-	cargo run -p robine-server
+dev: check-env postgres
+	set -a; . "./$(ENV_FILE)"; set +a; cargo run -p robine-server
 
 postgres:
 	docker compose up -d --wait postgres
+
+check-env:
+	@test -f "$(ENV_FILE)" || { \
+		echo "$(ENV_FILE) is missing; copy .env.example to $(ENV_FILE)"; \
+		exit 1; \
+	}

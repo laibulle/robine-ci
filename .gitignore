@@ -1,4 +1,5 @@
 /target/
+/.env
 
 # Temporary files, for example, from tests.
 /tmp/

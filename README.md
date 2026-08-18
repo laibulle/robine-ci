@@ -37,20 +37,19 @@ These are the initial supported MVP versions.
 
 ## Local setup
 
-Start PostgreSQL:
+Create the local development environment file:
 
 ```bash
-docker compose up -d --wait postgres
+cp .env.example .env
 ```
 
-Configure the mandatory secret-encryption master key for the server process:
+Replace the example encryption key with a locally generated value:
 
 ```bash
-export ROBINE_CI_SECRET_KEY="$(openssl rand -base64 32)"
-export ROBINE_BOOTSTRAP_TOKEN="$(openssl rand -hex 24)"
+openssl rand -base64 32
 ```
 
-Keep this key outside PostgreSQL and back it up securely. Losing it makes stored secrets unrecoverable.
+Keep this key outside PostgreSQL and back it up securely. Losing it makes stored secrets unrecoverable. The example bootstrap token is intended for local development only.
 
 For key rotation, configure all retained versions as a JSON object and select the new current version:
 
@@ -68,11 +67,10 @@ cargo build --workspace
 cargo test --workspace --all-targets
 ```
 
-Start the Actix control plane (it bootstraps an empty PostgreSQL schema itself):
+Start PostgreSQL and the Actix control plane (it bootstraps an empty PostgreSQL schema itself):
 
 ```bash
-DATABASE_URL=postgres://postgres:postgres@localhost/robine_dev \
-ROBINE_BIND=127.0.0.1:4004 cargo run -p robine-server
+make dev
 ```
 
 Run strict local verification:
