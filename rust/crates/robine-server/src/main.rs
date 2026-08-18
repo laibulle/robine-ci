@@ -33,18 +33,22 @@ async fn main() -> io::Result<()> {
         max_total_steps: environment_usize("ROBINE_WORKFLOW_MAX_TOTAL_STEPS", 512)?,
         max_graph_depth: environment_usize("ROBINE_WORKFLOW_MAX_GRAPH_DEPTH", 16)?,
     });
-    let source_fetcher = HttpArchiveFetcher::new(
-        std::env::var("GITHUB_APP_ID").ok(),
-        std::env::var("GITHUB_APP_PRIVATE_KEY")
-            .ok()
-            .map(|value| value.replace("\\n", "\n")),
-        std::env::var("GITLAB_URL").ok(),
-        std::env::var("GITLAB_TOKEN").ok(),
-        std::env::var("FORGEJO_URL").ok(),
-        std::env::var("FORGEJO_TOKEN").ok(),
-    )
-    .map_err(io::Error::other)?;
-    control_plane = control_plane.with_source_runtime(database.clone(), Arc::new(source_fetcher));
+    let source_fetcher = Arc::new(
+        HttpArchiveFetcher::new(
+            std::env::var("GITHUB_APP_ID").ok(),
+            std::env::var("GITHUB_APP_PRIVATE_KEY")
+                .ok()
+                .map(|value| value.replace("\\n", "\n")),
+            std::env::var("GITLAB_URL").ok(),
+            std::env::var("GITLAB_TOKEN").ok(),
+            std::env::var("FORGEJO_URL").ok(),
+            std::env::var("FORGEJO_TOKEN").ok(),
+        )
+        .map_err(io::Error::other)?,
+    );
+    control_plane = control_plane
+        .with_source_runtime(database.clone(), source_fetcher.clone())
+        .with_source_inspector(source_fetcher);
     let configured_storage_root =
         std::env::var("ROBINE_STORAGE_ROOT").unwrap_or_else(|_| "var/storage".into());
     let storage_path = std::path::PathBuf::from(configured_storage_root);

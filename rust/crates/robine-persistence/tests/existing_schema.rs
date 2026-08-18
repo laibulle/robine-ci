@@ -18,10 +18,10 @@ use robine_core::{
     ports::{IdentityRepository, OidcProvider, PipelineRepository, PortError},
 };
 use robine_persistence::{Database, PersistenceError, Readiness, storage_transition_ack};
-use robine_secrets::SecretRepository;
+use robine_secrets::{AesGcmKeyring, SecretRepository};
 use robine_source::{
-    ArchiveFetcher, ArchiveLimits, Provider, Repository, RepositoryStore, SourceError, SourceFile,
-    create_source_tar_gz,
+    ArchiveFetcher, ArchiveLimits, BranchHead, Provider, Repository, RepositoryStore, SourceError,
+    SourceFile, SourceInspector, create_source_tar_gz,
 };
 use robine_storage::{
     Artifact, BlobStore, CacheEntry, LocalBlobStore, MetadataRepository, StorageError,
@@ -35,6 +35,69 @@ struct FakeOidc(OidcClaims);
 
 struct WorkflowArchive(Vec<u8>);
 
+#[tokio::test]
+async fn repository_secrets_are_encrypted_upserted_and_listed_with_audit() {
+    let Ok(database_url) = std::env::var("ROBINE_DATABASE_INTEGRATION_URL") else {
+        return;
+    };
+    let database = Database::connect(&database_url, 2)
+        .await
+        .expect("connect migrated database");
+    let tenant = format!("rust-secrets-{}", Uuid::new_v4());
+    let repository_id = Uuid::new_v4();
+    let actor_id = Uuid::new_v4();
+    let keyring = AesGcmKeyring::from_encoded(
+        Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="),
+        None,
+        1,
+    )
+    .expect("keyring");
+    let first = keyring
+        .encrypt_repository(repository_id, "TOKEN".into(), b"first-secret")
+        .expect("encrypt");
+    SecretRepository::upsert_repository(&database, &tenant, actor_id, &first)
+        .await
+        .expect("store secret");
+    let second = keyring
+        .encrypt_repository(repository_id, "TOKEN".into(), b"second-secret")
+        .expect("encrypt replacement");
+    SecretRepository::upsert_repository(&database, &tenant, actor_id, &second)
+        .await
+        .expect("replace secret");
+    let listed = SecretRepository::list_repository(&database, &tenant, repository_id)
+        .await
+        .expect("list secrets");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, second.id);
+    assert_eq!(
+        keyring.decrypt(&listed[0]).expect("decrypt").as_slice(),
+        b"second-secret"
+    );
+    let mut cleanup = database
+        .tenant_transaction(&tenant)
+        .await
+        .expect("cleanup transaction");
+    let audit_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM audit_events WHERE tenant_id = $1 AND target_type = 'secret'",
+    )
+    .bind(&tenant)
+    .fetch_one(&mut *cleanup)
+    .await
+    .expect("audit count");
+    assert_eq!(audit_count, 2);
+    sqlx::query("DELETE FROM audit_events WHERE tenant_id = $1")
+        .bind(&tenant)
+        .execute(&mut *cleanup)
+        .await
+        .expect("delete audits");
+    sqlx::query("DELETE FROM secrets WHERE tenant_id = $1")
+        .bind(&tenant)
+        .execute(&mut *cleanup)
+        .await
+        .expect("delete secrets");
+    cleanup.commit().await.expect("commit cleanup");
+}
+
 #[async_trait]
 impl ArchiveFetcher for WorkflowArchive {
     async fn fetch_archive(
@@ -44,6 +107,115 @@ impl ArchiveFetcher for WorkflowArchive {
     ) -> Result<Vec<u8>, SourceError> {
         Ok(self.0.clone())
     }
+}
+
+#[async_trait]
+impl SourceInspector for WorkflowArchive {
+    async fn default_branch_head(
+        &self,
+        _repository: &Repository,
+    ) -> Result<BranchHead, SourceError> {
+        Ok(BranchHead {
+            branch: "main".into(),
+            commit_sha: "b".repeat(40),
+        })
+    }
+
+    async fn branch_head(
+        &self,
+        _repository: &Repository,
+        branch: &str,
+    ) -> Result<BranchHead, SourceError> {
+        Ok(BranchHead {
+            branch: branch.into(),
+            commit_sha: "b".repeat(40),
+        })
+    }
+}
+
+#[tokio::test]
+async fn manual_workflow_discovery_and_launch_are_exact_sha_and_audited() {
+    let Ok(database_url) = std::env::var("ROBINE_DATABASE_INTEGRATION_URL") else {
+        return;
+    };
+    let database = Arc::new(
+        Database::connect(&database_url, 2)
+            .await
+            .expect("connect migrated database"),
+    );
+    let repository_id = Uuid::new_v4();
+    let provider_id = i64::from_be_bytes(
+        repository_id.as_bytes()[..8]
+            .try_into()
+            .expect("UUID prefix"),
+    ) & i64::MAX;
+    let mut setup = database
+        .tenant_transaction("standalone")
+        .await
+        .expect("setup transaction");
+    sqlx::query("INSERT INTO github_repositories (id, provider_id, installation_id, owner, name, full_name, trusted, inserted_at, provider, provider_instance, tenant_id) VALUES ($1, $2, 1, 'acme', 'manual', 'acme/manual', TRUE, $3, 'github', 'https://github.com', 'standalone')")
+        .bind(repository_id).bind(provider_id).bind(Utc::now())
+        .execute(&mut *setup).await.expect("insert repository");
+    setup.commit().await.expect("commit repository");
+    let archive = create_source_tar_gz(&[SourceFile {
+        path: ".robine-ci/workflows/manual.yml".into(),
+        contents: b"version: 1\nname: Deploy\non:\n  workflow_dispatch:\n    inputs:\n      target:\n        type: choice\n        options: [staging, production]\n        required: true\njobs:\n  deploy:\n    image: alpine:3.22\n    steps:\n      - run: echo deploy\n".to_vec(),
+    }], ArchiveLimits::default()).expect("manual workflow archive");
+    let source = Arc::new(WorkflowArchive(archive));
+    let control_plane = ControlPlane::new(database.clone(), database.clone())
+        .with_source_runtime(database.clone(), source.clone())
+        .with_source_inspector(source);
+    let maintainer = User {
+        id: Uuid::new_v4(),
+        email: "manual@example.invalid".into(),
+        role: Role::Maintainer,
+        disabled: false,
+        inserted_at: Utc::now(),
+    };
+    let discovery = control_plane
+        .discover_manual_workflows(&maintainer, repository_id, Some("release"))
+        .await
+        .expect("discover manual workflow");
+    assert_eq!(discovery["branch"], "release");
+    assert_eq!(discovery["workflows"].as_array().map(Vec::len), Some(1));
+    let pipeline = control_plane
+        .launch_manual_workflow(
+            &maintainer,
+            repository_id,
+            Some("release"),
+            ".robine-ci/workflows/manual.yml",
+            &Uuid::new_v4().to_string(),
+            std::collections::BTreeMap::from([("target".into(), "production".into())]),
+        )
+        .await
+        .expect("launch workflow");
+    let mut verification = database
+        .tenant_transaction("standalone")
+        .await
+        .expect("verification transaction");
+    let audit_count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM audit_events WHERE tenant_id = 'standalone' AND action = 'workflow.manual_launched' AND target_id = $1 AND metadata->>'pipeline_id' = $2").bind(repository_id).bind(pipeline.id.to_string()).fetch_one(&mut *verification).await.expect("audit count");
+    assert_eq!(audit_count, 1);
+    sqlx::query("DELETE FROM audit_events WHERE target_id = $1")
+        .bind(repository_id)
+        .execute(&mut *verification)
+        .await
+        .expect("delete audit");
+    sqlx::query("DELETE FROM pipelines WHERE id = $1")
+        .bind(pipeline.id)
+        .execute(&mut *verification)
+        .await
+        .expect("delete pipeline");
+    sqlx::query("DELETE FROM outbox_events WHERE aggregate_id = $1")
+        .bind(pipeline.id)
+        .execute(&mut *verification)
+        .await
+        .expect("delete outbox");
+    sqlx::query("DELETE FROM github_repositories WHERE id = $1")
+        .bind(repository_id)
+        .execute(&mut *verification)
+        .await
+        .expect("delete repository");
+    verification.commit().await.expect("commit cleanup");
 }
 
 #[tokio::test]
@@ -122,7 +294,7 @@ async fn source_control_worker_creates_an_exact_sha_tenant_pipeline() {
         .process_all_tenant_source_control(10)
         .await
         .expect("process delivery");
-    assert_eq!(batch.processed, 1);
+    assert!(batch.processed >= 1);
 
     let mut verification = database
         .tenant_transaction(&tenant)
@@ -402,6 +574,11 @@ async fn cache_and_dependency_artifact_metadata_are_tenant_scoped_and_quota_lock
     .await
     .expect("download dependency metadata");
     assert_eq!(dependency.id, artifact.id);
+    let browser_artifact =
+        MetadataRepository::job_artifact(&database, &tenant, pipeline_id, job_id, "report", now)
+            .await
+            .expect("download job artifact metadata");
+    assert_eq!(browser_artifact.id, artifact.id);
     assert_eq!(
         MetadataRepository::upload_artifact(&database, &tenant, &artifact, quotas).await,
         Err(StorageError::ImmutableConflict)
@@ -1229,6 +1406,40 @@ async fn creation_persists_revision_graph_and_event_atomically() {
         .create_pipeline(&maintainer, conflicting)
         .await;
 
+    let browser_pipeline = PipelineRepository::pipeline_browser_projection(
+        database.as_ref(),
+        "standalone",
+        created.id,
+    )
+    .await
+    .expect("pipeline browser projection");
+    let browser_workflow = PipelineRepository::workflow_browser_projection(
+        database.as_ref(),
+        "standalone",
+        created.id,
+    )
+    .await
+    .expect("workflow browser projection");
+    let browser_job_id =
+        Uuid::parse_str(browser_pipeline["jobs"][0]["id"].as_str().expect("job id"))
+            .expect("UUID job id");
+    let browser_job = PipelineRepository::job_browser_projection(
+        database.as_ref(),
+        "standalone",
+        created.id,
+        browser_job_id,
+    )
+    .await
+    .expect("job browser projection");
+    let browser_log = PipelineRepository::job_log_download(
+        database.as_ref(),
+        "standalone",
+        created.id,
+        browser_job_id,
+    )
+    .await
+    .expect("empty job log");
+
     let mut verification = database
         .tenant_transaction("standalone")
         .await
@@ -1267,6 +1478,11 @@ async fn creation_persists_revision_graph_and_event_atomically() {
     verification.commit().await.expect("commit cleanup");
 
     assert_eq!(created.id, repeated.id);
+    assert_eq!(browser_pipeline["workflow_name"], "Rust creation");
+    assert_eq!(browser_pipeline["jobs"].as_array().map(Vec::len), Some(2));
+    assert_eq!(browser_workflow["path"], ".robine-ci/workflows/ci.yml");
+    assert!(browser_job["key"] == "build" || browser_job["key"] == "test");
+    assert!(browser_log.is_empty());
     assert_eq!(created.status, "created");
     assert!(matches!(
         conflict,

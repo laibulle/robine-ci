@@ -574,10 +574,125 @@ impl SecretRepository for Database {
             })
             .collect()
     }
+
+    async fn list_repository(
+        &self,
+        tenant_id: &str,
+        repository_id: Uuid,
+    ) -> Result<Vec<EncryptedSecret>, SecretError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| SecretError::Unavailable)?;
+        let names = sqlx::query_scalar::<_, String>(
+            "SELECT name FROM secrets WHERE tenant_id = $1 AND scope = 'repository' AND repository_id = $2 ORDER BY name",
+        )
+        .bind(tenant_id)
+        .bind(repository_id)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(|_| SecretError::Unavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| SecretError::Unavailable)?;
+        self.find_authorized(tenant_id, repository_id, &names).await
+    }
+
+    async fn upsert_repository(
+        &self,
+        tenant_id: &str,
+        actor_id: Uuid,
+        secret: &EncryptedSecret,
+    ) -> Result<(), SecretError> {
+        if secret.scope != SecretScope::Repository || secret.repository_id.is_none() {
+            return Err(SecretError::InvalidConfiguration);
+        }
+        let now = Utc::now();
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| SecretError::Unavailable)?;
+        sqlx::query(
+            "INSERT INTO secrets (id, name, scope, repository_id, allowed_repository_ids, ciphertext, nonce, tag, key_version, inserted_at, tenant_id) \
+             VALUES ($1, $2, 'repository', $3, $4, $5, $6, $7, $8, $9, $10) \
+             ON CONFLICT (tenant_id, scope, repository_id, name) DO UPDATE SET id = EXCLUDED.id, \
+               ciphertext = EXCLUDED.ciphertext, nonce = EXCLUDED.nonce, tag = EXCLUDED.tag, \
+               key_version = EXCLUDED.key_version, inserted_at = EXCLUDED.inserted_at",
+        )
+        .bind(secret.id)
+        .bind(&secret.name)
+        .bind(secret.repository_id)
+        .bind(&secret.allowed_repository_ids)
+        .bind(&secret.ciphertext)
+        .bind(&secret.nonce)
+        .bind(&secret.tag)
+        .bind(secret.key_version)
+        .bind(now)
+        .bind(tenant_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| SecretError::Unavailable)?;
+        sqlx::query(
+            "INSERT INTO audit_events (id, actor_id, action, target_type, target_id, metadata, occurred_at, tenant_id) \
+             VALUES ($1, $2, 'secret.stored', 'secret', $3, $4, $5, $6)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(actor_id.to_string())
+        .bind(secret.id)
+        .bind(serde_json::json!({"name": secret.name, "scope": "repository"}))
+        .bind(now)
+        .bind(tenant_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| SecretError::Unavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| SecretError::Unavailable)
+    }
 }
 
 #[async_trait]
 impl RepositoryStore for Database {
+    async fn list_trusted(&self, tenant_id: &str) -> Result<Vec<Repository>, SourceError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| SourceError::RepositoryUnavailable)?;
+        let rows = sqlx::query_as::<_, SourceRepositoryRow>(
+            "SELECT id, provider::text AS provider, provider_instance, installation_id, owner, \
+             name, full_name FROM github_repositories WHERE tenant_id = $1 AND trusted = TRUE \
+             ORDER BY full_name, id",
+        )
+        .bind(tenant_id)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(|_| SourceError::RepositoryUnavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| SourceError::RepositoryUnavailable)?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(Repository {
+                    id: row.id,
+                    provider: match row.provider.as_str() {
+                        "github" => Provider::GitHub,
+                        "gitlab" => Provider::GitLab,
+                        "forgejo" => Provider::Forgejo,
+                        _ => return Err(SourceError::RepositoryUnavailable),
+                    },
+                    provider_instance: row.provider_instance,
+                    installation_id: row.installation_id,
+                    owner: row.owner,
+                    name: row.name,
+                    full_name: row.full_name,
+                })
+            })
+            .collect()
+    }
+
     async fn find_trusted(
         &self,
         tenant_id: &str,
@@ -798,6 +913,44 @@ impl MetadataRepository for Database {
         .bind(tenant_id)
         .bind(pipeline_id)
         .bind(from_job)
+        .bind(name)
+        .bind(now)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| StorageError::Unavailable)?
+        .ok_or(StorageError::NotFound)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| StorageError::Unavailable)?;
+        row.into_domain()
+    }
+
+    async fn job_artifact(
+        &self,
+        tenant_id: &str,
+        pipeline_id: Uuid,
+        job_id: Uuid,
+        name: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Artifact, StorageError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| StorageError::Unavailable)?;
+        let row = sqlx::query_as::<_, ArtifactRow>(
+            "SELECT artifact.id, artifact.repository_id, artifact.attempt_id, artifact.name, \
+                    artifact.blob_id, artifact.digest, artifact.size, artifact.created_at, artifact.expires_at \
+             FROM artifacts AS artifact \
+             JOIN job_attempts AS attempt ON attempt.id = artifact.attempt_id AND attempt.tenant_id = artifact.tenant_id \
+             JOIN pipeline_jobs AS job ON job.id = attempt.job_id AND job.tenant_id = attempt.tenant_id \
+             WHERE artifact.tenant_id = $1 AND job.pipeline_id = $2 AND job.id = $3 \
+               AND artifact.name = $4 AND artifact.expires_at > $5 \
+             ORDER BY attempt.number DESC LIMIT 1",
+        )
+        .bind(tenant_id)
+        .bind(pipeline_id)
+        .bind(job_id)
         .bind(name)
         .bind(now)
         .fetch_optional(&mut *transaction)
@@ -1172,7 +1325,7 @@ impl PipelineRepository for Database {
                 String,
                 String,
                 serde_json::Value,
-                DateTime<Utc>,
+                NaiveDateTime,
             ),
         >(
             "SELECT id, provider::text, provider_instance, provider_delivery_id, event, payload, \
@@ -1195,7 +1348,7 @@ impl PipelineRepository for Database {
             provider_delivery_id: row.3,
             event: row.4,
             payload: row.5,
-            received_at: row.6,
+            received_at: row.6.and_utc(),
         })
     }
 
@@ -1276,6 +1429,127 @@ impl PipelineRepository for Database {
         self.list_pipeline_projection(tenant_id, repository_id, limit)
             .await
             .map_err(|_| PortError::Unavailable)
+    }
+
+    async fn pipeline_browser_projection(
+        &self,
+        tenant_id: &str,
+        pipeline_id: Uuid,
+    ) -> Result<serde_json::Value, PortError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        let projection = sqlx::query_scalar::<_, serde_json::Value>(
+            "SELECT jsonb_build_object('id', p.id, 'repository_id', p.repository_id, \
+             'workflow_name', p.workflow_name, 'commit_sha', p.commit_sha, 'status', p.status, \
+             'source_ref', p.source_ref, 'trigger', p.trigger, 'inserted_at', p.inserted_at, \
+             'jobs', COALESCE((SELECT jsonb_agg(jsonb_build_object('id', j.id, 'key', j.job_key, \
+             'status', j.status, 'needs', j.needs, 'position', j.position) ORDER BY j.position) \
+             FROM pipeline_jobs j WHERE j.tenant_id = p.tenant_id AND j.pipeline_id = p.id), \
+             '[]'::jsonb)) FROM pipelines p WHERE p.tenant_id = $1 AND p.id = $2",
+        )
+        .bind(tenant_id)
+        .bind(pipeline_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| PortError::Unavailable)?
+        .ok_or(PortError::NotFound)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        Ok(projection)
+    }
+
+    async fn workflow_browser_projection(
+        &self,
+        tenant_id: &str,
+        pipeline_id: Uuid,
+    ) -> Result<serde_json::Value, PortError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        let projection = sqlx::query_scalar::<_, serde_json::Value>(
+            "SELECT jsonb_build_object('pipeline_id', pipeline_id, 'path', path, 'source', source, \
+             'digest', digest, 'normalized_graph', normalized_graph, 'included_sources', \
+             included_sources, 'created_at', created_at) FROM workflow_revisions \
+             WHERE tenant_id = $1 AND pipeline_id = $2",
+        )
+        .bind(tenant_id)
+        .bind(pipeline_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| PortError::Unavailable)?
+        .ok_or(PortError::NotFound)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        Ok(projection)
+    }
+
+    async fn job_browser_projection(
+        &self,
+        tenant_id: &str,
+        pipeline_id: Uuid,
+        job_id: Uuid,
+    ) -> Result<serde_json::Value, PortError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        let projection = sqlx::query_scalar::<_, serde_json::Value>(
+            "SELECT jsonb_build_object('id', j.id, 'pipeline_id', j.pipeline_id, 'key', j.job_key, \
+             'status', j.status, 'needs', j.needs, 'position', j.position, 'execution', \
+             j.execution_spec, 'attempts', COALESCE((SELECT jsonb_agg(jsonb_build_object('id', \
+             a.id, 'number', a.number, 'status', a.status, 'last_sequence', a.last_sequence, \
+             'result_reason', a.result_reason, 'inserted_at', a.inserted_at) ORDER BY a.number DESC) \
+             FROM job_attempts a WHERE a.tenant_id = j.tenant_id AND a.job_id = j.id), '[]'::jsonb), \
+             'artifacts', COALESCE((SELECT jsonb_agg(jsonb_build_object('name', r.name, 'size', \
+             r.size, 'digest', r.digest, 'created_at', r.created_at) ORDER BY r.name) FROM artifacts r \
+             JOIN job_attempts a ON a.id = r.attempt_id AND a.tenant_id = r.tenant_id WHERE \
+             r.tenant_id = j.tenant_id AND a.job_id = j.id), '[]'::jsonb)) FROM pipeline_jobs j \
+             WHERE j.tenant_id = $1 AND j.pipeline_id = $2 AND j.id = $3",
+        ).bind(tenant_id).bind(pipeline_id).bind(job_id).fetch_optional(&mut *transaction).await.map_err(|_| PortError::Unavailable)?.ok_or(PortError::NotFound)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        Ok(projection)
+    }
+
+    async fn job_log_download(
+        &self,
+        tenant_id: &str,
+        pipeline_id: Uuid,
+        job_id: Uuid,
+    ) -> Result<String, PortError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        let exists = sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM pipeline_jobs WHERE tenant_id = $1 AND pipeline_id = $2 AND id = $3)").bind(tenant_id).bind(pipeline_id).bind(job_id).fetch_one(&mut *transaction).await.map_err(|_| PortError::Unavailable)?;
+        if !exists {
+            return Err(PortError::NotFound);
+        }
+        let chunks = sqlx::query_as::<_, (String, String)>(
+            "SELECT l.stream, l.content FROM log_chunks l JOIN job_attempts a ON a.id = l.attempt_id \
+             AND a.tenant_id = l.tenant_id WHERE l.tenant_id = $1 AND a.job_id = $2 \
+             ORDER BY a.number, l.sequence LIMIT 100000",
+        ).bind(tenant_id).bind(job_id).fetch_all(&mut *transaction).await.map_err(|_| PortError::Unavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        Ok(chunks
+            .into_iter()
+            .fold(String::new(), |mut output, (stream, content)| {
+                use std::fmt::Write as _;
+                let _ = write!(output, "[{stream}] {content}");
+                output
+            }))
     }
 
     async fn queue(
@@ -3260,6 +3534,26 @@ async fn insert_new_creation(
     .execute(&mut **transaction)
     .await
     .map_err(|_| PortError::Unavailable)?;
+    if pipeline.trigger == "workflow_dispatch" {
+        sqlx::query(
+            "INSERT INTO audit_events (id, actor_id, action, target_type, target_id, metadata, occurred_at, tenant_id) \
+             VALUES ($1, $2, 'workflow.manual_launched', 'repository', $3, $4, $5, $6)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(&pipeline.actor)
+        .bind(pipeline.repository_id)
+        .bind(serde_json::json!({
+            "workflow_path": pipeline.revision.path,
+            "commit_sha": pipeline.commit_sha,
+            "pipeline_id": pipeline.id,
+            "input_count": pipeline.inputs.len()
+        }))
+        .bind(pipeline.inserted_at)
+        .bind(tenant_id)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|_| PortError::Unavailable)?;
+    }
     Ok(())
 }
 

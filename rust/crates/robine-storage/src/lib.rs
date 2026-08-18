@@ -136,6 +136,15 @@ pub trait MetadataRepository: Send + Sync {
         now: DateTime<Utc>,
     ) -> Result<Artifact, StorageError>;
 
+    async fn job_artifact(
+        &self,
+        tenant_id: &str,
+        pipeline_id: Uuid,
+        job_id: Uuid,
+        name: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Artifact, StorageError>;
+
     async fn upload_artifact(
         &self,
         tenant_id: &str,

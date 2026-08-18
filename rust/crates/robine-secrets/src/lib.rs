@@ -2,7 +2,7 @@
 
 use aes_gcm::{
     Aes256Gcm, KeyInit,
-    aead::{Aead, Payload},
+    aead::{Aead, AeadCore, AeadInPlace, OsRng, Payload},
 };
 use async_trait::async_trait;
 use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
@@ -57,6 +57,19 @@ pub trait SecretRepository: Send + Sync {
         repository_id: Uuid,
         names: &[String],
     ) -> Result<Vec<EncryptedSecret>, SecretError>;
+
+    async fn list_repository(
+        &self,
+        tenant_id: &str,
+        repository_id: Uuid,
+    ) -> Result<Vec<EncryptedSecret>, SecretError>;
+
+    async fn upsert_repository(
+        &self,
+        tenant_id: &str,
+        actor_id: Uuid,
+        secret: &EncryptedSecret,
+    ) -> Result<(), SecretError>;
 }
 
 pub trait SecretDecryptor: Send + Sync {
@@ -137,6 +150,43 @@ impl AesGcmKeyring {
             )
             .map(Zeroizing::new)
             .map_err(|_| SecretError::AuthenticationFailed)
+    }
+
+    /// Encrypts a write-only repository secret using the current (highest) key version.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no encryption key is configured or encryption fails.
+    pub fn encrypt_repository(
+        &self,
+        repository_id: Uuid,
+        name: String,
+        plaintext: &[u8],
+    ) -> Result<EncryptedSecret, SecretError> {
+        let (&key_version, key) = self
+            .keys
+            .last_key_value()
+            .ok_or(SecretError::KeyUnavailable)?;
+        let mut secret = EncryptedSecret {
+            id: Uuid::new_v4(),
+            name,
+            scope: SecretScope::Repository,
+            repository_id: Some(repository_id),
+            allowed_repository_ids: Vec::new(),
+            ciphertext: plaintext.to_vec(),
+            nonce: Vec::new(),
+            tag: Vec::new(),
+            key_version,
+        };
+        let cipher =
+            Aes256Gcm::new_from_slice(key).map_err(|_| SecretError::InvalidConfiguration)?;
+        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let tag = cipher
+            .encrypt_in_place_detached(&nonce, &erlang_aad(&secret), &mut secret.ciphertext)
+            .map_err(|_| SecretError::AuthenticationFailed)?;
+        secret.nonce = nonce.to_vec();
+        secret.tag = tag.to_vec();
+        Ok(secret)
     }
 }
 
@@ -235,6 +285,22 @@ mod tests {
             keyring.decrypt(&tampered),
             Err(SecretError::AuthenticationFailed)
         ));
+    }
+
+    #[test]
+    fn newly_encrypted_repository_secrets_round_trip_with_compatible_aad() {
+        let encoded = BASE64.encode([42_u8; 32]);
+        let keyring = AesGcmKeyring::from_encoded(Some(&encoded), None, 1).expect("keyring");
+        let secret = keyring
+            .encrypt_repository(Uuid::new_v4(), "REGISTRY_TOKEN".into(), b"super-secret")
+            .expect("encrypt");
+        assert_ne!(secret.ciphertext, b"super-secret");
+        assert_eq!(secret.nonce.len(), 12);
+        assert_eq!(secret.tag.len(), 16);
+        assert_eq!(
+            keyring.decrypt(&secret).expect("decrypt").as_slice(),
+            b"super-secret"
+        );
     }
 
     fn hex(value: &str) -> Vec<u8> {

@@ -121,6 +121,32 @@ pub trait PipelineRepository: Send + Sync {
         limit: i64,
     ) -> Result<Vec<PipelineProjection>, PortError>;
 
+    async fn pipeline_browser_projection(
+        &self,
+        tenant_id: &str,
+        pipeline_id: Uuid,
+    ) -> Result<serde_json::Value, PortError>;
+
+    async fn workflow_browser_projection(
+        &self,
+        tenant_id: &str,
+        pipeline_id: Uuid,
+    ) -> Result<serde_json::Value, PortError>;
+
+    async fn job_browser_projection(
+        &self,
+        tenant_id: &str,
+        pipeline_id: Uuid,
+        job_id: Uuid,
+    ) -> Result<serde_json::Value, PortError>;
+
+    async fn job_log_download(
+        &self,
+        tenant_id: &str,
+        pipeline_id: Uuid,
+        job_id: Uuid,
+    ) -> Result<String, PortError>;
+
     async fn queue(
         &self,
         tenant_id: &str,

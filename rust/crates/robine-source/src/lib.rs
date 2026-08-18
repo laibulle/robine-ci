@@ -51,6 +51,8 @@ pub struct Repository {
 
 #[async_trait]
 pub trait RepositoryStore: Send + Sync {
+    async fn list_trusted(&self, tenant_id: &str) -> Result<Vec<Repository>, SourceError>;
+
     async fn find_trusted(
         &self,
         tenant_id: &str,
@@ -73,6 +75,23 @@ pub trait ArchiveFetcher: Send + Sync {
         repository: &Repository,
         commit_sha: &str,
     ) -> Result<Vec<u8>, SourceError>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BranchHead {
+    pub branch: String,
+    pub commit_sha: String,
+}
+
+#[async_trait]
+pub trait SourceInspector: Send + Sync {
+    async fn default_branch_head(&self, repository: &Repository)
+    -> Result<BranchHead, SourceError>;
+    async fn branch_head(
+        &self,
+        repository: &Repository,
+        branch: &str,
+    ) -> Result<BranchHead, SourceError>;
 }
 
 pub struct HttpArchiveFetcher {
@@ -224,6 +243,228 @@ impl HttpArchiveFetcher {
             .send()
             .await
             .map_err(|_| SourceError::ProviderUnavailable)
+    }
+
+    async fn github_get_json<T: serde::de::DeserializeOwned>(
+        &self,
+        repository: &Repository,
+        path: &str,
+    ) -> Result<T, SourceError> {
+        let token = self.github_token(repository.installation_id).await?;
+        let response = self
+            .client
+            .get(format!("{}{path}", self.github_api_origin))
+            .bearer_auth(token)
+            .header("accept", "application/vnd.github+json")
+            .header("x-github-api-version", "2022-11-28")
+            .send()
+            .await
+            .map_err(|_| SourceError::ProviderUnavailable)?;
+        if !response.status().is_success() {
+            return Err(SourceError::ProviderUnavailable);
+        }
+        response
+            .json()
+            .await
+            .map_err(|_| SourceError::ProviderUnavailable)
+    }
+}
+
+#[derive(Deserialize)]
+struct RepositoryDetails {
+    default_branch: String,
+}
+
+#[derive(Deserialize)]
+struct GitHubBranch {
+    commit: GitHubCommit,
+}
+
+#[derive(Deserialize)]
+struct GitHubCommit {
+    sha: String,
+}
+
+#[derive(Deserialize)]
+struct GitLabBranch {
+    name: String,
+    commit: GitLabCommit,
+}
+
+#[derive(Deserialize)]
+struct GitLabCommit {
+    id: String,
+}
+
+#[derive(Deserialize)]
+struct ForgejoBranch {
+    name: String,
+    commit: ForgejoCommit,
+}
+
+#[derive(Deserialize)]
+struct ForgejoCommit {
+    id: String,
+}
+
+#[async_trait]
+impl SourceInspector for HttpArchiveFetcher {
+    async fn default_branch_head(
+        &self,
+        repository: &Repository,
+    ) -> Result<BranchHead, SourceError> {
+        let branch = match repository.provider {
+            Provider::GitHub => {
+                self.github_get_json::<RepositoryDetails>(
+                    repository,
+                    &format!(
+                        "/repos/{}/{}",
+                        segment(&repository.owner),
+                        segment(&repository.name)
+                    ),
+                )
+                .await?
+                .default_branch
+            }
+            Provider::GitLab => {
+                let (origin, token) = configured_provider(
+                    &repository.provider_instance,
+                    self.gitlab_origin.as_deref(),
+                    self.gitlab_token.as_ref().map(|token| token.as_str()),
+                )?;
+                let response = self
+                    .client
+                    .get(format!(
+                        "{origin}/api/v4/projects/{}",
+                        segment(&repository.full_name)
+                    ))
+                    .header("private-token", token)
+                    .send()
+                    .await
+                    .map_err(|_| SourceError::ProviderUnavailable)?;
+                if !response.status().is_success() {
+                    return Err(SourceError::ProviderUnavailable);
+                }
+                response
+                    .json::<RepositoryDetails>()
+                    .await
+                    .map_err(|_| SourceError::ProviderUnavailable)?
+                    .default_branch
+            }
+            Provider::Forgejo => {
+                let (origin, token) = configured_provider(
+                    &repository.provider_instance,
+                    self.forgejo_origin.as_deref(),
+                    self.forgejo_token.as_ref().map(|token| token.as_str()),
+                )?;
+                let response = self
+                    .client
+                    .get(format!(
+                        "{origin}/api/v1/repos/{}/{}",
+                        segment(&repository.owner),
+                        segment(&repository.name)
+                    ))
+                    .bearer_auth(token)
+                    .send()
+                    .await
+                    .map_err(|_| SourceError::ProviderUnavailable)?;
+                if !response.status().is_success() {
+                    return Err(SourceError::ProviderUnavailable);
+                }
+                response
+                    .json::<RepositoryDetails>()
+                    .await
+                    .map_err(|_| SourceError::ProviderUnavailable)?
+                    .default_branch
+            }
+        };
+        self.branch_head(repository, &branch).await
+    }
+
+    async fn branch_head(
+        &self,
+        repository: &Repository,
+        branch: &str,
+    ) -> Result<BranchHead, SourceError> {
+        if branch.is_empty() || branch.len() > 255 {
+            return Err(SourceError::InvalidCommit);
+        }
+        let (resolved_branch, commit_sha) = match repository.provider {
+            Provider::GitHub => {
+                let body = self
+                    .github_get_json::<GitHubBranch>(
+                        repository,
+                        &format!(
+                            "/repos/{}/{}/branches/{}",
+                            segment(&repository.owner),
+                            segment(&repository.name),
+                            segment(branch)
+                        ),
+                    )
+                    .await?;
+                (branch.to_owned(), body.commit.sha)
+            }
+            Provider::GitLab => {
+                let (origin, token) = configured_provider(
+                    &repository.provider_instance,
+                    self.gitlab_origin.as_deref(),
+                    self.gitlab_token.as_ref().map(|token| token.as_str()),
+                )?;
+                let response = self
+                    .client
+                    .get(format!(
+                        "{origin}/api/v4/projects/{}/repository/branches/{}",
+                        segment(&repository.full_name),
+                        segment(branch)
+                    ))
+                    .header("private-token", token)
+                    .send()
+                    .await
+                    .map_err(|_| SourceError::ProviderUnavailable)?;
+                if !response.status().is_success() {
+                    return Err(SourceError::ProviderUnavailable);
+                }
+                let body = response
+                    .json::<GitLabBranch>()
+                    .await
+                    .map_err(|_| SourceError::ProviderUnavailable)?;
+                (body.name, body.commit.id)
+            }
+            Provider::Forgejo => {
+                let (origin, token) = configured_provider(
+                    &repository.provider_instance,
+                    self.forgejo_origin.as_deref(),
+                    self.forgejo_token.as_ref().map(|token| token.as_str()),
+                )?;
+                let response = self
+                    .client
+                    .get(format!(
+                        "{origin}/api/v1/repos/{}/{}/branches/{}",
+                        segment(&repository.owner),
+                        segment(&repository.name),
+                        segment(branch)
+                    ))
+                    .bearer_auth(token)
+                    .send()
+                    .await
+                    .map_err(|_| SourceError::ProviderUnavailable)?;
+                if !response.status().is_success() {
+                    return Err(SourceError::ProviderUnavailable);
+                }
+                let body = response
+                    .json::<ForgejoBranch>()
+                    .await
+                    .map_err(|_| SourceError::ProviderUnavailable)?;
+                (body.name, body.commit.id)
+            }
+        };
+        if resolved_branch.is_empty() || !valid_commit_sha(&commit_sha) {
+            return Err(SourceError::InvalidCommit);
+        }
+        Ok(BranchHead {
+            branch: resolved_branch,
+            commit_sha,
+        })
     }
 }
 

@@ -31,9 +31,10 @@ use robine_execution::{
     ExecutionResult, ExecutionRunner, ExecutionSpecification, ExecutionStatus, OutputChannel,
     OutputChunk, OutputSink,
 };
-use robine_secrets::{SecretDecryptor, SecretRepository};
+use robine_secrets::{AesGcmKeyring, SecretDecryptor, SecretRepository};
 use robine_source::{
-    ArchiveFetcher, ArchiveLimits, Provider, RepositoryStore, extract_tar_gz, valid_commit_sha,
+    ArchiveFetcher, ArchiveLimits, Provider, RepositoryStore, SourceInspector, extract_tar_gz,
+    valid_commit_sha,
 };
 use robine_storage::{
     Artifact, BlobStore, CacheEntry, MetadataRepository, RetentionRepository, RetentionResult,
@@ -62,8 +63,10 @@ pub struct ControlPlane {
     execution_runner: Option<Arc<dyn ExecutionRunner>>,
     secret_repository: Option<Arc<dyn SecretRepository>>,
     secret_decryptor: Option<Arc<dyn SecretDecryptor>>,
+    secret_encryptor: Option<Arc<AesGcmKeyring>>,
     source_repositories: Option<Arc<dyn RepositoryStore>>,
     source_fetcher: Option<Arc<dyn ArchiveFetcher>>,
+    source_inspector: Option<Arc<dyn SourceInspector>>,
     storage_repository: Option<Arc<dyn MetadataRepository>>,
     retention_repository: Option<Arc<dyn RetentionRepository>>,
     blob_store: Option<Arc<dyn BlobStore>>,
@@ -404,8 +407,10 @@ impl ControlPlane {
             execution_runner: None,
             secret_repository: None,
             secret_decryptor: None,
+            secret_encryptor: None,
             source_repositories: None,
             source_fetcher: None,
+            source_inspector: None,
             storage_repository: None,
             retention_repository: None,
             blob_store: None,
@@ -428,10 +433,11 @@ impl ControlPlane {
     pub fn with_secret_runtime(
         mut self,
         repository: Arc<dyn SecretRepository>,
-        decryptor: Arc<dyn SecretDecryptor>,
+        keyring: Arc<AesGcmKeyring>,
     ) -> Self {
         self.secret_repository = Some(repository);
-        self.secret_decryptor = Some(decryptor);
+        self.secret_decryptor = Some(keyring.clone());
+        self.secret_encryptor = Some(keyring);
         self
     }
 
@@ -443,6 +449,12 @@ impl ControlPlane {
     ) -> Self {
         self.source_repositories = Some(repositories);
         self.source_fetcher = Some(fetcher);
+        self
+    }
+
+    #[must_use]
+    pub fn with_source_inspector(mut self, inspector: Arc<dyn SourceInspector>) -> Self {
+        self.source_inspector = Some(inspector);
         self
     }
 
@@ -795,6 +807,385 @@ impl ControlPlane {
             .list_recent(&context.tenant_id, repository_id, limit.clamp(1, 100))
             .await
             .map_err(|_| ApplicationError::Unavailable)
+    }
+
+    /// Lists trusted source repositories for an authenticated tenant user.
+    ///
+    /// # Errors
+    ///
+    /// Returns unavailable when source-control persistence is not configured or cannot respond.
+    pub async fn list_source_repositories(
+        &self,
+        user: &User,
+        tenant_id: &str,
+    ) -> Result<Vec<robine_source::Repository>, ApplicationError> {
+        if user.disabled {
+            return Err(ApplicationError::Forbidden);
+        }
+        self.source_repositories
+            .as_ref()
+            .ok_or(ApplicationError::Unavailable)?
+            .list_trusted(tenant_id)
+            .await
+            .map_err(|_| ApplicationError::Unavailable)
+    }
+
+    /// Discovers manually enabled workflows at one immutable branch head.
+    ///
+    /// # Errors
+    ///
+    /// Returns forbidden for disabled users, invalid workflow diagnostics, or provider failure.
+    pub async fn discover_manual_workflows(
+        &self,
+        user: &User,
+        repository_id: Uuid,
+        branch: Option<&str>,
+    ) -> Result<serde_json::Value, ApplicationError> {
+        if user.disabled {
+            return Err(ApplicationError::Forbidden);
+        }
+        let (head, sources) = self.workflow_sources(repository_id, branch).await?;
+        let mut workflows = Vec::new();
+        for path in sources.keys() {
+            let resolved = robine_workflows::resolve(path, &sources, &self.workflow_limits)
+                .map_err(ApplicationError::InvalidWorkflow)?;
+            let Some(dispatch) = resolved.workflow.triggers.get("workflow_dispatch") else {
+                continue;
+            };
+            workflows.push(serde_json::json!({
+                "path": path,
+                "name": resolved.workflow.name,
+                "inputs": dispatch.get("inputs").cloned().unwrap_or_else(|| serde_json::json!({}))
+            }));
+        }
+        Ok(
+            serde_json::json!({"branch": head.branch, "commit_sha": head.commit_sha, "workflows": workflows}),
+        )
+    }
+
+    /// Discovers scheduled workflows at the immutable default-branch head.
+    ///
+    /// # Errors
+    ///
+    /// Returns forbidden for disabled users, invalid workflow diagnostics, or provider failure.
+    pub async fn discover_scheduled_workflows(
+        &self,
+        user: &User,
+        repository_id: Uuid,
+    ) -> Result<serde_json::Value, ApplicationError> {
+        if user.disabled {
+            return Err(ApplicationError::Forbidden);
+        }
+        let (head, sources) = self.workflow_sources(repository_id, None).await?;
+        let mut workflows = Vec::new();
+        for path in sources.keys() {
+            let resolved = robine_workflows::resolve(path, &sources, &self.workflow_limits)
+                .map_err(ApplicationError::InvalidWorkflow)?;
+            let Some(schedules) = resolved
+                .workflow
+                .triggers
+                .get("schedule")
+                .and_then(serde_json::Value::as_array)
+            else {
+                continue;
+            };
+            if schedules.is_empty() {
+                continue;
+            }
+            workflows.push(serde_json::json!({
+                "path": path,
+                "name": resolved.workflow.name,
+                "schedules": schedules.iter().filter_map(|schedule| schedule.get("cron").and_then(serde_json::Value::as_str)).collect::<Vec<_>>()
+            }));
+        }
+        Ok(
+            serde_json::json!({"branch": head.branch, "commit_sha": head.commit_sha, "workflows": workflows}),
+        )
+    }
+
+    /// Revalidates and launches a manual workflow at the current exact branch SHA.
+    ///
+    /// # Errors
+    ///
+    /// Returns forbidden for viewers, not-found for an unknown workflow, invalid input, or provider failure.
+    pub async fn launch_manual_workflow(
+        &self,
+        user: &User,
+        repository_id: Uuid,
+        branch: Option<&str>,
+        workflow_path: &str,
+        request_id: &str,
+        inputs: std::collections::BTreeMap<String, String>,
+    ) -> Result<PipelineProjection, ApplicationError> {
+        if user.disabled || user.role == Role::Viewer {
+            return Err(ApplicationError::Forbidden);
+        }
+        if workflow_path.len() > 512 || request_id.is_empty() || request_id.len() > 128 {
+            return Err(ApplicationError::InvalidPipelineInput);
+        }
+        let (head, sources) = self.workflow_sources(repository_id, branch).await?;
+        let source = sources
+            .get(workflow_path)
+            .cloned()
+            .ok_or(ApplicationError::PipelineNotFound)?;
+        let resolved = robine_workflows::resolve(workflow_path, &sources, &self.workflow_limits)
+            .map_err(ApplicationError::InvalidWorkflow)?;
+        let normalized_inputs = resolved
+            .workflow
+            .normalized_inputs("workflow_dispatch", &inputs)
+            .map_err(|diagnostic| ApplicationError::InvalidWorkflow(vec![diagnostic]))?;
+        let mut included_sources = sources;
+        included_sources.remove(workflow_path);
+        self.create_pipeline(
+            user,
+            CreatePipelineInput {
+                repository_id,
+                workflow_name: resolved.workflow.name,
+                commit_sha: head.commit_sha,
+                source_ref: Some(head.branch),
+                trigger: "workflow_dispatch".into(),
+                inputs: normalized_inputs,
+                scheduled_for: None,
+                idempotency_key: Some(format!("manual:{repository_id}:{request_id}")),
+                jobs: std::collections::BTreeMap::new(),
+                workflow_revision: Some(robine_core::pipelines::CreateWorkflowRevisionInput {
+                    path: workflow_path.into(),
+                    source,
+                    sources: included_sources,
+                }),
+            },
+        )
+        .await
+    }
+
+    async fn workflow_sources(
+        &self,
+        repository_id: Uuid,
+        branch: Option<&str>,
+    ) -> Result<
+        (
+            robine_source::BranchHead,
+            std::collections::BTreeMap<String, String>,
+        ),
+        ApplicationError,
+    > {
+        let repository = self
+            .source_repositories
+            .as_ref()
+            .ok_or(ApplicationError::Unavailable)?
+            .find_trusted("standalone", repository_id)
+            .await
+            .map_err(|_| ApplicationError::PipelineNotFound)?;
+        let inspector = self
+            .source_inspector
+            .as_ref()
+            .ok_or(ApplicationError::Unavailable)?;
+        let head = match branch.filter(|branch| !branch.is_empty()) {
+            Some(branch) => inspector.branch_head(&repository, branch).await,
+            None => inspector.default_branch_head(&repository).await,
+        }
+        .map_err(|_| ApplicationError::Unavailable)?;
+        if !valid_commit_sha(&head.commit_sha) {
+            return Err(ApplicationError::Unavailable);
+        }
+        let archive = self
+            .source_fetcher
+            .as_ref()
+            .ok_or(ApplicationError::Unavailable)?
+            .fetch_archive(&repository, &head.commit_sha)
+            .await
+            .map_err(|_| ApplicationError::Unavailable)?;
+        let files = extract_tar_gz(&archive, ArchiveLimits::default())
+            .map_err(|_| ApplicationError::Unavailable)?;
+        let mut sources = std::collections::BTreeMap::new();
+        for file in files {
+            let Some(path) = file
+                .path
+                .to_str()
+                .filter(|path| robine_workflows::valid_workflow_path(path))
+            else {
+                continue;
+            };
+            let source = String::from_utf8(file.contents)
+                .map_err(|_| ApplicationError::InvalidPipelineInput)?;
+            sources.insert(path.to_owned(), source);
+        }
+        Ok((head, sources))
+    }
+
+    /// Lists write-only repository secret metadata for maintainers.
+    ///
+    /// # Errors
+    ///
+    /// Returns forbidden for viewers or unavailable when secret storage is not configured.
+    pub async fn list_repository_secrets(
+        &self,
+        user: &User,
+        repository_id: Uuid,
+    ) -> Result<Vec<String>, ApplicationError> {
+        if user.disabled || user.role == Role::Viewer {
+            return Err(ApplicationError::Forbidden);
+        }
+        let secrets = self
+            .secret_repository
+            .as_ref()
+            .ok_or(ApplicationError::Unavailable)?
+            .list_repository("standalone", repository_id)
+            .await
+            .map_err(|_| ApplicationError::Unavailable)?;
+        Ok(secrets.into_iter().map(|secret| secret.name).collect())
+    }
+
+    /// Encrypts and atomically audits a write-only repository secret.
+    ///
+    /// # Errors
+    ///
+    /// Returns forbidden for viewers, invalid input for malformed values, or unavailable.
+    pub async fn store_repository_secret(
+        &self,
+        user: &User,
+        repository_id: Uuid,
+        name: String,
+        value: &[u8],
+    ) -> Result<(), ApplicationError> {
+        if user.disabled || user.role == Role::Viewer {
+            return Err(ApplicationError::Forbidden);
+        }
+        if !valid_secret_name(&name) || !(8..=65_536).contains(&value.len()) {
+            return Err(ApplicationError::InvalidPipelineInput);
+        }
+        let secret = self
+            .secret_encryptor
+            .as_ref()
+            .ok_or(ApplicationError::Unavailable)?
+            .encrypt_repository(repository_id, name, value)
+            .map_err(|_| ApplicationError::Unavailable)?;
+        self.secret_repository
+            .as_ref()
+            .ok_or(ApplicationError::Unavailable)?
+            .upsert_repository("standalone", user.id, &secret)
+            .await
+            .map_err(|_| ApplicationError::Unavailable)
+    }
+
+    /// Loads one tenant-scoped pipeline browser projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns forbidden for a disabled user, not-found for an unknown pipeline, or unavailable.
+    pub async fn pipeline_browser_projection(
+        &self,
+        user: &User,
+        pipeline_id: Uuid,
+    ) -> Result<serde_json::Value, ApplicationError> {
+        if user.disabled {
+            return Err(ApplicationError::Forbidden);
+        }
+        self.pipelines
+            .pipeline_browser_projection("standalone", pipeline_id)
+            .await
+            .map_err(|error| browser_projection_error(&error))
+    }
+
+    /// Loads one immutable workflow revision projection.
+    ///
+    /// # Errors
+    ///
+    /// Returns forbidden for a disabled user, not-found for an unknown pipeline, or unavailable.
+    pub async fn workflow_browser_projection(
+        &self,
+        user: &User,
+        pipeline_id: Uuid,
+    ) -> Result<serde_json::Value, ApplicationError> {
+        if user.disabled {
+            return Err(ApplicationError::Forbidden);
+        }
+        self.pipelines
+            .workflow_browser_projection("standalone", pipeline_id)
+            .await
+            .map_err(|error| browser_projection_error(&error))
+    }
+
+    /// Loads one job projection belonging to a pipeline.
+    ///
+    /// # Errors
+    ///
+    /// Returns forbidden for a disabled user, not-found for unknown work, or unavailable.
+    pub async fn job_browser_projection(
+        &self,
+        user: &User,
+        pipeline_id: Uuid,
+        job_id: Uuid,
+    ) -> Result<serde_json::Value, ApplicationError> {
+        if user.disabled {
+            return Err(ApplicationError::Forbidden);
+        }
+        self.pipelines
+            .job_browser_projection("standalone", pipeline_id, job_id)
+            .await
+            .map_err(|error| browser_projection_error(&error))
+    }
+
+    /// Downloads ordered text logs for every retained attempt of one job.
+    ///
+    /// # Errors
+    ///
+    /// Returns forbidden for a disabled user, not-found for unknown work, or unavailable.
+    pub async fn job_log_download(
+        &self,
+        user: &User,
+        pipeline_id: Uuid,
+        job_id: Uuid,
+    ) -> Result<String, ApplicationError> {
+        if user.disabled {
+            return Err(ApplicationError::Forbidden);
+        }
+        self.pipelines
+            .job_log_download("standalone", pipeline_id, job_id)
+            .await
+            .map_err(|error| browser_projection_error(&error))
+    }
+
+    /// Downloads one unexpired artifact produced by a visible job.
+    ///
+    /// # Errors
+    ///
+    /// Returns forbidden for a disabled user, not-found for unknown content, or unavailable.
+    pub async fn job_artifact_download(
+        &self,
+        user: &User,
+        pipeline_id: Uuid,
+        job_id: Uuid,
+        name: &str,
+    ) -> Result<RemoteTransferDownload, ApplicationError> {
+        if user.disabled {
+            return Err(ApplicationError::Forbidden);
+        }
+        if name.is_empty() || name.len() > 128 {
+            return Err(ApplicationError::PipelineNotFound);
+        }
+        self.pipelines
+            .job_browser_projection("standalone", pipeline_id, job_id)
+            .await
+            .map_err(|error| browser_projection_error(&error))?;
+        let artifact = self
+            .storage_repository
+            .as_ref()
+            .ok_or(ApplicationError::Unavailable)?
+            .job_artifact("standalone", pipeline_id, job_id, name, Utc::now())
+            .await
+            .map_err(|_| ApplicationError::PipelineNotFound)?;
+        let content = self
+            .blob_store
+            .as_ref()
+            .ok_or(ApplicationError::Unavailable)?
+            .get("standalone", &artifact.object)
+            .await
+            .map_err(|_| ApplicationError::Unavailable)?;
+        Ok(RemoteTransferDownload {
+            content,
+            digest: artifact.object.digest,
+        })
     }
 
     /// Validates and atomically persists a pipeline, immutable revision, job graph, and event.
@@ -3411,6 +3802,25 @@ fn authentication_error(error: &PortError) -> ApplicationError {
         | PortError::StaleEvent { .. }
         | PortError::Unavailable => ApplicationError::Unavailable,
     }
+}
+
+fn browser_projection_error(error: &PortError) -> ApplicationError {
+    match error {
+        PortError::NotFound => ApplicationError::PipelineNotFound,
+        _ => ApplicationError::Unavailable,
+    }
+}
+
+fn valid_secret_name(name: &str) -> bool {
+    let mut characters = name.bytes();
+    let Some(first) = characters.next() else {
+        return false;
+    };
+    name.len() <= 128
+        && (first.is_ascii_uppercase() || first == b'_')
+        && characters.all(|character| {
+            character.is_ascii_uppercase() || character.is_ascii_digit() || character == b'_'
+        })
 }
 
 fn deterministic_uuid(key: &str) -> Uuid {

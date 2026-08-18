@@ -10,6 +10,9 @@ members = [
   "rust/crates/robine-storage",
   "rust/crates/robine-workflows",
   "rust/crates/robine-server",
+  "rust/crates/robine-cli",
+  "rust/crates/robine-package",
+  "rust/crates/robine-runner",
 ]
 resolver = "3"
 

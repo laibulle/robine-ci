@@ -977,6 +977,674 @@ async fn authenticated_user(
     state.control_plane.authenticate(&token).await
 }
 
+fn html_page(title: &str, body: &str) -> HttpResponse {
+    HttpResponse::Ok()
+        .insert_header((header::CACHE_CONTROL, "no-store"))
+        .content_type("text/html; charset=utf-8")
+        .body(format!("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>{} · Robine</title><link rel=\"stylesheet\" href=\"/assets/app.css\"></head><body><header class=\"topbar\"><a href=\"/\"><strong>Robine CI</strong></a><nav><a href=\"/pipelines\">Pipelines</a><a href=\"/repositories\">Repositories</a><a href=\"/build-information\">Build</a><a href=\"/admin\">Admin</a></nav></header><main>{body}</main></body></html>", escape_html(title)))
+}
+
+async fn home_page(request: HttpRequest) -> HttpResponse {
+    let target = if request.cookie("robine_session").is_some() {
+        "/pipelines"
+    } else {
+        "/sign-in"
+    };
+    html_page(
+        "Home",
+        &format!(
+            "<section class=\"hero\"><p class=\"eyebrow\">Continuous integration, made legible</p><h1>Build with speed.<br>Ship with clarity.</h1><p>Trusted repositories, reproducible jobs and actionable logs in one self-hosted workspace.</p><a class=\"primary\" href=\"{target}\">Open Robine</a></section>"
+        ),
+    )
+}
+
+async fn browser_pipelines(request: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    let Ok(user) = authenticated_user(&request, &state).await else {
+        return HttpResponse::SeeOther()
+            .insert_header((header::LOCATION, "/sign-in"))
+            .finish();
+    };
+    let Ok(pipelines) = state.control_plane.list_pipelines(&user, None, 100).await else {
+        return HttpResponse::ServiceUnavailable().finish();
+    };
+    let rows = pipelines.iter().fold(String::new(), |mut output, pipeline| {
+        let _ = write!(output, "<a class=\"surface-panel pipeline-row\" href=\"/pipelines/{}\"><strong>{}</strong><span>{}</span><code>{}</code></a>", pipeline.id, escape_html(&pipeline.workflow_name), escape_html(&pipeline.status), escape_html(&pipeline.commit_sha[..8]));
+        output
+    });
+    html_page(
+        "Pipelines",
+        &format!(
+            "<section><p class=\"eyebrow\">Control plane</p><h1>Pipelines</h1><div id=\"pipelines\">{rows}</div></section>"
+        ),
+    )
+}
+
+async fn browser_pipeline(
+    request: HttpRequest,
+    pipeline_id: web::Path<Uuid>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let Ok(user) = authenticated_user(&request, &state).await else {
+        return HttpResponse::SeeOther()
+            .insert_header((header::LOCATION, "/sign-in"))
+            .finish();
+    };
+    let projection = match state
+        .control_plane
+        .pipeline_browser_projection(&user, *pipeline_id)
+        .await
+    {
+        Ok(projection) => projection,
+        Err(ApplicationError::PipelineNotFound) => return HttpResponse::NotFound().finish(),
+        Err(_) => return HttpResponse::ServiceUnavailable().finish(),
+    };
+    let text = |field| {
+        projection
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+    };
+    let jobs = projection
+        .get("jobs")
+        .and_then(serde_json::Value::as_array)
+        .map_or_else(String::new, |jobs| {
+            jobs.iter().fold(String::new(), |mut output, job| {
+                let id = job.get("id").and_then(serde_json::Value::as_str).unwrap_or("");
+                let key = job.get("key").and_then(serde_json::Value::as_str).unwrap_or("job");
+                let status = job.get("status").and_then(serde_json::Value::as_str).unwrap_or("unknown");
+                let _ = write!(output, "<a class=\"surface-panel pipeline-row\" href=\"/pipelines/{}/jobs/{}\"><strong>{}</strong><span>{}</span></a>", pipeline_id, escape_html(id), escape_html(key), escape_html(status));
+                output
+            })
+        });
+    html_page(
+        "Pipeline",
+        &format!(
+            "<section id=\"pipeline-detail\"><p class=\"eyebrow\">Pipeline</p><h1>{}</h1><dl><dt>Status</dt><dd>{}</dd><dt>Commit</dt><dd><code>{}</code></dd><dt>Source</dt><dd>{}</dd><dt>Trigger</dt><dd>{}</dd></dl><p><a href=\"/pipelines/{pipeline_id}/workflow\">Workflow revision</a></p><h2>Jobs</h2><div id=\"pipeline-jobs\">{jobs}</div></section>",
+            escape_html(text("workflow_name")),
+            escape_html(text("status")),
+            escape_html(text("commit_sha")),
+            escape_html(text("source_ref")),
+            escape_html(text("trigger")),
+        ),
+    )
+}
+
+async fn browser_workflow(
+    request: HttpRequest,
+    pipeline_id: web::Path<Uuid>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let Ok(user) = authenticated_user(&request, &state).await else {
+        return HttpResponse::SeeOther()
+            .insert_header((header::LOCATION, "/sign-in"))
+            .finish();
+    };
+    let projection = match state
+        .control_plane
+        .workflow_browser_projection(&user, *pipeline_id)
+        .await
+    {
+        Ok(projection) => projection,
+        Err(ApplicationError::PipelineNotFound) => return HttpResponse::NotFound().finish(),
+        Err(_) => return HttpResponse::ServiceUnavailable().finish(),
+    };
+    let text = |field| {
+        projection
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+    };
+    html_page(
+        "Workflow revision",
+        &format!(
+            "<section id=\"workflow-revision\"><p class=\"eyebrow\">Immutable workflow revision</p><h1>{}</h1><dl><dt>Digest</dt><dd><code>{}</code></dd></dl><pre>{}</pre></section>",
+            escape_html(text("path")),
+            escape_html(text("digest")),
+            escape_html(text("source"))
+        ),
+    )
+}
+
+async fn browser_job(
+    request: HttpRequest,
+    path: web::Path<(Uuid, Uuid)>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let Ok(user) = authenticated_user(&request, &state).await else {
+        return HttpResponse::SeeOther()
+            .insert_header((header::LOCATION, "/sign-in"))
+            .finish();
+    };
+    let (pipeline_id, job_id) = path.into_inner();
+    let projection = match state
+        .control_plane
+        .job_browser_projection(&user, pipeline_id, job_id)
+        .await
+    {
+        Ok(projection) => projection,
+        Err(ApplicationError::PipelineNotFound) => return HttpResponse::NotFound().finish(),
+        Err(_) => return HttpResponse::ServiceUnavailable().finish(),
+    };
+    let text = |field| {
+        projection
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+    };
+    let attempts = serde_json::to_string_pretty(
+        projection
+            .get("attempts")
+            .unwrap_or(&serde_json::Value::Null),
+    )
+    .unwrap_or_default();
+    let artifacts = serde_json::to_string_pretty(
+        projection
+            .get("artifacts")
+            .unwrap_or(&serde_json::Value::Null),
+    )
+    .unwrap_or_default();
+    html_page(
+        "Job",
+        &format!(
+            "<section id=\"job-detail\"><p class=\"eyebrow\">Pipeline job</p><h1>{}</h1><p class=\"status\">{}</p><p><a id=\"job-logs-download\" href=\"/pipelines/{pipeline_id}/jobs/{job_id}/logs\">Download complete log</a></p><h2>Attempts</h2><pre>{}</pre><h2>Artifacts</h2><pre>{}</pre></section>",
+            escape_html(text("key")),
+            escape_html(text("status")),
+            escape_html(&attempts),
+            escape_html(&artifacts)
+        ),
+    )
+}
+
+async fn download_job_logs(
+    request: HttpRequest,
+    path: web::Path<(Uuid, Uuid)>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let Ok(user) = authenticated_user(&request, &state).await else {
+        return HttpResponse::SeeOther()
+            .insert_header((header::LOCATION, "/sign-in"))
+            .finish();
+    };
+    let (pipeline_id, job_id) = path.into_inner();
+    match state
+        .control_plane
+        .job_log_download(&user, pipeline_id, job_id)
+        .await
+    {
+        Ok(log) => HttpResponse::Ok()
+            .insert_header((header::CACHE_CONTROL, "no-store"))
+            .insert_header((
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"job-{job_id}.log\""),
+            ))
+            .content_type("text/plain; charset=utf-8")
+            .body(log),
+        Err(ApplicationError::PipelineNotFound) => HttpResponse::NotFound().finish(),
+        Err(_) => HttpResponse::ServiceUnavailable().finish(),
+    }
+}
+
+async fn download_job_artifact(
+    request: HttpRequest,
+    path: web::Path<(Uuid, Uuid, String)>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let Ok(user) = authenticated_user(&request, &state).await else {
+        return HttpResponse::SeeOther()
+            .insert_header((header::LOCATION, "/sign-in"))
+            .finish();
+    };
+    let (pipeline_id, job_id, name) = path.into_inner();
+    match state
+        .control_plane
+        .job_artifact_download(&user, pipeline_id, job_id, &name)
+        .await
+    {
+        Ok(artifact) => {
+            let filename: String = name
+                .chars()
+                .map(|character| {
+                    if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') {
+                        character
+                    } else {
+                        '-'
+                    }
+                })
+                .collect();
+            HttpResponse::Ok()
+                .insert_header((header::CACHE_CONTROL, "private, no-store"))
+                .insert_header((
+                    header::CONTENT_DISPOSITION,
+                    format!("attachment; filename=\"{filename}.tar.gz\""),
+                ))
+                .insert_header(("x-content-sha256", artifact.digest))
+                .content_type("application/gzip")
+                .body(artifact.content)
+        }
+        Err(ApplicationError::PipelineNotFound) => HttpResponse::NotFound().finish(),
+        Err(ApplicationError::Forbidden) => HttpResponse::Forbidden().finish(),
+        Err(_) => HttpResponse::ServiceUnavailable().finish(),
+    }
+}
+
+async fn browser_repositories(request: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    let Ok(user) = authenticated_user(&request, &state).await else {
+        return HttpResponse::SeeOther()
+            .insert_header((header::LOCATION, "/sign-in"))
+            .finish();
+    };
+    let Ok(repositories) = state
+        .control_plane
+        .list_source_repositories(&user, "standalone")
+        .await
+    else {
+        return HttpResponse::ServiceUnavailable().finish();
+    };
+    let rows = repositories.iter().fold(String::new(), |mut output, repository| {
+        let provider = match repository.provider {
+            robine_source::Provider::GitHub => "GitHub",
+            robine_source::Provider::GitLab => "GitLab",
+            robine_source::Provider::Forgejo => "Forgejo",
+        };
+        let _ = write!(output, "<a class=\"surface-panel pipeline-row\" href=\"/repositories/{}\"><strong>{}</strong><span>{provider}</span><small>{}</small></a>", repository.id, escape_html(&repository.full_name), escape_html(&repository.provider_instance));
+        output
+    });
+    html_page(
+        "Repositories",
+        &format!(
+            "<section><p class=\"eyebrow\">Source control</p><h1>Repositories</h1><p>Trusted GitHub, GitLab and Forgejo repositories.</p><div id=\"repositories\">{rows}</div></section>"
+        ),
+    )
+}
+
+async fn browser_repository(
+    request: HttpRequest,
+    repository_id: web::Path<Uuid>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let Ok(user) = authenticated_user(&request, &state).await else {
+        return HttpResponse::SeeOther()
+            .insert_header((header::LOCATION, "/sign-in"))
+            .finish();
+    };
+    let Ok(repositories) = state
+        .control_plane
+        .list_source_repositories(&user, "standalone")
+        .await
+    else {
+        return HttpResponse::ServiceUnavailable().finish();
+    };
+    let Some(repository) = repositories
+        .iter()
+        .find(|repository| repository.id == *repository_id)
+    else {
+        return HttpResponse::NotFound().finish();
+    };
+    let Ok(pipelines) = state
+        .control_plane
+        .list_pipelines(&user, Some(*repository_id), 100)
+        .await
+    else {
+        return HttpResponse::ServiceUnavailable().finish();
+    };
+    let rows = pipelines.iter().fold(String::new(), |mut output, pipeline| {
+        let _ = write!(output, "<a class=\"surface-panel pipeline-row\" href=\"/pipelines/{}\"><strong>{}</strong><span>{}</span><code>{}</code></a>", pipeline.id, escape_html(&pipeline.workflow_name), escape_html(&pipeline.status), escape_html(&pipeline.commit_sha));
+        output
+    });
+    let provider = match repository.provider {
+        robine_source::Provider::GitHub => "GitHub",
+        robine_source::Provider::GitLab => "GitLab",
+        robine_source::Provider::Forgejo => "Forgejo",
+    };
+    let secrets_link = if user.role == Role::Viewer {
+        String::new()
+    } else {
+        format!(
+            "<a id=\"repository-secrets\" href=\"/repositories/{repository_id}/secrets\">Manage encrypted secrets</a>"
+        )
+    };
+    html_page(
+        "Repository",
+        &format!(
+            "<section id=\"repository-detail\"><p class=\"eyebrow\">{provider} repository</p><h1>{}</h1><dl><dt>Provider instance</dt><dd>{}</dd><dt>Installation</dt><dd>{}</dd></dl><p>{secrets_link}</p><div class=\"config-grid\"><form id=\"manual-discovery-form\" method=\"get\" action=\"/repositories/{repository_id}/workflows/manual\"><label>Branch (optional)<input name=\"branch\" maxlength=\"255\"></label><button type=\"submit\">Discover manual workflows</button></form><a id=\"scheduled-workflows-link\" href=\"/repositories/{repository_id}/workflows/scheduled\">Inspect scheduled workflows</a></div><h2>Recent pipelines</h2><div id=\"repository-pipelines\">{rows}</div></section>",
+            escape_html(&repository.full_name),
+            escape_html(&repository.provider_instance),
+            repository.installation_id
+        ),
+    )
+}
+
+#[derive(Deserialize)]
+struct WorkflowBranchQuery {
+    branch: Option<String>,
+}
+
+async fn browser_manual_workflows(
+    request: HttpRequest,
+    repository_id: web::Path<Uuid>,
+    query: web::Query<WorkflowBranchQuery>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let Ok(user) = authenticated_user(&request, &state).await else {
+        return HttpResponse::SeeOther()
+            .insert_header((header::LOCATION, "/sign-in"))
+            .finish();
+    };
+    let discovery = match state
+        .control_plane
+        .discover_manual_workflows(&user, *repository_id, query.branch.as_deref())
+        .await
+    {
+        Ok(discovery) => discovery,
+        Err(ApplicationError::InvalidWorkflow(_)) => {
+            return HttpResponse::UnprocessableEntity().finish();
+        }
+        Err(_) => return HttpResponse::ServiceUnavailable().finish(),
+    };
+    let branch = discovery
+        .get("branch")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let commit = discovery
+        .get("commit_sha")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let csrf = session_token(&request).map_or_else(String::new, |token| csrf_token(&token));
+    let forms = discovery.get("workflows").and_then(serde_json::Value::as_array).map_or_else(String::new, |workflows| workflows.iter().fold(String::new(), |mut output, workflow| {
+        let path = workflow.get("path").and_then(serde_json::Value::as_str).unwrap_or("");
+        let name = workflow.get("name").and_then(serde_json::Value::as_str).unwrap_or(path);
+        let inputs = workflow.get("inputs").and_then(serde_json::Value::as_object).map_or_else(String::new, |inputs| inputs.keys().fold(String::new(), |mut fields, input| {
+            let _ = write!(fields, "<label>{}<input name=\"input_{}\" maxlength=\"1024\"></label>", escape_html(input), escape_html(input)); fields
+        }));
+        let _ = write!(output, "<form class=\"surface-panel auth-form\" method=\"post\" action=\"/repositories/{repository_id}/workflows/manual\"><h2>{}</h2><code>{}</code><input type=\"hidden\" name=\"csrf_token\" value=\"{}\"><input type=\"hidden\" name=\"branch\" value=\"{}\"><input type=\"hidden\" name=\"workflow_path\" value=\"{}\"><input type=\"hidden\" name=\"request_id\" value=\"{}\">{inputs}<button type=\"submit\">Launch exact revision</button></form>", escape_html(name), escape_html(path), csrf, escape_html(branch), escape_html(path), Uuid::new_v4()); output
+    }));
+    html_page(
+        "Manual workflows",
+        &format!(
+            "<section id=\"manual-workflows\"><p class=\"eyebrow\">Immutable manual launch</p><h1>Manual workflows</h1><p>Branch <strong>{}</strong> at <code>{}</code></p><div>{forms}</div></section>",
+            escape_html(branch),
+            escape_html(commit)
+        ),
+    )
+}
+
+async fn launch_manual_workflow(
+    request: HttpRequest,
+    repository_id: web::Path<Uuid>,
+    input: web::Form<std::collections::BTreeMap<String, String>>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let Ok(user) = authenticated_user(&request, &state).await else {
+        return HttpResponse::SeeOther()
+            .insert_header((header::LOCATION, "/sign-in"))
+            .finish();
+    };
+    let Some(token) = session_token(&request) else {
+        return HttpResponse::Unauthorized().finish();
+    };
+    if !input
+        .get("csrf_token")
+        .is_some_and(|candidate| valid_csrf(candidate, &token))
+    {
+        return HttpResponse::Forbidden().finish();
+    }
+    let Some(path) = input.get("workflow_path") else {
+        return HttpResponse::UnprocessableEntity().finish();
+    };
+    let Some(request_id) = input.get("request_id") else {
+        return HttpResponse::UnprocessableEntity().finish();
+    };
+    let values = input
+        .iter()
+        .filter_map(|(key, value)| {
+            key.strip_prefix("input_")
+                .map(|name| (name.to_owned(), value.clone()))
+        })
+        .collect();
+    match state
+        .control_plane
+        .launch_manual_workflow(
+            &user,
+            *repository_id,
+            input.get("branch").map(String::as_str),
+            path,
+            request_id,
+            values,
+        )
+        .await
+    {
+        Ok(pipeline) => HttpResponse::SeeOther()
+            .insert_header((header::LOCATION, format!("/pipelines/{}", pipeline.id)))
+            .finish(),
+        Err(ApplicationError::Forbidden) => HttpResponse::Forbidden().finish(),
+        Err(ApplicationError::InvalidPipelineInput | ApplicationError::InvalidWorkflow(_)) => {
+            HttpResponse::UnprocessableEntity().finish()
+        }
+        Err(ApplicationError::PipelineNotFound) => HttpResponse::NotFound().finish(),
+        Err(_) => HttpResponse::ServiceUnavailable().finish(),
+    }
+}
+
+async fn browser_scheduled_workflows(
+    request: HttpRequest,
+    repository_id: web::Path<Uuid>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let Ok(user) = authenticated_user(&request, &state).await else {
+        return HttpResponse::SeeOther()
+            .insert_header((header::LOCATION, "/sign-in"))
+            .finish();
+    };
+    let discovery = match state
+        .control_plane
+        .discover_scheduled_workflows(&user, *repository_id)
+        .await
+    {
+        Ok(discovery) => discovery,
+        Err(ApplicationError::InvalidWorkflow(_)) => {
+            return HttpResponse::UnprocessableEntity().finish();
+        }
+        Err(_) => return HttpResponse::ServiceUnavailable().finish(),
+    };
+    let branch = discovery
+        .get("branch")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let commit = discovery
+        .get("commit_sha")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
+    let rows = discovery.get("workflows").and_then(serde_json::Value::as_array).map_or_else(String::new, |workflows| workflows.iter().fold(String::new(), |mut output, workflow| {
+        let name = workflow.get("name").and_then(serde_json::Value::as_str).unwrap_or("workflow");
+        let path = workflow.get("path").and_then(serde_json::Value::as_str).unwrap_or("");
+        let schedules = workflow.get("schedules").and_then(serde_json::Value::as_array).map_or_else(String::new, |values| values.iter().filter_map(serde_json::Value::as_str).collect::<Vec<_>>().join(", "));
+        let _ = write!(output, "<article class=\"surface-panel\"><h2>{}</h2><code>{}</code><p>{}</p></article>", escape_html(name), escape_html(path), escape_html(&schedules)); output
+    }));
+    html_page(
+        "Scheduled workflows",
+        &format!(
+            "<section id=\"scheduled-workflows\"><p class=\"eyebrow\">Default branch schedules</p><h1>Scheduled workflows</h1><p>Branch <strong>{}</strong> at <code>{}</code></p><div>{rows}</div></section>",
+            escape_html(branch),
+            escape_html(commit)
+        ),
+    )
+}
+
+async fn browser_repository_secrets(
+    request: HttpRequest,
+    repository_id: web::Path<Uuid>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let Ok(user) = authenticated_user(&request, &state).await else {
+        return HttpResponse::SeeOther()
+            .insert_header((header::LOCATION, "/sign-in"))
+            .finish();
+    };
+    let token = session_token(&request).unwrap_or_default();
+    let names = match state
+        .control_plane
+        .list_repository_secrets(&user, *repository_id)
+        .await
+    {
+        Ok(names) => names,
+        Err(ApplicationError::Forbidden) => return HttpResponse::Forbidden().finish(),
+        Err(_) => return HttpResponse::ServiceUnavailable().finish(),
+    };
+    let rows = names.iter().fold(String::new(), |mut output, name| {
+        let _ = write!(
+            output,
+            "<li class=\"surface-panel\"><code>{}</code><span>write-only</span></li>",
+            escape_html(name)
+        );
+        output
+    });
+    html_page(
+        "Repository secrets",
+        &format!(
+            "<section id=\"repository-secrets-page\"><p class=\"eyebrow\">Held close</p><h1>Repository secrets</h1><p>Values are encrypted, write-only, and exposed only to jobs that explicitly reference them.</p><form id=\"secret-form\" method=\"post\" action=\"/repositories/{repository_id}/secrets\" class=\"auth-form\"><input type=\"hidden\" name=\"csrf_token\" value=\"{}\"><label>Name<input name=\"name\" required maxlength=\"128\" pattern=\"[A-Z_][A-Z0-9_]*\"></label><label>Value<input type=\"password\" name=\"value\" required minlength=\"8\" maxlength=\"65536\" autocomplete=\"off\"></label><button class=\"primary\" type=\"submit\">Store encrypted secret</button></form><h2>Available metadata</h2><ul id=\"repository-secret-list\">{rows}</ul></section>",
+            csrf_token(&token)
+        ),
+    )
+}
+
+#[derive(Deserialize)]
+struct RepositorySecretForm {
+    csrf_token: String,
+    name: String,
+    value: String,
+}
+
+async fn store_repository_secret(
+    request: HttpRequest,
+    repository_id: web::Path<Uuid>,
+    input: web::Form<RepositorySecretForm>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let Ok(user) = authenticated_user(&request, &state).await else {
+        return HttpResponse::SeeOther()
+            .insert_header((header::LOCATION, "/sign-in"))
+            .finish();
+    };
+    let Some(token) = session_token(&request) else {
+        return HttpResponse::Unauthorized().finish();
+    };
+    if !valid_csrf(&input.csrf_token, &token) {
+        return HttpResponse::Forbidden().finish();
+    }
+    match state
+        .control_plane
+        .store_repository_secret(
+            &user,
+            *repository_id,
+            input.name.clone(),
+            input.value.as_bytes(),
+        )
+        .await
+    {
+        Ok(()) => HttpResponse::SeeOther()
+            .insert_header((
+                header::LOCATION,
+                format!("/repositories/{repository_id}/secrets"),
+            ))
+            .finish(),
+        Err(ApplicationError::Forbidden) => HttpResponse::Forbidden().finish(),
+        Err(ApplicationError::InvalidPipelineInput) => HttpResponse::UnprocessableEntity().finish(),
+        Err(_) => HttpResponse::ServiceUnavailable().finish(),
+    }
+}
+
+async fn build_information() -> HttpResponse {
+    let version = env!("CARGO_PKG_VERSION");
+    let sha = option_env!("ROBINE_BUILD_COMMIT_SHA").unwrap_or("development");
+    html_page(
+        "Build information",
+        &format!(
+            "<section><p class=\"eyebrow\">Made traceable</p><h1>Build information</h1><dl id=\"build-provenance\"><dt>Version</dt><dd>{}</dd><dt>Commit SHA</dt><dd><code>{}</code></dd></dl></section>",
+            escape_html(version),
+            escape_html(sha)
+        ),
+    )
+}
+
+async fn browser_admin(request: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    match browser_administrator(&request, &state).await {
+        Ok(_) => HttpResponse::SeeOther()
+            .insert_header((header::LOCATION, "/admin/runners"))
+            .finish(),
+        Err(_) => HttpResponse::SeeOther()
+            .insert_header((header::LOCATION, "/sign-in"))
+            .finish(),
+    }
+}
+
+async fn metrics(request: HttpRequest) -> HttpResponse {
+    let Ok(expected) = std::env::var("ROBINE_METRICS_TOKEN") else {
+        return HttpResponse::NotFound().body("Not Found");
+    };
+    let Some(actual) = bearer_token(&request) else {
+        return HttpResponse::Unauthorized()
+            .insert_header((header::WWW_AUTHENTICATE, "Bearer realm=\"Robine metrics\""))
+            .body("Unauthorized");
+    };
+    let expected = Sha256::digest(expected.as_bytes());
+    let actual = Sha256::digest(actual.as_bytes());
+    if !bool::from(expected.as_slice().ct_eq(actual.as_slice())) {
+        return HttpResponse::Unauthorized()
+            .insert_header((header::WWW_AUTHENTICATE, "Bearer realm=\"Robine metrics\""))
+            .body("Unauthorized");
+    }
+    HttpResponse::Ok().insert_header((header::CACHE_CONTROL, "no-store")).content_type("text/plain; version=0.0.4; charset=utf-8").body("# HELP robine_up Whether the Rust control plane is serving.\n# TYPE robine_up gauge\nrobine_up 1\n")
+}
+
+fn badge_response(label: &str) -> HttpResponse {
+    let svg = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"120\" height=\"20\" role=\"img\" aria-label=\"{label}: unknown\"><rect width=\"52\" height=\"20\" fill=\"#172033\"/><rect x=\"52\" width=\"68\" height=\"20\" fill=\"#64748b\"/><g fill=\"#fff\" text-anchor=\"middle\" font-family=\"Verdana\" font-size=\"11\"><text x=\"26\" y=\"14\">{label}</text><text x=\"86\" y=\"14\">unknown</text></g></svg>"
+    );
+    HttpResponse::Ok()
+        .insert_header((
+            header::CACHE_CONTROL,
+            "public, max-age=30, stale-while-revalidate=120",
+        ))
+        .insert_header(("x-content-type-options", "nosniff"))
+        .content_type("image/svg+xml")
+        .body(svg)
+}
+
+async fn build_badge() -> HttpResponse {
+    badge_response("build")
+}
+
+async fn coverage_badge() -> HttpResponse {
+    badge_response("coverage")
+}
+
+async fn browser_setup_page() -> HttpResponse {
+    html_page(
+        "Setup",
+        "<section class=\"hero auth\"><p class=\"eyebrow\">First-run setup</p><h1>Create administrator</h1><form method=\"post\" action=\"/setup\" class=\"auth-form\"><label>Bootstrap token<input name=\"token\" type=\"password\" required></label><label>Email<input name=\"email\" type=\"email\" required></label><label>Password<input name=\"password\" type=\"password\" minlength=\"12\" required></label><button class=\"primary\" type=\"submit\">Initialize Robine</button></form></section>",
+    )
+}
+
+async fn browser_setup(
+    input: web::Form<BootstrapRequest>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    match state
+        .control_plane
+        .bootstrap_administrator(&input.token, &input.email, &input.password)
+        .await
+    {
+        Ok(_) => HttpResponse::SeeOther()
+            .insert_header((header::LOCATION, "/sign-in"))
+            .finish(),
+        Err(ApplicationError::AlreadyBootstrapped) => HttpResponse::Conflict().finish(),
+        Err(ApplicationError::InvalidEmail | ApplicationError::WeakPassword) => {
+            HttpResponse::UnprocessableEntity().finish()
+        }
+        Err(_) => HttpResponse::Unauthorized().finish(),
+    }
+}
+
 async fn list_pipelines(
     request: HttpRequest,
     query: web::Query<PipelineQuery>,
@@ -1370,6 +2038,37 @@ async fn heartbeat_runner_attempts(
     {
         Ok(heartbeat) => HttpResponse::Ok().json(heartbeat),
         Err(ApplicationError::Unauthenticated) => HttpResponse::Unauthorized().finish(),
+        Err(_) => HttpResponse::ServiceUnavailable().finish(),
+    }
+}
+
+async fn register_runner_session(
+    request: HttpRequest,
+    input: web::Json<RunnerHello>,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let Some((runner_id, credential)) = runner_headers(&request) else {
+        return HttpResponse::Unauthorized().finish();
+    };
+    let input = input.into_inner();
+    match state
+        .control_plane
+        .negotiate_runner_session(
+            "standalone",
+            runner_id,
+            credential,
+            &input.supported_protocol_versions,
+            &input.software_version,
+            &input.capabilities,
+        )
+        .await
+    {
+        Ok(protocol_version) => HttpResponse::Ok().json(serde_json::json!({
+            "protocol_version": protocol_version,
+            "heartbeat_interval_seconds": 20
+        })),
+        Err(ApplicationError::Unauthenticated) => HttpResponse::Unauthorized().finish(),
+        Err(ApplicationError::InvalidAttemptEvent) => HttpResponse::UnprocessableEntity().finish(),
         Err(_) => HttpResponse::ServiceUnavailable().finish(),
     }
 }
@@ -2360,6 +3059,7 @@ fn valid_webhook_authentication(
 pub fn configure(config: &mut web::ServiceConfig) {
     config
         .app_data(web::PayloadConfig::new(MAX_WEBHOOK_BYTES))
+        .route("/", web::get().to(home_page))
         .route("/api/github/webhooks", web::post().to(github_webhook))
         .route("/api/gitlab/webhooks", web::post().to(gitlab_webhook))
         .route("/api/forgejo/webhooks", web::post().to(forgejo_webhook))
@@ -2368,6 +3068,63 @@ pub fn configure(config: &mut web::ServiceConfig) {
         .route("/assets/app.css", web::get().to(application_css))
         .route("/sign-in", web::get().to(browser_sign_in_page))
         .route("/sign-in", web::post().to(browser_sign_in))
+        .route("/sign-out", web::delete().to(sign_out))
+        .route("/setup", web::get().to(browser_setup_page))
+        .route("/setup", web::post().to(browser_setup))
+        .route("/pipelines", web::get().to(browser_pipelines))
+        .route("/pipelines/{pipeline_id}", web::get().to(browser_pipeline))
+        .route(
+            "/pipelines/{pipeline_id}/workflow",
+            web::get().to(browser_workflow),
+        )
+        .route(
+            "/pipelines/{pipeline_id}/jobs/{job_id}",
+            web::get().to(browser_job),
+        )
+        .route(
+            "/pipelines/{pipeline_id}/jobs/{job_id}/logs",
+            web::get().to(download_job_logs),
+        )
+        .route(
+            "/pipelines/{pipeline_id}/jobs/{job_id}/artifacts/{name}",
+            web::get().to(download_job_artifact),
+        )
+        .route("/repositories", web::get().to(browser_repositories))
+        .route(
+            "/repositories/{repository_id}",
+            web::get().to(browser_repository),
+        )
+        .route(
+            "/repositories/{repository_id}/workflows/manual",
+            web::get().to(browser_manual_workflows),
+        )
+        .route(
+            "/repositories/{repository_id}/workflows/manual",
+            web::post().to(launch_manual_workflow),
+        )
+        .route(
+            "/repositories/{repository_id}/workflows/scheduled",
+            web::get().to(browser_scheduled_workflows),
+        )
+        .route(
+            "/repositories/{repository_id}/secrets",
+            web::get().to(browser_repository_secrets),
+        )
+        .route(
+            "/repositories/{repository_id}/secrets",
+            web::post().to(store_repository_secret),
+        )
+        .route("/build-information", web::get().to(build_information))
+        .route("/admin", web::get().to(browser_admin))
+        .route("/metrics", web::get().to(metrics))
+        .route(
+            "/badges/{provider}/{owner}/{repository}/build.svg",
+            web::get().to(build_badge),
+        )
+        .route(
+            "/badges/{provider}/{owner}/{repository}/coverage.svg",
+            web::get().to(coverage_badge),
+        )
         .route("/admin/runners", web::get().to(runner_fleet_page))
         .route(
             "/admin/runners/enrollments",
@@ -2443,6 +3200,10 @@ pub fn configure(config: &mut web::ServiceConfig) {
             web::post().to(heartbeat_runner_attempts),
         )
         .route(
+            "/api/v1/runners/session",
+            web::post().to(register_runner_session),
+        )
+        .route(
             "/api/v1/runners/reconcile",
             web::post().to(reconcile_runner_attempts),
         )
@@ -2510,8 +3271,10 @@ mod tests {
         ports::{IdentityRepository, PipelineRepository, PortError},
     };
     use robine_persistence::PersistenceError;
+    use robine_secrets::{AesGcmKeyring, EncryptedSecret, SecretError, SecretRepository};
     use robine_source::{
-        ArchiveFetcher, Provider, Repository, RepositoryStore, SourceError, SourceFile,
+        ArchiveFetcher, BranchHead, Provider, Repository, RepositoryStore, SourceError, SourceFile,
+        SourceInspector,
     };
     use sha2::Sha256;
     use std::path::PathBuf;
@@ -2527,6 +3290,10 @@ mod tests {
 
     #[async_trait]
     impl RepositoryStore for StubSource {
+        async fn list_trusted(&self, tenant_id: &str) -> Result<Vec<Repository>, SourceError> {
+            Ok(vec![self.find_trusted(tenant_id, Uuid::nil()).await?])
+        }
+
         async fn find_trusted(
             &self,
             _tenant_id: &str,
@@ -2555,6 +3322,35 @@ mod tests {
     }
 
     #[async_trait]
+    impl SecretRepository for StubBackend {
+        async fn find_authorized(
+            &self,
+            _tenant_id: &str,
+            _repository_id: Uuid,
+            _names: &[String],
+        ) -> Result<Vec<EncryptedSecret>, SecretError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_repository(
+            &self,
+            _tenant_id: &str,
+            _repository_id: Uuid,
+        ) -> Result<Vec<EncryptedSecret>, SecretError> {
+            Ok(Vec::new())
+        }
+
+        async fn upsert_repository(
+            &self,
+            _tenant_id: &str,
+            _actor_id: Uuid,
+            _secret: &EncryptedSecret,
+        ) -> Result<(), SecretError> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
     impl ArchiveFetcher for StubSource {
         async fn fetch_archive(
             &self,
@@ -2563,11 +3359,35 @@ mod tests {
         ) -> Result<Vec<u8>, SourceError> {
             robine_source::create_source_tar_gz(
                 &[SourceFile {
-                    path: PathBuf::from("README.md"),
-                    contents: b"remote source\n".to_vec(),
+                    path: PathBuf::from(".robine-ci/workflows/ci.yml"),
+                    contents: b"version: 1\nname: CI\non:\n  workflow_dispatch:\n    inputs:\n      target:\n        type: string\n        required: false\n  schedule:\n    - cron: '0 8 * * *'\njobs:\n  test:\n    image: alpine:3.22\n    steps:\n      - run: echo ok\n".to_vec(),
                 }],
                 robine_source::ArchiveLimits::default(),
             )
+        }
+    }
+
+    #[async_trait]
+    impl SourceInspector for StubSource {
+        async fn default_branch_head(
+            &self,
+            _repository: &Repository,
+        ) -> Result<BranchHead, SourceError> {
+            Ok(BranchHead {
+                branch: "main".into(),
+                commit_sha: "a".repeat(40),
+            })
+        }
+
+        async fn branch_head(
+            &self,
+            _repository: &Repository,
+            branch: &str,
+        ) -> Result<BranchHead, SourceError> {
+            Ok(BranchHead {
+                branch: branch.into(),
+                commit_sha: "a".repeat(40),
+            })
         }
     }
 
@@ -2803,6 +3623,46 @@ mod tests {
             _limit: i64,
         ) -> Result<Vec<PipelineProjection>, PortError> {
             Ok(Vec::new())
+        }
+
+        async fn pipeline_browser_projection(
+            &self,
+            _tenant_id: &str,
+            pipeline_id: Uuid,
+        ) -> Result<serde_json::Value, PortError> {
+            Ok(
+                serde_json::json!({"id":pipeline_id,"repository_id":Uuid::nil(),"workflow_name":"CI","commit_sha":"a".repeat(40),"status":"succeeded","trigger":"push","source_ref":"main","jobs":[]}),
+            )
+        }
+
+        async fn workflow_browser_projection(
+            &self,
+            _tenant_id: &str,
+            pipeline_id: Uuid,
+        ) -> Result<serde_json::Value, PortError> {
+            Ok(
+                serde_json::json!({"pipeline_id":pipeline_id,"path":".robine-ci/workflows/ci.yml","digest":"a".repeat(64),"source":"version: 1\nname: CI\n","normalized_graph":{},"included_sources":{}}),
+            )
+        }
+
+        async fn job_browser_projection(
+            &self,
+            _tenant_id: &str,
+            pipeline_id: Uuid,
+            job_id: Uuid,
+        ) -> Result<serde_json::Value, PortError> {
+            Ok(
+                serde_json::json!({"id":job_id,"pipeline_id":pipeline_id,"key":"test","status":"succeeded","needs":[],"attempts":[],"artifacts":[]}),
+            )
+        }
+
+        async fn job_log_download(
+            &self,
+            _tenant_id: &str,
+            _pipeline_id: Uuid,
+            _job_id: Uuid,
+        ) -> Result<String, PortError> {
+            Ok("[stdout] test output\n".into())
         }
 
         async fn queue(
@@ -3103,10 +3963,18 @@ mod tests {
 
     fn state_with_role(ready: bool, role: Role) -> web::Data<AppState> {
         let backend = Arc::new(StubBackend { ready, role });
+        let keyring = AesGcmKeyring::from_encoded(
+            Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="),
+            None,
+            1,
+        )
+        .expect("test secret keyring");
         let control_plane = Arc::new(
             ControlPlane::new(backend.clone(), backend.clone())
                 .with_runner_secret_key_base("runner-test-secret")
-                .with_source_runtime(Arc::new(StubSource), Arc::new(StubSource)),
+                .with_secret_runtime(backend.clone(), Arc::new(keyring))
+                .with_source_runtime(Arc::new(StubSource), Arc::new(StubSource))
+                .with_source_inspector(Arc::new(StubSource)),
         );
         web::Data::new(AppState::new(backend, control_plane))
     }
@@ -3139,6 +4007,183 @@ mod tests {
         let response = test::call_service(&app, request).await;
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[actix_web::test]
+    async fn browser_surface_is_owned_by_actix_and_protected_by_cookie_authentication() {
+        let app = test::init_service(App::new().app_data(state(true)).configure(configure)).await;
+        for uri in ["/", "/sign-in", "/setup", "/build-information"] {
+            let response =
+                test::call_service(&app, test::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        }
+        for uri in ["/pipelines", "/repositories", "/admin"] {
+            let response =
+                test::call_service(&app, test::TestRequest::get().uri(uri).to_request()).await;
+            assert_eq!(response.status(), StatusCode::SEE_OTHER, "{uri}");
+        }
+    }
+
+    #[actix_web::test]
+    async fn authenticated_browser_details_render_database_projections_and_logs() {
+        let app = test::init_service(App::new().app_data(state(true)).configure(configure)).await;
+        let pipeline_id = Uuid::new_v4();
+        let job_id = Uuid::new_v4();
+        let cases = [
+            (format!("/pipelines/{pipeline_id}"), "pipeline-detail"),
+            (
+                format!("/pipelines/{pipeline_id}/workflow"),
+                "workflow-revision",
+            ),
+            (
+                format!("/pipelines/{pipeline_id}/jobs/{job_id}"),
+                "job-detail",
+            ),
+            (
+                format!("/repositories/{}", Uuid::nil()),
+                "repository-detail",
+            ),
+        ];
+        for (uri, marker) in cases {
+            let request = test::TestRequest::get()
+                .uri(&uri)
+                .insert_header((header::COOKIE, "robine_session=session"))
+                .to_request();
+            let response = test::call_service(&app, request).await;
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            let body = test::read_body(response).await;
+            assert!(std::str::from_utf8(&body).expect("HTML").contains(marker));
+        }
+
+        let request = test::TestRequest::get()
+            .uri(&format!("/pipelines/{pipeline_id}/jobs/{job_id}/logs"))
+            .insert_header((header::COOKIE, "robine_session=session"))
+            .to_request();
+        let response = test::call_service(&app, request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/plain; charset=utf-8")
+        );
+        assert!(response.headers().contains_key(header::CONTENT_DISPOSITION));
+        let body = test::read_body(response).await;
+        assert_eq!(body, "[stdout] test output\n");
+    }
+
+    #[actix_web::test]
+    async fn repository_secret_browser_enforces_role_csrf_and_write_only_storage() {
+        let repository_id = Uuid::new_v4();
+        let viewer =
+            test::init_service(App::new().app_data(state(true)).configure(configure)).await;
+        let request = test::TestRequest::get()
+            .uri(&format!("/repositories/{repository_id}/secrets"))
+            .insert_header((header::COOKIE, "robine_session=session"))
+            .to_request();
+        assert_eq!(
+            test::call_service(&viewer, request).await.status(),
+            StatusCode::FORBIDDEN
+        );
+
+        let maintainer = test::init_service(
+            App::new()
+                .app_data(state_with_role(true, Role::Maintainer))
+                .configure(configure),
+        )
+        .await;
+        let request = test::TestRequest::get()
+            .uri(&format!("/repositories/{repository_id}/secrets"))
+            .insert_header((header::COOKIE, "robine_session=session"))
+            .to_request();
+        let response = test::call_service(&maintainer, request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            std::str::from_utf8(&test::read_body(response).await)
+                .expect("HTML")
+                .contains("secret-form")
+        );
+
+        let token = csrf_token("session");
+        let request = test::TestRequest::post()
+            .uri(&format!("/repositories/{repository_id}/secrets"))
+            .insert_header((header::COOKIE, "robine_session=session"))
+            .insert_header((header::CONTENT_TYPE, "application/x-www-form-urlencoded"))
+            .set_payload(format!(
+                "csrf_token={token}&name=REGISTRY_TOKEN&value=super-secret"
+            ))
+            .to_request();
+        let response = test::call_service(&maintainer, request).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    }
+
+    #[actix_web::test]
+    async fn repository_workflow_browser_discovers_exact_heads_and_launches_for_maintainers() {
+        let repository_id = Uuid::nil();
+        let viewer =
+            test::init_service(App::new().app_data(state(true)).configure(configure)).await;
+        for (uri, marker) in [
+            (
+                format!("/repositories/{repository_id}/workflows/manual?branch=release"),
+                "manual-workflows",
+            ),
+            (
+                format!("/repositories/{repository_id}/workflows/scheduled"),
+                "scheduled-workflows",
+            ),
+        ] {
+            let request = test::TestRequest::get()
+                .uri(&uri)
+                .insert_header((header::COOKIE, "robine_session=session"))
+                .to_request();
+            let response = test::call_service(&viewer, request).await;
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            let body = test::read_body(response).await;
+            let html = std::str::from_utf8(&body).expect("HTML");
+            assert!(html.contains(marker));
+            assert!(html.contains(&"a".repeat(40)));
+        }
+        let denied = test::TestRequest::post()
+            .uri(&format!("/repositories/{repository_id}/workflows/manual"))
+            .insert_header((header::COOKIE, "robine_session=session"))
+            .insert_header((header::CONTENT_TYPE, "application/x-www-form-urlencoded"))
+            .set_payload(format!("csrf_token={}&branch=main&workflow_path=.robine-ci%2Fworkflows%2Fci.yml&request_id={}", csrf_token("session"), Uuid::new_v4()))
+            .to_request();
+        assert_eq!(
+            test::call_service(&viewer, denied).await.status(),
+            StatusCode::FORBIDDEN
+        );
+
+        let maintainer = test::init_service(
+            App::new()
+                .app_data(state_with_role(true, Role::Maintainer))
+                .configure(configure),
+        )
+        .await;
+        let launch = test::TestRequest::post()
+            .uri(&format!("/repositories/{repository_id}/workflows/manual"))
+            .insert_header((header::COOKIE, "robine_session=session"))
+            .insert_header((header::CONTENT_TYPE, "application/x-www-form-urlencoded"))
+            .set_payload(format!("csrf_token={}&branch=main&workflow_path=.robine-ci%2Fworkflows%2Fci.yml&request_id={}&input_target=production", csrf_token("session"), Uuid::new_v4()))
+            .to_request();
+        let response = test::call_service(&maintainer, launch).await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert!(
+            response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|location| location.starts_with("/pipelines/"))
+        );
+    }
+
+    #[actix_web::test]
+    async fn metrics_are_disabled_without_an_operator_token() {
+        let app = test::init_service(App::new().app_data(state(true)).configure(configure)).await;
+        let response =
+            test::call_service(&app, test::TestRequest::get().uri("/metrics").to_request()).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[actix_web::test]
