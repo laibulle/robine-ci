@@ -230,6 +230,29 @@ pub trait PipelineRepository: Send + Sync {
         delivery: &SourceControlDelivery,
     ) -> Result<bool, PortError>;
 
+    async fn claim_next_source_control_job(
+        &self,
+        tenant_id: &str,
+        claim_token: Uuid,
+        now: DateTime<Utc>,
+        stale_before: DateTime<Utc>,
+    ) -> Result<Option<DurableJobClaim>, PortError>;
+
+    async fn get_source_control_delivery(
+        &self,
+        tenant_id: &str,
+        delivery_id: &str,
+    ) -> Result<SourceControlDelivery, PortError>;
+
+    async fn finish_source_control_delivery(
+        &self,
+        tenant_id: &str,
+        delivery_id: &str,
+        status: &str,
+        failure: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<(), PortError>;
+
     async fn record_runner_session(
         &self,
         tenant_id: &str,

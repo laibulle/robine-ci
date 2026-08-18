@@ -24,6 +24,7 @@ use robine_core::{
         outbox_backoff_seconds, source_digest,
     },
     ports::{IdentityRepository, OidcProvider, PipelineRepository, PortError},
+    source_control::{NormalizationOutcome, SourceControlTrigger, normalize},
 };
 use robine_execution::{
     BuiltinHandler, BuiltinRestore, CancellationSignal, ExecutionControl, ExecutionError,
@@ -32,7 +33,7 @@ use robine_execution::{
 };
 use robine_secrets::{SecretDecryptor, SecretRepository};
 use robine_source::{
-    ArchiveFetcher, ArchiveLimits, RepositoryStore, extract_tar_gz, valid_commit_sha,
+    ArchiveFetcher, ArchiveLimits, Provider, RepositoryStore, extract_tar_gz, valid_commit_sha,
 };
 use robine_storage::{
     Artifact, BlobStore, CacheEntry, MetadataRepository, RetentionRepository, RetentionResult,
@@ -364,6 +365,15 @@ pub struct ExecutionBatch {
     pub succeeded: u64,
     pub failed: u64,
     pub recovered_terminal: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SourceControlBatch {
+    pub claimed: u64,
+    pub processed: u64,
+    pub ignored: u64,
+    pub failed: u64,
+    pub retried: u64,
 }
 
 pub struct RemoteTransferDownload {
@@ -821,7 +831,13 @@ impl ControlPlane {
             None => Uuid::new_v4(),
         };
         let now = Utc::now();
-        let pipeline = build_new_pipeline(input, pipeline_id, user, context.correlation_id, now)?;
+        let pipeline = build_new_pipeline(
+            input,
+            pipeline_id,
+            &user.id.to_string(),
+            context.correlation_id,
+            now,
+        )?;
         self.pipelines
             .create(&context.tenant_id, &pipeline)
             .await
@@ -2073,6 +2089,260 @@ impl ControlPlane {
         Ok(total)
     }
 
+    /// Claims and processes authenticated source-control deliveries for every tenant.
+    ///
+    /// Pipeline creation is idempotent per delivery and workflow path, so a crash between a
+    /// pipeline commit and delivery completion can safely replay the durable job.
+    ///
+    /// # Errors
+    ///
+    /// Returns unavailable when tenant discovery or durable state cannot be advanced.
+    pub async fn process_all_tenant_source_control(
+        &self,
+        per_tenant_limit: usize,
+    ) -> Result<SourceControlBatch, ApplicationError> {
+        let tenants = self
+            .pipelines
+            .list_tenants()
+            .await
+            .map_err(|_| ApplicationError::Unavailable)?;
+        let mut total = SourceControlBatch::default();
+        for tenant in tenants {
+            for _ in 0..per_tenant_limit.clamp(1, 100) {
+                let Some(job) = self
+                    .pipelines
+                    .claim_next_source_control_job(
+                        &tenant,
+                        Uuid::new_v4(),
+                        Utc::now(),
+                        Utc::now() - chrono::Duration::minutes(5),
+                    )
+                    .await
+                    .map_err(|_| ApplicationError::Unavailable)?
+                else {
+                    break;
+                };
+                total.claimed += 1;
+                match self.process_source_control_job(&tenant, &job).await {
+                    Ok(SourceControlJobOutcome::Processed) => total.processed += 1,
+                    Ok(SourceControlJobOutcome::Ignored) => total.ignored += 1,
+                    Ok(SourceControlJobOutcome::Failed) => total.failed += 1,
+                    Err(error) => {
+                        let discard = job.attempt >= 10;
+                        self.pipelines
+                            .retry_durable_job(
+                                &tenant,
+                                job.id,
+                                job.claim_token,
+                                Utc::now()
+                                    + chrono::Duration::seconds(outbox_backoff_seconds(
+                                        job.attempt,
+                                        job.id,
+                                    )),
+                                &error.to_string(),
+                                discard,
+                                Utc::now(),
+                            )
+                            .await
+                            .map_err(|_| ApplicationError::Unavailable)?;
+                        if discard {
+                            if let Some(delivery_id) = job
+                                .payload
+                                .get("delivery_id")
+                                .and_then(serde_json::Value::as_str)
+                            {
+                                self.pipelines
+                                    .finish_source_control_delivery(
+                                        &tenant,
+                                        delivery_id,
+                                        "failed",
+                                        Some("retry_exhausted"),
+                                        Utc::now(),
+                                    )
+                                    .await
+                                    .map_err(|_| ApplicationError::Unavailable)?;
+                            }
+                            total.failed += 1;
+                        } else {
+                            total.retried += 1;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(total)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn process_source_control_job(
+        &self,
+        tenant_id: &str,
+        job: &robine_core::pipelines::DurableJobClaim,
+    ) -> Result<SourceControlJobOutcome, ApplicationError> {
+        let delivery_id = job
+            .payload
+            .get("delivery_id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or(ApplicationError::Unavailable)?;
+        let delivery = self
+            .pipelines
+            .get_source_control_delivery(tenant_id, delivery_id)
+            .await
+            .map_err(|_| ApplicationError::Unavailable)?;
+        let event = match normalize(&delivery) {
+            Ok(NormalizationOutcome::Ignored(reason)) => {
+                self.finish_source_control_job(
+                    tenant_id,
+                    job,
+                    delivery_id,
+                    "ignored",
+                    Some(reason),
+                )
+                .await?;
+                return Ok(SourceControlJobOutcome::Ignored);
+            }
+            Err(reason) => {
+                let failure = format!("{reason:?}");
+                self.finish_source_control_job(
+                    tenant_id,
+                    job,
+                    delivery_id,
+                    "failed",
+                    Some(&failure),
+                )
+                .await?;
+                return Ok(SourceControlJobOutcome::Failed);
+            }
+            Ok(NormalizationOutcome::Event(event)) => event,
+        };
+        let repositories = self
+            .source_repositories
+            .as_ref()
+            .ok_or(ApplicationError::Unavailable)?;
+        let provider = match delivery.provider.as_str() {
+            "github" => Provider::GitHub,
+            "gitlab" => Provider::GitLab,
+            "forgejo" => Provider::Forgejo,
+            _ => return Err(ApplicationError::Unavailable),
+        };
+        let Ok(repository) = repositories
+            .find_trusted_by_provider(
+                tenant_id,
+                provider,
+                &delivery.provider_instance,
+                event.repository_provider_id,
+            )
+            .await
+        else {
+            self.finish_source_control_job(
+                tenant_id,
+                job,
+                delivery_id,
+                "ignored",
+                Some("untrusted_repository"),
+            )
+            .await?;
+            return Ok(SourceControlJobOutcome::Ignored);
+        };
+        let archive = self
+            .source_fetcher
+            .as_ref()
+            .ok_or(ApplicationError::Unavailable)?
+            .fetch_archive(&repository, &event.commit_sha)
+            .await
+            .map_err(|_| ApplicationError::Unavailable)?;
+        let files = extract_tar_gz(&archive, ArchiveLimits::default())
+            .map_err(|_| ApplicationError::Unavailable)?;
+        let mut sources = std::collections::BTreeMap::new();
+        for file in files {
+            let Some(path) = file.path.to_str() else {
+                continue;
+            };
+            if robine_workflows::valid_workflow_path(path) {
+                let source = String::from_utf8(file.contents)
+                    .map_err(|_| ApplicationError::InvalidPipelineInput)?;
+                sources.insert(path.to_owned(), source);
+            }
+        }
+        let entry_paths: Vec<String> = sources.keys().cloned().collect();
+        for path in entry_paths {
+            let resolved = robine_workflows::resolve(&path, &sources, &self.workflow_limits)
+                .map_err(ApplicationError::InvalidWorkflow)?;
+            if !source_control_trigger_matches(&resolved.workflow.triggers, &event) {
+                continue;
+            }
+            let source = sources
+                .get(&path)
+                .cloned()
+                .ok_or(ApplicationError::Unavailable)?;
+            let mut included_sources = sources.clone();
+            included_sources.remove(&path);
+            let trigger = match event.trigger {
+                SourceControlTrigger::Push | SourceControlTrigger::Tag => "push",
+                SourceControlTrigger::PullRequest => "pull_request",
+            };
+            let mut inputs = std::collections::BTreeMap::new();
+            if event.trigger == SourceControlTrigger::Tag {
+                inputs.insert("tag".into(), event.source_ref.clone());
+            }
+            let mut input = CreatePipelineInput {
+                repository_id: repository.id,
+                workflow_name: resolved.workflow.name,
+                commit_sha: event.commit_sha.clone(),
+                source_ref: Some(event.source_ref.clone()),
+                trigger: trigger.into(),
+                inputs,
+                scheduled_for: None,
+                idempotency_key: Some(format!("{}:{}:{path}", delivery.provider, delivery.id)),
+                jobs: std::collections::BTreeMap::new(),
+                workflow_revision: Some(robine_core::pipelines::CreateWorkflowRevisionInput {
+                    path,
+                    source,
+                    sources: included_sources,
+                }),
+            };
+            populate_jobs_from_workflow(&mut input, &self.workflow_limits)?;
+            input
+                .validate()
+                .map_err(|_| ApplicationError::InvalidPipelineInput)?;
+            let pipeline_id = input
+                .idempotency_key
+                .as_deref()
+                .map(deterministic_uuid)
+                .ok_or(ApplicationError::Unavailable)?;
+            let pipeline =
+                build_new_pipeline(input, pipeline_id, &event.actor, Uuid::new_v4(), Utc::now())?;
+            self.pipelines
+                .create(tenant_id, &pipeline)
+                .await
+                .map_err(|error| match error {
+                    PortError::IdempotencyConflict => ApplicationError::IdempotencyConflict,
+                    _ => ApplicationError::Unavailable,
+                })?;
+        }
+        self.finish_source_control_job(tenant_id, job, delivery_id, "processed", None)
+            .await?;
+        Ok(SourceControlJobOutcome::Processed)
+    }
+
+    async fn finish_source_control_job(
+        &self,
+        tenant_id: &str,
+        job: &robine_core::pipelines::DurableJobClaim,
+        delivery_id: &str,
+        status: &str,
+        failure: Option<&str>,
+    ) -> Result<(), ApplicationError> {
+        self.pipelines
+            .finish_source_control_delivery(tenant_id, delivery_id, status, failure, Utc::now())
+            .await
+            .map_err(|_| ApplicationError::Unavailable)?;
+        self.pipelines
+            .complete_durable_job(tenant_id, job.id, job.claim_token, Utc::now())
+            .await
+            .map_err(|_| ApplicationError::Unavailable)
+    }
+
     async fn process_dispatch_batch(
         &self,
         tenant_id: &str,
@@ -2701,6 +2971,78 @@ fn generated_runner_secret(prefix: &str) -> Result<String, ApplicationError> {
     Ok(format!("{prefix}_{}", URL_SAFE_NO_PAD.encode(bytes)))
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SourceControlJobOutcome {
+    Processed,
+    Ignored,
+    Failed,
+}
+
+fn source_control_trigger_matches(
+    triggers: &serde_json::Value,
+    event: &robine_core::source_control::NormalizedSourceControlEvent,
+) -> bool {
+    let key = if event.trigger == SourceControlTrigger::PullRequest {
+        "pull_request"
+    } else {
+        "push"
+    };
+    let Some(configuration) = triggers.get(key) else {
+        return false;
+    };
+    let Some(object) = configuration.as_object() else {
+        return true;
+    };
+    if object.is_empty() {
+        return true;
+    }
+    let selector = if event.trigger == SourceControlTrigger::Tag {
+        "tags"
+    } else {
+        "branches"
+    };
+    if event.trigger == SourceControlTrigger::Tag && object.contains_key("branches")
+        || event.trigger != SourceControlTrigger::Tag && object.contains_key("tags")
+    {
+        return false;
+    }
+    object.get(selector).is_none_or(|patterns| {
+        patterns.as_array().is_some_and(|patterns| {
+            patterns.iter().any(|pattern| {
+                pattern
+                    .as_str()
+                    .is_some_and(|pattern| wildcard_matches(pattern, &event.source_ref))
+            })
+        })
+    })
+}
+
+fn wildcard_matches(pattern: &str, value: &str) -> bool {
+    let mut remaining = value;
+    let parts: Vec<&str> = pattern.split('*').collect();
+    if parts.len() == 1 {
+        return pattern == value;
+    }
+    for (index, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+        if index == 0 && !pattern.starts_with('*') {
+            let Some(next) = remaining.strip_prefix(part) else {
+                return false;
+            };
+            remaining = next;
+        } else if index == parts.len() - 1 && !pattern.ends_with('*') {
+            return remaining.ends_with(part);
+        } else if let Some(position) = remaining.find(part) {
+            remaining = &remaining[position + part.len()..];
+        } else {
+            return false;
+        }
+    }
+    pattern.ends_with('*') || remaining.is_empty()
+}
+
 fn remote_uuid(raw: &serde_json::Value, name: &str) -> Result<Uuid, ApplicationError> {
     raw.get(name)
         .and_then(serde_json::Value::as_str)
@@ -3081,7 +3423,7 @@ fn deterministic_uuid(key: &str) -> Uuid {
 fn build_new_pipeline(
     input: CreatePipelineInput,
     id: Uuid,
-    user: &User,
+    actor: &str,
     correlation_id: Uuid,
     now: chrono::DateTime<Utc>,
 ) -> Result<NewPipeline, ApplicationError> {
@@ -3141,7 +3483,7 @@ fn build_new_pipeline(
         commit_sha: input.commit_sha,
         source_ref: input.source_ref,
         trigger: input.trigger,
-        actor: user.id.to_string(),
+        actor: actor.into(),
         correlation_id,
         inserted_at: now,
         scheduled_for: input.scheduled_for,
@@ -3180,6 +3522,38 @@ mod tests {
     use std::{collections::BTreeMap, path::PathBuf};
 
     struct IncompleteBlobStore;
+
+    #[test]
+    fn source_control_trigger_filters_match_branches_tags_and_pull_requests() {
+        let event =
+            |trigger, source_ref: &str| robine_core::source_control::NormalizedSourceControlEvent {
+                trigger,
+                repository_provider_id: 1,
+                commit_sha: "a".repeat(40),
+                source_ref: source_ref.into(),
+                actor: "github:octo".into(),
+            };
+        let triggers = serde_json::json!({
+            "push": {"branches": ["main", "release/*"]},
+            "pull_request": {}
+        });
+        assert!(source_control_trigger_matches(
+            &triggers,
+            &event(SourceControlTrigger::Push, "release/1.0")
+        ));
+        assert!(!source_control_trigger_matches(
+            &triggers,
+            &event(SourceControlTrigger::Push, "feature/test")
+        ));
+        assert!(source_control_trigger_matches(
+            &triggers,
+            &event(SourceControlTrigger::PullRequest, "main")
+        ));
+        assert!(!source_control_trigger_matches(
+            &triggers,
+            &event(SourceControlTrigger::Tag, "v1")
+        ));
+    }
 
     #[test]
     fn workflow_revision_populates_the_durable_pipeline_graph() {

@@ -618,6 +618,55 @@ impl RepositoryStore for Database {
             full_name: row.full_name,
         })
     }
+
+    async fn find_trusted_by_provider(
+        &self,
+        tenant_id: &str,
+        provider: Provider,
+        provider_instance: &str,
+        provider_id: i64,
+    ) -> Result<Repository, SourceError> {
+        let provider = match provider {
+            Provider::GitHub => "github",
+            Provider::GitLab => "gitlab",
+            Provider::Forgejo => "forgejo",
+        };
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| SourceError::RepositoryUnavailable)?;
+        let row = sqlx::query_as::<_, SourceRepositoryRow>(
+            "SELECT id, provider::text AS provider, provider_instance, installation_id, owner, \
+             name, full_name FROM github_repositories WHERE tenant_id = $1 AND provider = $2 \
+             AND provider_instance = $3 AND provider_id = $4 AND trusted = TRUE",
+        )
+        .bind(tenant_id)
+        .bind(provider)
+        .bind(provider_instance)
+        .bind(provider_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| SourceError::RepositoryUnavailable)?
+        .ok_or(SourceError::RepositoryUnavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| SourceError::RepositoryUnavailable)?;
+        Ok(Repository {
+            id: row.id,
+            provider: match row.provider.as_str() {
+                "github" => Provider::GitHub,
+                "gitlab" => Provider::GitLab,
+                "forgejo" => Provider::Forgejo,
+                _ => return Err(SourceError::RepositoryUnavailable),
+            },
+            provider_instance: row.provider_instance,
+            installation_id: row.installation_id,
+            owner: row.owner,
+            name: row.name,
+            full_name: row.full_name,
+        })
+    }
 }
 
 #[async_trait]
@@ -1050,11 +1099,137 @@ impl PipelineRepository for Database {
         .map_err(|_| PortError::Unavailable)?
         .rows_affected()
             == 1;
+        if accepted {
+            let mut digest = Sha256::new();
+            digest.update(tenant_id.as_bytes());
+            digest.update([0]);
+            digest.update(delivery.provider.as_bytes());
+            digest.update([0]);
+            digest.update(delivery.provider_instance.as_bytes());
+            digest.update([0]);
+            digest.update(delivery.provider_delivery_id.as_bytes());
+            let digest: [u8; 32] = digest.finalize().into();
+            let mut source_event_bytes = [0_u8; 16];
+            source_event_bytes.copy_from_slice(&digest[..16]);
+            let source_event_id = Uuid::from_bytes(source_event_bytes);
+            sqlx::query(
+                "INSERT INTO durable_jobs \
+                 (id, source_event_id, kind, payload, status, attempts, available_at, \
+                  inserted_at, updated_at, tenant_id) \
+                 VALUES ($1, $2, 'process_source_control_delivery', $3, 'available', 0, $4, \
+                         $4, $4, $5) \
+                 ON CONFLICT (tenant_id, source_event_id, kind) DO NOTHING",
+            )
+            .bind(Uuid::new_v4())
+            .bind(source_event_id)
+            .bind(serde_json::json!({"delivery_id": delivery.id}))
+            .bind(delivery.received_at)
+            .bind(tenant_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        }
         transaction
             .commit()
             .await
             .map_err(|_| PortError::Unavailable)?;
         Ok(accepted)
+    }
+
+    async fn claim_next_source_control_job(
+        &self,
+        tenant_id: &str,
+        claim_token: Uuid,
+        now: DateTime<Utc>,
+        stale_before: DateTime<Utc>,
+    ) -> Result<Option<DurableJobClaim>, PortError> {
+        claim_durable_job(
+            self,
+            tenant_id,
+            "process_source_control_delivery",
+            claim_token,
+            now,
+            stale_before,
+        )
+        .await
+    }
+
+    async fn get_source_control_delivery(
+        &self,
+        tenant_id: &str,
+        delivery_id: &str,
+    ) -> Result<robine_core::pipelines::SourceControlDelivery, PortError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        let row = sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                String,
+                String,
+                String,
+                serde_json::Value,
+                DateTime<Utc>,
+            ),
+        >(
+            "SELECT id, provider::text, provider_instance, provider_delivery_id, event, payload, \
+             received_at FROM github_deliveries WHERE tenant_id = $1 AND id = $2",
+        )
+        .bind(tenant_id)
+        .bind(delivery_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| PortError::Unavailable)?
+        .ok_or(PortError::NotFound)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        Ok(robine_core::pipelines::SourceControlDelivery {
+            id: row.0,
+            provider: row.1,
+            provider_instance: row.2,
+            provider_delivery_id: row.3,
+            event: row.4,
+            payload: row.5,
+            received_at: row.6,
+        })
+    }
+
+    async fn finish_source_control_delivery(
+        &self,
+        tenant_id: &str,
+        delivery_id: &str,
+        status: &str,
+        failure: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<(), PortError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        let result = sqlx::query(
+            "UPDATE github_deliveries SET status = $3, failure = $4, processed_at = $5 \
+             WHERE tenant_id = $1 AND id = $2",
+        )
+        .bind(tenant_id)
+        .bind(delivery_id)
+        .bind(status)
+        .bind(failure)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| PortError::Unavailable)?;
+        if result.rows_affected() != 1 {
+            return Err(PortError::NotFound);
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PortError::Unavailable)
     }
 
     async fn create(

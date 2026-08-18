@@ -56,6 +56,14 @@ pub trait RepositoryStore: Send + Sync {
         tenant_id: &str,
         repository_id: Uuid,
     ) -> Result<Repository, SourceError>;
+
+    async fn find_trusted_by_provider(
+        &self,
+        tenant_id: &str,
+        provider: Provider,
+        provider_instance: &str,
+        provider_id: i64,
+    ) -> Result<Repository, SourceError>;
 }
 
 #[async_trait]

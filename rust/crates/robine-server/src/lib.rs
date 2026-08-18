@@ -34,19 +34,56 @@ pub struct AppState {
 
 #[derive(Clone, Default)]
 pub struct WebhookConfiguration {
-    github: Option<String>,
-    gitlab: Option<String>,
-    forgejo: Option<String>,
+    github: Option<WebhookCredential>,
+    gitlab: Option<WebhookCredential>,
+    forgejo: Option<WebhookCredential>,
+}
+
+#[derive(Clone)]
+struct WebhookCredential {
+    secret: String,
+    instance: String,
 }
 
 impl WebhookConfiguration {
     #[must_use]
     pub fn new(github: Option<String>, gitlab: Option<String>, forgejo: Option<String>) -> Self {
         Self {
-            github,
-            gitlab,
-            forgejo,
+            github: github.map(default_webhook_credential),
+            gitlab: gitlab.map(default_webhook_credential),
+            forgejo: forgejo.map(default_webhook_credential),
         }
+    }
+
+    #[must_use]
+    pub fn with_provider_instances(
+        mut self,
+        gitlab: Option<String>,
+        forgejo: Option<String>,
+    ) -> Self {
+        if let (Some(credential), Some(instance)) = (&mut self.gitlab, gitlab) {
+            credential.instance = bounded_provider_instance(&instance);
+        }
+        if let (Some(credential), Some(instance)) = (&mut self.forgejo, forgejo) {
+            credential.instance = bounded_provider_instance(&instance);
+        }
+        self
+    }
+}
+
+fn default_webhook_credential(secret: String) -> WebhookCredential {
+    WebhookCredential {
+        secret,
+        instance: "default".into(),
+    }
+}
+
+fn bounded_provider_instance(value: &str) -> String {
+    let value = value.trim().trim_end_matches('/');
+    if value.is_empty() || value.len() > 64 {
+        "default".into()
+    } else {
+        value.into()
     }
 }
 
@@ -2232,16 +2269,16 @@ async fn receive_webhook(
     if body.len() > MAX_WEBHOOK_BYTES {
         return HttpResponse::PayloadTooLarge().finish();
     }
-    let secret = match provider {
-        WebhookProvider::GitHub => state.webhooks.github.as_deref(),
-        WebhookProvider::GitLab => state.webhooks.gitlab.as_deref(),
-        WebhookProvider::Forgejo => state.webhooks.forgejo.as_deref(),
+    let credential = match provider {
+        WebhookProvider::GitHub => state.webhooks.github.as_ref(),
+        WebhookProvider::GitLab => state.webhooks.gitlab.as_ref(),
+        WebhookProvider::Forgejo => state.webhooks.forgejo.as_ref(),
     };
-    let Some(secret) = secret else {
+    let Some(credential) = credential else {
         return HttpResponse::ServiceUnavailable()
             .json(serde_json::json!({"error": "temporarily unavailable"}));
     };
-    if !valid_webhook_authentication(provider, secret, &body, authentication) {
+    if !valid_webhook_authentication(provider, &credential.secret, &body, authentication) {
         return HttpResponse::Unauthorized()
             .json(serde_json::json!({"error": "invalid signature"}));
     }
@@ -2252,17 +2289,21 @@ async fn receive_webhook(
         return HttpResponse::BadRequest().json(serde_json::json!({"error": "payload"}));
     }
     let provider_name = provider.name();
-    let id = if matches!(provider, WebhookProvider::GitHub) {
+    let id = if matches!(provider, WebhookProvider::GitHub) && credential.instance == "default" {
         delivery_id.to_owned()
     } else {
         let mut digest = Sha256::new();
         digest.update(delivery_id.as_bytes());
-        format!("{provider_name}:default:{:x}", digest.finalize())
+        format!(
+            "{provider_name}:{}:{:x}",
+            credential.instance,
+            digest.finalize()
+        )
     };
     let delivery = SourceControlDelivery {
         id,
         provider: provider_name.into(),
-        provider_instance: "default".into(),
+        provider_instance: credential.instance.clone(),
         provider_delivery_id: delivery_id.into(),
         event: event.into(),
         payload,
@@ -2501,6 +2542,16 @@ mod tests {
                 full_name: "robine/fixture".into(),
             })
         }
+
+        async fn find_trusted_by_provider(
+            &self,
+            tenant_id: &str,
+            _provider: Provider,
+            _provider_instance: &str,
+            _provider_id: i64,
+        ) -> Result<Repository, SourceError> {
+            self.find_trusted(tenant_id, Uuid::nil()).await
+        }
     }
 
     #[async_trait]
@@ -2615,6 +2666,35 @@ mod tests {
             _delivery: &robine_core::pipelines::SourceControlDelivery,
         ) -> Result<bool, PortError> {
             Ok(true)
+        }
+
+        async fn claim_next_source_control_job(
+            &self,
+            _tenant_id: &str,
+            _claim_token: Uuid,
+            _now: DateTime<Utc>,
+            _stale_before: DateTime<Utc>,
+        ) -> Result<Option<robine_core::pipelines::DurableJobClaim>, PortError> {
+            Ok(None)
+        }
+
+        async fn get_source_control_delivery(
+            &self,
+            _tenant_id: &str,
+            _delivery_id: &str,
+        ) -> Result<robine_core::pipelines::SourceControlDelivery, PortError> {
+            Err(PortError::NotFound)
+        }
+
+        async fn finish_source_control_delivery(
+            &self,
+            _tenant_id: &str,
+            _delivery_id: &str,
+            _status: &str,
+            _failure: Option<&str>,
+            _now: DateTime<Utc>,
+        ) -> Result<(), PortError> {
+            Ok(())
         }
 
         async fn record_runner_session(

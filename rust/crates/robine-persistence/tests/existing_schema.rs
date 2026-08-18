@@ -60,6 +60,32 @@ async fn source_control_delivery_acceptance_is_tenant_scoped_and_deduplicated() 
             .await
             .expect("deduplicate delivery")
     );
+    let claim = database
+        .claim_next_source_control_job(
+            &tenant,
+            Uuid::new_v4(),
+            Utc::now(),
+            Utc::now() - Duration::minutes(5),
+        )
+        .await
+        .expect("claim delivery job")
+        .expect("delivery job available");
+    assert_eq!(
+        database
+            .get_source_control_delivery(&tenant, &delivery.id)
+            .await
+            .expect("load delivery")
+            .payload,
+        delivery.payload
+    );
+    database
+        .finish_source_control_delivery(&tenant, &delivery.id, "processed", None, Utc::now())
+        .await
+        .expect("finish delivery");
+    database
+        .complete_durable_job(&tenant, claim.id, claim.claim_token, Utc::now())
+        .await
+        .expect("complete delivery job");
 
     let mut transaction = database
         .tenant_transaction(&tenant)
@@ -75,6 +101,22 @@ async fn source_control_delivery_acceptance_is_tenant_scoped_and_deduplicated() 
     .fetch_one(&mut *transaction)
     .await
     .expect("read accepted delivery");
+    let job_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM durable_jobs WHERE kind = 'process_source_control_delivery' \
+         AND payload->>'delivery_id' = $1 AND status = 'completed'",
+    )
+    .bind(&delivery.id)
+    .fetch_one(&mut *transaction)
+    .await
+    .expect("read atomic delivery handoff");
+    sqlx::query(
+        "DELETE FROM durable_jobs WHERE kind = 'process_source_control_delivery' \
+         AND payload->>'delivery_id' = $1",
+    )
+    .bind(&delivery.id)
+    .execute(&mut *transaction)
+    .await
+    .expect("cleanup delivery job");
     sqlx::query("DELETE FROM github_deliveries WHERE id = $1")
         .bind(&delivery.id)
         .execute(&mut *transaction)
@@ -82,6 +124,7 @@ async fn source_control_delivery_acceptance_is_tenant_scoped_and_deduplicated() 
         .expect("cleanup delivery");
     transaction.commit().await.expect("commit cleanup");
     assert_eq!(count, 1);
+    assert_eq!(job_count, 1);
 }
 
 #[async_trait]

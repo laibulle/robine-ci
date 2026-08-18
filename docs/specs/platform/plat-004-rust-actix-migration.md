@@ -84,7 +84,7 @@ Migration proceeds in vertical slices: foundation and compatibility inventory; d
 
 Cryptographic formats, write-only secret behavior, webhook verification, runner credential scope, CSRF/session protections, and audit semantics remain contract requirements. Secrets must never enter Rust debug output, tracing fields, panic messages, or client-visible errors.
 
-The Actix source-control boundary now enforces the accepted one-mebibyte body limit and bounded provider headers, verifies GitHub and Forgejo HMACs plus GitLab tokens in constant time over the raw body before JSON decoding, and records provider-namespaced delivery identities through tenant-scoped SQL deduplication. Provider event normalization and durable processing remain migration work and therefore this slice is not yet authoritative.
+The Actix source-control boundary enforces the accepted one-mebibyte body limit and bounded provider headers, verifies GitHub and Forgejo HMACs plus GitLab tokens in constant time over the raw body before JSON decoding, and atomically records provider-namespaced delivery identities plus tenant-scoped durable processing jobs through SQL deduplication. Pure Rust normalization selects exact-SHA pushes, tags, and same-repository non-draft change requests and ignores unsupported actions. The durable worker resolves only trusted repositories under the configured provider instance, fetches the exact commit archive, validates canonical workflows and trigger filters, creates tenant-scoped idempotent pipelines, retries transient failures with the shared bounded policy, and finalizes delivery state.
 
 ## Observability
 

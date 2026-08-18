@@ -138,6 +138,10 @@ async fn main() -> io::Result<()> {
         std::env::var("GITHUB_WEBHOOK_SECRET").ok(),
         std::env::var("GITLAB_WEBHOOK_SECRET").ok(),
         std::env::var("FORGEJO_WEBHOOK_SECRET").ok(),
+    )
+    .with_provider_instances(
+        std::env::var("GITLAB_URL").ok(),
+        std::env::var("FORGEJO_URL").ok(),
     );
     let state = web::Data::new(
         AppState::new(database, control_plane.clone()).with_webhooks(webhook_configuration),
@@ -333,6 +337,7 @@ async fn run_outbox_worker(control_plane: Arc<ControlPlane>, mut shutdown: watch
         tokio::select! {
             _ = interval.tick() => {
                 let _ = control_plane.process_all_tenant_outboxes(25).await;
+                let _ = control_plane.process_all_tenant_source_control(25).await;
                 let _ = control_plane.process_all_tenant_dispatches(25).await;
             }
             changed = shutdown.changed() => {
