@@ -25,7 +25,8 @@ defmodule RobineWeb.RepositoryLive.Index do
        discovery_query: "",
        discovery_form: to_form(%{"query" => ""}, as: :discovery),
        discovery_provider: :github,
-       discovery_state: :not_run
+       discovery_state: :not_run,
+       connect_repositories_open?: false
      )
      |> stream_configure(:repositories, dom_id: &"repository-#{&1.id}")
      |> stream_configure(:available_repositories,
@@ -49,6 +50,10 @@ defmodule RobineWeb.RepositoryLive.Index do
   def handle_event("filter", %{"filters" => filters}, socket) do
     filters = normalize_filters(filters)
     {:noreply, push_patch(socket, to: ~p"/repositories?#{compact_filters(filters)}")}
+  end
+
+  def handle_event("open-connect-repositories", _params, socket) do
+    {:noreply, assign(socket, connect_repositories_open?: true)}
   end
 
   def handle_event("filter-discovery", %{"discovery" => %{"query" => query}}, socket) do
@@ -345,7 +350,9 @@ defmodule RobineWeb.RepositoryLive.Index do
           <:actions>
             <a
               :if={@current_actor.role == :administrator}
+              id="connect-repository-action"
               href="#connect-repositories"
+              phx-click="open-connect-repositories"
               class="btn btn-primary"
             >
               <.icon name="hero-plus" class="size-4" /> Connect repository
@@ -518,7 +525,7 @@ defmodule RobineWeb.RepositoryLive.Index do
         <details
           :if={@current_actor.role == :administrator}
           id="connect-repositories"
-          open={@discovery_state != :not_run}
+          open={@connect_repositories_open? or @discovery_state != :not_run}
           class="surface-panel scroll-mt-8 rounded-2xl"
         >
           <summary class="cursor-pointer list-none rounded-2xl p-5 font-bold focus-visible:outline-3 focus-visible:outline-primary">

@@ -159,6 +159,10 @@ defmodule RobineWeb.RepositoryLiveTest do
     conn = signed_in_conn(conn)
     assert {:ok, view, html} = live(conn, ~p"/repositories")
     assert html =~ "No provider access has been queried"
+    refute has_element?(view, "#connect-repositories[open]")
+
+    view |> element("#connect-repository-action") |> render_click()
+    assert has_element?(view, "#connect-repositories[open]")
 
     html = view |> element("#discover-github-repositories") |> render_click()
     assert html =~ "acme/discovered"
