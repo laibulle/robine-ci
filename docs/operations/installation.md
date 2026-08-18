@@ -33,22 +33,7 @@ Apply migrations before switching traffic:
 bin/robine eval 'Robine.Runtime.Release.migrate()'
 ```
 
-Start the release behind an HTTPS reverse proxy, then require HTTP 200 from `/health/live` and `/health/ready`. Visit `/setup` within 15 minutes and create the first administrator. Configure at least one source-control provider, trust one exact repository through the UI, and add `.robine-ci/workflows/ci.yml` at the tested commit.
-
-GitHub uses the App configuration documented in the README. For GitLab.com or one self-managed GitLab instance, set `GITLAB_URL`; for one Forgejo instance, set `FORGEJO_URL`. Production origins must be bare HTTPS origins without credentials, paths, queries, or fragments. Then either supply bootstrap token/webhook variables or store their encrypted replacements from Instance Administration:
-
-```bash
-export GITLAB_URL="https://gitlab.example.com"
-export GITLAB_TOKEN="..."
-export GITLAB_WEBHOOK_SECRET="..."
-export FORGEJO_URL="https://code.example.com"
-export FORGEJO_TOKEN="..."
-export FORGEJO_WEBHOOK_SECRET="..."
-```
-
-Use `<ROBINE_PUBLIC_URL>/api/gitlab/webhooks` for GitLab push and merge-request events and `<ROBINE_PUBLIC_URL>/api/forgejo/webhooks` for Forgejo push and pull-request events. GitLab sends the configured secret token; Forgejo signs the exact body with the configured secret. Robine rejects missing authentication, redirects, mutable commit identifiers, fork change requests, oversized API responses, and provider origins supplied by repository data.
-
-Before upgrading a provider or changing a reverse proxy, contributors can run the pinned adapter contracts documented in the README. The Forgejo 16.0.2 smoke is lightweight; the GitLab CE 19.2.1 smoke is opt-in with `ROBINE_GITLAB_INTEGRATION=1` because its cold Omnibus startup can take several minutes. Both use loopback-only ports and remove their temporary containers and data after the test.
+Start the release behind an HTTPS reverse proxy, then require HTTP 200 from `/health/live` and `/health/ready`. Visit `/setup` within 15 minutes and create the first administrator. Configure the GitHub App documented in the README, trust one exact repository through the UI, and add `.robine-ci/workflows/ci.yml` at the tested commit.
 
 For Prometheus, set `ROBINE_METRICS_TOKEN` and scrape `/metrics` with a Bearer token. Leave it unset to disable export. Never expose Docker's socket, PostgreSQL, the metrics endpoint, or the Phoenix origin directly to the public internet.
 

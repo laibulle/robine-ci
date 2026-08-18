@@ -152,32 +152,6 @@ defmodule RobineWeb.AdminLive.Index do
     store_source_control_credential(socket, "GITHUB_WEBHOOK_SECRET", value, "Webhook secret")
   end
 
-  def handle_event("save-gitlab-token", %{"value" => value}, socket) do
-    store_source_control_credential(socket, "GITLAB_TOKEN", value, "GitLab API token")
-  end
-
-  def handle_event("save-gitlab-webhook-secret", %{"value" => value}, socket) do
-    store_source_control_credential(
-      socket,
-      "GITLAB_WEBHOOK_SECRET",
-      value,
-      "GitLab webhook secret"
-    )
-  end
-
-  def handle_event("save-forgejo-token", %{"value" => value}, socket) do
-    store_source_control_credential(socket, "FORGEJO_TOKEN", value, "Forgejo API token")
-  end
-
-  def handle_event("save-forgejo-webhook-secret", %{"value" => value}, socket) do
-    store_source_control_credential(
-      socket,
-      "FORGEJO_WEBHOOK_SECRET",
-      value,
-      "Forgejo webhook secret"
-    )
-  end
-
   def handle_event("change-role", %{"user_id" => user_id, "role" => role}, socket) do
     role =
       if role in ~w(administrator maintainer viewer),
@@ -245,7 +219,8 @@ defmodule RobineWeb.AdminLive.Index do
   defp load_health(socket) do
     case Operations.health(%{}, socket.assigns.execution_context) do
       {:ok, health} ->
-        assign(socket, health: health, github_setup: github_setup_projection(health))
+        public_health = update_in(health.checks, &Map.drop(&1, [:gitlab, :forgejo]))
+        assign(socket, health: public_health, github_setup: github_setup_projection(health))
 
       {:error, _reason} ->
         health = %{status: :not_ready, checks: %{}}
@@ -301,8 +276,6 @@ defmodule RobineWeb.AdminLive.Index do
   defp check_label(:docker), do: "Docker Engine"
   defp check_label(:storage), do: "Blob storage"
   defp check_label(:github_app), do: "GitHub App"
-  defp check_label(:gitlab), do: "GitLab"
-  defp check_label(:forgejo), do: "Forgejo"
   defp check_label(:oidc), do: "OpenID Connect"
 
   defp status_class(:ok), do: "badge-success"
@@ -548,43 +521,6 @@ defmodule RobineWeb.AdminLive.Index do
                 <button class="btn btn-primary" phx-disable-with="Saving…">Save</button>
               </.form>
             </article>
-          </div>
-        </section>
-        <section :if={@admin_section == "source-control"} class="surface-panel rounded-2xl p-6">
-          <h2 class="text-xl font-semibold">GitLab and Forgejo credentials</h2>
-          <p class="mt-1 max-w-3xl text-sm text-base-content/60">
-            Configure provider origins with <code>GITLAB_URL</code>
-            and <code>FORGEJO_URL</code>. Values stored below are encrypted, write-only, and override environment bootstrap credentials.
-          </p>
-          <div class="mt-6 grid gap-6 md:grid-cols-2">
-            <form
-              :for={
-                {id, event, label} <- [
-                  {"gitlab-token", "save-gitlab-token", "GitLab API token"},
-                  {"gitlab-webhook-secret", "save-gitlab-webhook-secret", "GitLab webhook secret"},
-                  {"forgejo-token", "save-forgejo-token", "Forgejo API token"},
-                  {"forgejo-webhook-secret", "save-forgejo-webhook-secret", "Forgejo webhook secret"}
-                ]
-              }
-              id={id <> "-form"}
-              phx-submit={event}
-              class="space-y-3"
-            >
-              <label for={id} class="font-semibold">{label}</label>
-              <input
-                id={id}
-                type="password"
-                name="value"
-                required
-                minlength="8"
-                maxlength="65536"
-                autocomplete="new-password"
-                class="input input-bordered w-full"
-              />
-              <button class="btn btn-primary btn-sm" phx-disable-with="Encrypting…">
-                Store {label}
-              </button>
-            </form>
           </div>
         </section>
         <section :if={@admin_section == "runners"} class="surface-panel rounded-2xl p-6">

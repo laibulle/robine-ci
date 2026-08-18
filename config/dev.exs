@@ -30,10 +30,11 @@ config :robine, :secret_keyring,
 
 # Configure your database
 config :robine, Robine.Repo,
-  username: "postgres",
-  password: "postgres",
-  hostname: "localhost",
-  database: "robine_dev",
+  username: System.get_env("ROBINE_DEV_DATABASE_USER", "postgres"),
+  password: System.get_env("ROBINE_DEV_DATABASE_PASSWORD", "postgres"),
+  hostname: System.get_env("ROBINE_DEV_DATABASE_HOST", "localhost"),
+  port: System.get_env("ROBINE_DEV_DATABASE_PORT", "5432") |> String.to_integer(),
+  database: System.get_env("ROBINE_DEV_DATABASE_NAME", "robine_dev"),
   stacktrace: true,
   show_sensitive_data_on_connection_error: true,
   pool_size: 10

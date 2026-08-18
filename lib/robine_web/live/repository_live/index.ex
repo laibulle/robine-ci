@@ -4,7 +4,7 @@ defmodule RobineWeb.RepositoryLive.Index do
   alias Robine.{Pipelines, Repositories}
 
   @active_statuses [:created, :queued, :running, :cancelling]
-  @providers ~w(all github gitlab forgejo)
+  @providers ~w(all github)
   @attention_filters ~w(all attention healthy inactive)
   @sort_filters ~w(activity name connected)
 
@@ -70,13 +70,6 @@ defmodule RobineWeb.RepositoryLive.Index do
 
   def handle_event("discover", _params, socket), do: discover(socket, :github)
 
-  def handle_event("discover-provider", %{"provider" => provider_name}, socket) do
-    case provider(provider_name) do
-      {:ok, provider} -> discover(socket, provider)
-      {:error, _reason} -> {:noreply, assign(socket, discovery_state: :error)}
-    end
-  end
-
   def handle_event("trust", params, socket) do
     input = %{
       provider_id: params["provider_id"],
@@ -89,30 +82,8 @@ defmodule RobineWeb.RepositoryLive.Index do
     end)
   end
 
-  def handle_event("trust-provider", params, socket) do
-    input = %{
-      provider: params["provider"],
-      provider_instance: params["provider_instance"],
-      provider_id: params["provider_id"],
-      installation_id: params["installation_id"],
-      full_name: params["full_name"]
-    }
-
-    trust_repository(socket, params, fn ->
-      Repositories.trust_source_control_repository(input, socket.assigns.execution_context)
-    end)
-  end
-
-  defp discover(socket, provider) do
-    result =
-      if provider == :github do
-        Repositories.discover_github_repositories(%{}, socket.assigns.execution_context)
-      else
-        Repositories.discover_source_control_repositories(
-          %{provider: provider},
-          socket.assigns.execution_context
-        )
-      end
+  defp discover(socket, :github) do
+    result = Repositories.discover_github_repositories(%{}, socket.assigns.execution_context)
 
     case result do
       {:ok, repositories} ->
@@ -120,7 +91,7 @@ defmodule RobineWeb.RepositoryLive.Index do
          socket
          |> assign(
            available_repositories: repositories,
-           discovery_provider: provider,
+           discovery_provider: :github,
            discovery_state: :ready
          )
          |> refresh_available_stream()}
@@ -134,7 +105,7 @@ defmodule RobineWeb.RepositoryLive.Index do
          |> assign(
            available_repositories: [],
            available_count: 0,
-           discovery_provider: provider,
+           discovery_provider: :github,
            discovery_state: :error
          )
          |> stream(:available_repositories, [], reset: true)}
@@ -182,7 +153,9 @@ defmodule RobineWeb.RepositoryLive.Index do
     case Repositories.list_repositories(%{}, socket.assigns.execution_context) do
       {:ok, repositories} ->
         enriched =
-          Enum.map(repositories, &enrich_repository(&1, socket.assigns.execution_context))
+          repositories
+          |> Enum.filter(&(&1.provider == :github))
+          |> Enum.map(&enrich_repository(&1, socket.assigns.execution_context))
 
         filtered = filter_repositories(enriched, socket.assigns.filters)
 
@@ -309,19 +282,10 @@ defmodule RobineWeb.RepositoryLive.Index do
   defp active_filters?(filters), do: compact_filters(filters) != %{}
   defp active_status?(status), do: status in @active_statuses
 
-  defp provider("github"), do: {:ok, :github}
-  defp provider("gitlab"), do: {:ok, :gitlab}
-  defp provider("forgejo"), do: {:ok, :forgejo}
-  defp provider(_provider), do: {:error, :invalid_source_control_provider}
-
   defp provider_label(:github), do: "GitHub"
-  defp provider_label(:gitlab), do: "GitLab"
-  defp provider_label(:forgejo), do: "Forgejo"
 
   defp discovery_installation(:github, repository),
     do: " · Installation #{repository.installation_id}"
-
-  defp discovery_installation(_provider, _repository), do: ""
 
   defp relative_time(nil), do: "No runs yet"
 
@@ -381,9 +345,7 @@ defmodule RobineWeb.RepositoryLive.Index do
             label="Provider"
             options={[
               {"All providers", "all"},
-              {"GitHub", "github"},
-              {"GitLab", "gitlab"},
-              {"Forgejo", "forgejo"}
+              {"GitHub", "github"}
             ]}
           />
           <.input
@@ -536,9 +498,9 @@ defmodule RobineWeb.RepositoryLive.Index do
           </summary>
           <div class="border-t border-base-300/70 p-5 sm:p-6">
             <p class="max-w-2xl text-sm text-base-content/60">
-              Select a provider, verify live access, then explicitly authorize repositories to execute trusted CI code.
+              Verify GitHub App access, then explicitly authorize repositories to execute trusted CI code.
             </p>
-            <div class="mt-5 flex flex-wrap gap-2" role="group" aria-label="Source-control provider">
+            <div class="mt-5">
               <button
                 id="discover-github-repositories"
                 phx-click="discover"
@@ -546,22 +508,6 @@ defmodule RobineWeb.RepositoryLive.Index do
                 class={["btn btn-sm", @discovery_provider == :github && "btn-primary"]}
                 aria-pressed={@discovery_provider == :github}
               >GitHub</button>
-              <button
-                id="discover-gitlab-repositories"
-                phx-click="discover-provider"
-                phx-value-provider="gitlab"
-                phx-disable-with="Refreshing…"
-                class={["btn btn-sm", @discovery_provider == :gitlab && "btn-primary"]}
-                aria-pressed={@discovery_provider == :gitlab}
-              >GitLab</button>
-              <button
-                id="discover-forgejo-repositories"
-                phx-click="discover-provider"
-                phx-value-provider="forgejo"
-                phx-disable-with="Refreshing…"
-                class={["btn btn-sm", @discovery_provider == :forgejo && "btn-primary"]}
-                aria-pressed={@discovery_provider == :forgejo}
-              >Forgejo</button>
             </div>
 
             <p :if={@discovery_state == :not_run} class="mt-5 text-sm text-base-content/60">
@@ -634,10 +580,8 @@ defmodule RobineWeb.RepositoryLive.Index do
                   </p>
                 </div>
                 <button
-                  phx-click={if @discovery_provider == :github, do: "trust", else: "trust-provider"}
+                  phx-click="trust"
                   phx-disable-with="Verifying…"
-                  phx-value-provider={@discovery_provider}
-                  phx-value-provider_instance={Map.get(repository, :provider_instance, "default")}
                   phx-value-provider_id={repository.provider_id}
                   phx-value-installation_id={repository.installation_id}
                   phx-value-full_name={repository.full_name}

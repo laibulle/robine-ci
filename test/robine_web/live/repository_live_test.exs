@@ -105,6 +105,8 @@ defmodule RobineWeb.RepositoryLiveTest do
     assert has_element?(index, "#repository-filters")
     assert has_element?(index, "#repository-search")
     assert has_element?(index, "#repository-provider-filter")
+    refute html =~ "GitLab"
+    refute html =~ "Forgejo"
     assert has_element?(index, "#repository-attention-filter")
     assert has_element?(index, "#repository-sort")
     assert has_element?(index, "a[href='/repositories'][aria-current='page']")
@@ -189,6 +191,35 @@ defmodule RobineWeb.RepositoryLiveTest do
     assert html =~ "acme/discovered is now trusted"
     assert has_element?(view, "[id^='repository-']")
     refute has_element?(view, "#available-repository-73001")
+  end
+
+  test "keeps dormant source-control repositories out of the web product surface", %{conn: conn} do
+    repository =
+      %GitHubRepository{}
+      |> GitHubRepository.changeset(%{
+        id: Ecto.UUID.generate(),
+        provider: :gitlab,
+        provider_instance: "default",
+        provider_id: 73_002,
+        installation_id: 73_002,
+        owner: "acme",
+        name: "deferred",
+        full_name: "acme/deferred",
+        trusted: true,
+        inserted_at: DateTime.utc_now()
+      })
+      |> Repo.insert!()
+
+    conn = signed_in_conn(conn)
+    assert {:ok, index, _html} = live(conn, ~p"/repositories")
+    refute has_element?(index, "#repository-#{repository.id}")
+    assert has_element?(index, "#repository-result-count", "0 repositories")
+
+    assert {:error, {:live_redirect, %{to: "/repositories"}}} =
+             live(conn, ~p"/repositories/#{repository.id}")
+
+    assert {:error, {:live_redirect, %{to: "/repositories"}}} =
+             live(conn, ~p"/repositories/#{repository.id}/secrets")
   end
 
   test "viewer route and forged-event boundaries remain read-only", %{conn: conn} do

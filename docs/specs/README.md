@@ -49,6 +49,6 @@ New specifications MUST start from [TEMPLATE.md](TEMPLATE.md). A feature is not 
 | Workflows | [WF-004 manual workflow inputs](workflows/wf-004-manual-workflow-inputs.md) | Exact-SHA manual launches with bounded typed inputs |
 | Workflows | [WF-005 scheduled workflows](workflows/wf-005-scheduled-workflows.md) | Durable UTC cron scheduling with exact-SHA execution |
 | Workflows | [WF-006 reusable workflows](workflows/wf-006-reusable-workflows.md) | Exact-revision local includes with typed call inputs |
-| Source control | [SCM-001 GitLab and Forgejo integration](source-control/scm-001-gitlab-forgejo-integration.md) | Provider-neutral exact-SHA integration and status projection |
+| Source control | [SCM-002 GitHub-only product surface](source-control/scm-002-github-only-product-surface.md) | Current supported provider exposure and dormant adapter boundary |
 | Quality | [QUAL-001 coverage reporting](quality/qual-001-coverage-reporting.md) | Local coverage enforcement and future provider publication |
 | Releases | [REL-002 GitHub tag releases](releases/rel-002-github-tag-releases.md) | Build and publish immutable GitHub release payloads from tags |
