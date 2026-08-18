@@ -3,6 +3,7 @@ use std::{io, sync::Arc};
 use actix_web::{App, HttpServer, web};
 use chrono::{Duration, Utc};
 use robine_application::ControlPlane;
+use robine_execution::{DockerCli, DockerConfig};
 use robine_oidc::OidcClient;
 use robine_persistence::Database;
 use robine_server::AppState;
@@ -19,6 +20,11 @@ async fn main() -> io::Result<()> {
             .map_err(io::Error::other)?,
     );
     let mut control_plane = ControlPlane::new(database.clone(), database.clone());
+    control_plane = control_plane.with_execution_runner(Arc::new(DockerCli::new(DockerConfig {
+        instance: std::env::var("ROBINE_RUNNER_RESOURCE_NAMESPACE")
+            .unwrap_or_else(|_| "production".into()),
+        ..DockerConfig::default()
+    })));
     if let Ok(token) = std::env::var("ROBINE_BOOTSTRAP_TOKEN") {
         control_plane =
             control_plane.with_bootstrap_token(&token, Utc::now() + Duration::minutes(15));
@@ -49,7 +55,14 @@ async fn main() -> io::Result<()> {
 
     let (shutdown_sender, shutdown_receiver) = watch::channel(false);
     let worker_control_plane = control_plane.clone();
-    let outbox_worker = tokio::spawn(run_outbox_worker(worker_control_plane, shutdown_receiver));
+    let outbox_worker = tokio::spawn(run_outbox_worker(
+        worker_control_plane,
+        shutdown_receiver.clone(),
+    ));
+    let execution_worker = tokio::spawn(run_execution_worker(
+        control_plane.clone(),
+        shutdown_receiver,
+    ));
     let server = HttpServer::new(move || {
         App::new()
             .app_data(state.clone())
@@ -60,7 +73,27 @@ async fn main() -> io::Result<()> {
     let result = server.await;
     let _ = shutdown_sender.send(true);
     let _ = outbox_worker.await;
+    let _ = execution_worker.await;
     result
+}
+
+async fn run_execution_worker(
+    control_plane: Arc<ControlPlane>,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                let _ = control_plane.process_all_tenant_executions().await;
+            }
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    break;
+                }
+            }
+        }
+    }
 }
 
 async fn run_outbox_worker(control_plane: Arc<ControlPlane>, mut shutdown: watch::Receiver<bool>) {

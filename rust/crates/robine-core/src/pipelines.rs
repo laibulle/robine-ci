@@ -608,6 +608,19 @@ pub struct DurableJobClaim {
 pub struct LocalExecutionWork {
     pub attempt: AttemptProjection,
     pub specification: serde_json::Value,
+    pub last_log_sequence: i64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionLogChunk {
+    pub id: Uuid,
+    pub attempt_id: Uuid,
+    pub sequence: i64,
+    pub step_position: i32,
+    pub step_name: String,
+    pub stream: String,
+    pub content: Vec<u8>,
+    pub inserted_at: DateTime<Utc>,
 }
 
 #[must_use]

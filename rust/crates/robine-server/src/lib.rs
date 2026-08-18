@@ -1092,6 +1092,24 @@ mod tests {
             Ok(None)
         }
 
+        async fn claim_next_execution_job(
+            &self,
+            _tenant_id: &str,
+            _claim_token: Uuid,
+            _now: DateTime<Utc>,
+            _stale_before: DateTime<Utc>,
+        ) -> Result<Option<robine_core::pipelines::DurableJobClaim>, PortError> {
+            Ok(None)
+        }
+
+        async fn local_execution_work(
+            &self,
+            _tenant_id: &str,
+            _attempt_id: Uuid,
+        ) -> Result<robine_core::pipelines::LocalExecutionWork, PortError> {
+            Err(PortError::NotFound)
+        }
+
         async fn complete_durable_job(
             &self,
             _tenant_id: &str,

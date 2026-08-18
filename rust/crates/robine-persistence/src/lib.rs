@@ -1,16 +1,16 @@
 //! `PostgreSQL` adapters for the existing Robine schema.
 
 use async_trait::async_trait;
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, NaiveDateTime, SecondsFormat, Utc};
 use robine_core::{
     identity::{LocalIdentity, OidcClaims, Role, User},
     pipelines::{
-        AttemptEventError, AttemptProjection, AttemptState, DurableJobClaim, JobState,
-        LocalExecutionWork, NewPipeline, OutboxDelivery, PipelineEvent, PipelineProjection,
+        AttemptEventError, AttemptProjection, AttemptState, DurableJobClaim, ExecutionLogChunk,
+        JobState, LocalExecutionWork, NewPipeline, OutboxDelivery, PipelineEvent, PipelineProjection,
         PipelineState, RecordAttemptEvent, RecordRemoteAttemptEvent, RetryProjection,
-        RunnerAuthenticationMaterial,
-        RunnerLeaseHeartbeat, RunnerResume, SchedulerClaim, UnknownPipelineState,
-        outbox_backoff_seconds,
+        RunnerAuthenticationMaterial, RunnerLeaseHeartbeat, RunnerResume, SchedulerClaim,
+        UnknownPipelineState, outbox_backoff_seconds,
     },
     ports::{IdentityRepository, PipelineRepository, PortError},
 };
@@ -1228,7 +1228,7 @@ impl PipelineRepository for Database {
             .commit()
             .await
             .map_err(|_| PortError::Unavailable)?;
-        execution_offer(row)
+        execution_offer(&row)
     }
 
     async fn process_next_outbox_event(
@@ -1407,14 +1407,97 @@ impl PipelineRepository for Database {
         .fetch_one(&mut *transaction)
         .await
         .map_err(|_| PortError::Unavailable)?;
+        let last_log_sequence = sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(MAX(sequence), 0) FROM log_chunks \
+             WHERE attempt_id = $1 AND tenant_id = $2",
+        )
+        .bind(attempt_id)
+        .bind(tenant_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| PortError::Unavailable)?;
         transaction
             .commit()
             .await
             .map_err(|_| PortError::Unavailable)?;
         Ok(LocalExecutionWork {
             attempt: attempt.projection(),
-            specification: execution_offer(row)?,
+            specification: execution_offer(&row)?,
+            last_log_sequence,
         })
+    }
+
+    async fn append_execution_log(
+        &self,
+        tenant_id: &str,
+        chunk: &ExecutionLogChunk,
+    ) -> Result<(), PortError> {
+        if chunk.sequence <= 0 || chunk.content.len() > 64_000 || chunk.step_position < 0 {
+            return Err(PortError::InvalidData);
+        }
+        let content = match std::str::from_utf8(&chunk.content) {
+            Ok(content) => strip_ansi(content),
+            Err(_) => format!(
+                "[binary log chunk encoded as base64]\n{}",
+                BASE64.encode(&chunk.content)
+            ),
+        };
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        sqlx::query(
+            "INSERT INTO log_chunks \
+             (id, attempt_id, sequence, phase, stream, step_position, step_name, step_status, \
+              exit_code, duration_ms, content, inserted_at, tenant_id) \
+             VALUES ($1, $2, $3, 'execution', $4, $5, $6, 'running', NULL, 0, $7, $8, $9) \
+             ON CONFLICT (tenant_id, attempt_id, sequence) DO NOTHING",
+        )
+        .bind(chunk.id)
+        .bind(chunk.attempt_id)
+        .bind(chunk.sequence)
+        .bind(&chunk.stream)
+        .bind(chunk.step_position)
+        .bind(&chunk.step_name)
+        .bind(content)
+        .bind(chunk.inserted_at)
+        .bind(tenant_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| PortError::Unavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PortError::Unavailable)
+    }
+
+    async fn cancellation_requested(
+        &self,
+        tenant_id: &str,
+        idempotency_token: Uuid,
+    ) -> Result<bool, PortError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        let requested = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM job_attempts AS attempt \
+             JOIN pipeline_jobs AS job ON job.id = attempt.job_id AND job.tenant_id = attempt.tenant_id \
+             JOIN pipelines AS pipeline ON pipeline.id = job.pipeline_id \
+               AND pipeline.tenant_id = attempt.tenant_id \
+             WHERE attempt.idempotency_token = $1 AND attempt.tenant_id = $2 \
+               AND pipeline.status IN ('cancelling', 'cancelled'))",
+        )
+        .bind(idempotency_token)
+        .bind(tenant_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|_| PortError::Unavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        Ok(requested)
     }
 
     async fn complete_durable_job(
@@ -1567,6 +1650,120 @@ impl PipelineRepository for Database {
             .map_err(|_| PortError::Unavailable)?;
         Ok(attempt)
     }
+}
+
+async fn claim_durable_job(
+    database: &Database,
+    tenant_id: &str,
+    kind: &str,
+    claim_token: Uuid,
+    now: DateTime<Utc>,
+    stale_before: DateTime<Utc>,
+) -> Result<Option<DurableJobClaim>, PortError> {
+    let mut transaction = database
+        .tenant_transaction(tenant_id)
+        .await
+        .map_err(|_| PortError::Unavailable)?;
+    let claimed = sqlx::query_as::<_, DurableJobRow>(
+        "WITH candidate AS ( \
+           SELECT id FROM durable_jobs WHERE tenant_id = $1 AND kind = $2 \
+             AND ((status IN ('available', 'retry') AND available_at <= $3) \
+               OR (status = 'executing' AND claimed_at < $4)) \
+           ORDER BY available_at, inserted_at, id LIMIT 1 FOR UPDATE SKIP LOCKED \
+         ) UPDATE durable_jobs AS job SET status = 'executing', attempts = attempts + 1, \
+             claimed_at = $3, claim_token = $5, updated_at = $3 \
+         FROM candidate WHERE job.id = candidate.id AND job.tenant_id = $1 \
+         RETURNING job.id, job.source_event_id, job.kind, job.payload, \
+                   job.claim_token, job.attempts",
+    )
+    .bind(tenant_id)
+    .bind(kind)
+    .bind(now)
+    .bind(stale_before)
+    .bind(claim_token)
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(|_| PortError::Unavailable)?;
+    transaction
+        .commit()
+        .await
+        .map_err(|_| PortError::Unavailable)?;
+    Ok(claimed.map(|job| DurableJobClaim {
+        id: job.id,
+        source_event_id: job.source_event_id,
+        kind: job.kind,
+        payload: job.payload,
+        claim_token: job.claim_token,
+        attempt: job.attempts,
+    }))
+}
+
+fn execution_offer(row: &RemoteOfferRow) -> Result<serde_json::Value, PortError> {
+    let mut execution = row
+        .execution_spec
+        .as_object()
+        .cloned()
+        .ok_or(PortError::InvalidData)?;
+    let timestamp = row.started_at.unwrap_or(row.inserted_at).and_utc();
+    let ref_type = match row.trigger.as_str() {
+        "tag" => "tag",
+        "pull_request" | "merge_request" => "pull_request",
+        _ if row
+            .source_ref
+            .as_deref()
+            .is_some_and(|value| !value.is_empty()) =>
+        {
+            "branch"
+        }
+        _ => "unknown",
+    };
+    execution.insert(
+        "build_env".into(),
+        serde_json::json!({
+            "ROBINE_BUILD_COMMIT_SHA": row.commit_sha,
+            "ROBINE_BUILD_REF_NAME": row.source_ref.clone().unwrap_or_default(),
+            "ROBINE_BUILD_REF_TYPE": ref_type,
+            "ROBINE_BUILD_TIMESTAMP": timestamp.to_rfc3339_opts(SecondsFormat::AutoSi, true),
+            "ROBINE_BUILD_PIPELINE_ID": row.pipeline_id,
+            "ROBINE_BUILD_TRIGGER": row.trigger,
+        }),
+    );
+    execution.extend([
+        ("attempt_id".into(), serde_json::json!(row.attempt_id)),
+        ("job_id".into(), serde_json::json!(row.job_id)),
+        ("job_key".into(), serde_json::json!(row.job_key)),
+        ("needs".into(), serde_json::json!(row.needs)),
+        (
+            "idempotency_token".into(),
+            serde_json::json!(row.idempotency_token),
+        ),
+        ("pipeline_id".into(), serde_json::json!(row.pipeline_id)),
+        (
+            "correlation_id".into(),
+            serde_json::json!(row.correlation_id),
+        ),
+        ("commit_sha".into(), serde_json::json!(row.commit_sha)),
+        ("repository_id".into(), serde_json::json!(row.repository_id)),
+    ]);
+    Ok(serde_json::Value::Object(execution))
+}
+
+fn strip_ansi(content: &str) -> String {
+    let mut clean = String::with_capacity(content.len());
+    let mut chars = content.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character == '\u{1b}' && chars.peek() == Some(&'[') {
+            let _ = chars.next();
+            for control in chars.by_ref() {
+                if ('@'..='~').contains(&control) {
+                    break;
+                }
+            }
+        } else if character != '\0' {
+            clean.push(character);
+        }
+    }
+    clean
 }
 
 #[allow(clippy::too_many_arguments)]

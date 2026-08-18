@@ -1595,7 +1595,18 @@ async fn sql_outbox_claims_once_enqueues_dispatch_and_dead_letters_bounded_failu
             status: JobState::Queued,
             needs: Vec::new(),
             position: 0,
-            execution: serde_json::json!({}),
+            execution: serde_json::json!({
+                "image": "alpine:3.22",
+                "shell": "/bin/sh",
+                "timeout_ms": 10_000,
+                "env": {},
+                "steps": [{
+                    "name": "test",
+                    "kind": "run",
+                    "value": "true",
+                    "condition": "success"
+                }]
+            }),
         }],
         event_id: Uuid::new_v4(),
     };
@@ -1726,6 +1737,78 @@ async fn sql_outbox_claims_once_enqueues_dispatch_and_dead_letters_bounded_failu
         0
     );
 
+    let first_token = Uuid::new_v4();
+    let second_token = Uuid::new_v4();
+    let first_database = database.clone();
+    let second_database = database.clone();
+    let first_tenant = tenant.clone();
+    let second_tenant = tenant.clone();
+    let (first, second) = tokio::join!(
+        async move {
+            first_database
+                .claim_next_execution_job(
+                    &first_tenant,
+                    first_token,
+                    process_at,
+                    process_at - Duration::minutes(5),
+                )
+                .await
+        },
+        async move {
+            second_database
+                .claim_next_execution_job(
+                    &second_tenant,
+                    second_token,
+                    process_at,
+                    process_at - Duration::minutes(5),
+                )
+                .await
+        }
+    );
+    let executions = [
+        first.expect("first execution worker"),
+        second.expect("second execution worker"),
+    ];
+    assert_eq!(executions.iter().flatten().count(), 1);
+    let execution = executions
+        .into_iter()
+        .flatten()
+        .next()
+        .expect("one durable execution claim");
+    let execution_work = database
+        .local_execution_work(&tenant, attempt.id)
+        .await
+        .expect("load local execution work");
+    assert_eq!(execution_work.attempt.id, attempt.id);
+    assert_eq!(
+        execution_work.specification["attempt_id"],
+        attempt.id.to_string()
+    );
+    for (sequence, status, reason) in [
+        (1, "preparing", None),
+        (2, "running", None),
+        (3, "succeeded", None),
+    ] {
+        database
+            .record_attempt_event(
+                &tenant,
+                Uuid::new_v4(),
+                &RecordAttemptEvent {
+                    idempotency_token: attempt.idempotency_token,
+                    sequence,
+                    status: status.into(),
+                    reason,
+                },
+                process_at,
+            )
+            .await
+            .expect("advance local execution");
+    }
+    database
+        .complete_durable_job(&tenant, execution.id, execution.claim_token, process_at)
+        .await
+        .expect("complete durable execution");
+
     let unsupported_id = Uuid::new_v4();
     let mut fixture = database
         .tenant_transaction(&tenant)
@@ -1802,6 +1885,14 @@ async fn sql_outbox_claims_once_enqueues_dispatch_and_dead_letters_bounded_failu
     .fetch_one(&mut *verification)
     .await
     .expect("read repaired execution handoff");
+    let execution_status = sqlx::query_scalar::<_, String>(
+        "SELECT status FROM durable_jobs WHERE source_event_id = $1 \
+         AND kind = 'execute_local_attempt'",
+    )
+    .bind(attempt.id)
+    .fetch_one(&mut *verification)
+    .await
+    .expect("read completed execution handoff");
     let dead_lettered = sqlx::query_scalar::<_, bool>(
         "SELECT dead_lettered_at IS NOT NULL FROM outbox_events WHERE id = $1",
     )
@@ -1826,9 +1917,10 @@ async fn sql_outbox_claims_once_enqueues_dispatch_and_dead_letters_bounded_failu
         .expect("cleanup pipeline");
     verification.commit().await.expect("commit cleanup");
 
-    assert_eq!(pipeline_status, "running");
+    assert_eq!(pipeline_status, "succeeded");
     assert_eq!(durable_count, 1);
     assert_eq!(dispatch_status, "completed");
     assert_eq!(execution_count, 1);
+    assert_eq!(execution_status, "completed");
     assert!(dead_lettered);
 }

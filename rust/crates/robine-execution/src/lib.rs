@@ -2,8 +2,8 @@
 
 mod docker;
 
-pub use docker::{DockerCli, DockerConfig};
 use async_trait::async_trait;
+pub use docker::{DockerCli, DockerConfig};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use thiserror::Error;
@@ -72,6 +72,7 @@ const fn default_timeout_ms() -> u64 {
 pub struct OutputChunk {
     pub sequence: u64,
     pub step: usize,
+    pub step_name: String,
     pub channel: OutputChannel,
     pub bytes: Vec<u8>,
 }
@@ -107,6 +108,24 @@ pub enum ExecutionError {
     Runner { phase: &'static str },
     #[error("runner command could not be started during {phase}")]
     Unavailable { phase: &'static str },
+    #[error("execution output could not be persisted")]
+    Output,
+}
+
+#[async_trait]
+pub trait OutputSink: Send + Sync {
+    async fn append(&self, chunk: OutputChunk) -> Result<(), ExecutionError>;
+}
+
+#[async_trait]
+pub trait CancellationSignal: Send + Sync {
+    async fn requested(&self) -> Result<bool, ExecutionError>;
+}
+
+pub struct ExecutionControl<'a> {
+    pub output: &'a dyn OutputSink,
+    pub cancellation: &'a dyn CancellationSignal,
+    pub last_sequence: u64,
 }
 
 #[async_trait]
@@ -114,6 +133,7 @@ pub trait ExecutionRunner: Send + Sync {
     async fn run(
         &self,
         specification: &ExecutionSpecification,
+        control: ExecutionControl<'_>,
     ) -> Result<ExecutionResult, ExecutionError>;
 }
 

@@ -1,10 +1,13 @@
 use crate::{
-    ExecutionError, ExecutionResult, ExecutionRunner, ExecutionSpecification, ExecutionStatus,
-    StepCondition, StepKind,
+    CancellationSignal, ExecutionControl, ExecutionError, ExecutionResult, ExecutionRunner,
+    ExecutionSpecification, ExecutionStatus, OutputChannel, OutputChunk, OutputSink, StepCondition,
+    StepKind,
 };
 use async_trait::async_trait;
 use std::collections::HashSet;
 use std::process::Output;
+use std::process::Stdio;
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
 #[derive(Clone, Debug)]
@@ -114,6 +117,22 @@ impl DockerCli {
         &self,
         specification: &ExecutionSpecification,
     ) -> Result<ExecutionResult, ExecutionError> {
+        self.run_controlled(
+            specification,
+            ExecutionControl {
+                output: &DiscardOutput,
+                cancellation: &NeverCancel,
+                last_sequence: 0,
+            },
+        )
+        .await
+    }
+
+    pub async fn run_controlled(
+        &self,
+        specification: &ExecutionSpecification,
+        control: ExecutionControl<'_>,
+    ) -> Result<ExecutionResult, ExecutionError> {
         specification.validate()?;
         let suffix = specification.attempt_id.simple();
         let container = format!("robine-job-{suffix}");
@@ -135,7 +154,7 @@ impl DockerCli {
         .await?;
         let execution = match tokio::time::timeout(
             std::time::Duration::from_millis(specification.timeout_ms),
-            self.run_container(specification, &container, &volume),
+            self.run_container(specification, &container, &volume, &control),
         )
         .await
         {
@@ -160,7 +179,9 @@ impl DockerCli {
         specification: &ExecutionSpecification,
         container: &str,
         volume: &str,
+        control: &ExecutionControl<'_>,
     ) -> Result<ExecutionResult, ExecutionError> {
+        self.ensure_image(&specification.image).await?;
         self.checked(
             &self.create_args(specification, container, volume),
             "container_create",
@@ -170,7 +191,8 @@ impl DockerCli {
             .await?;
         let mut failed = false;
         let mut exit_code = Some(0);
-        for step in &specification.steps {
+        let mut sequence = control.last_sequence;
+        for (step_index, step) in specification.steps.iter().enumerate() {
             if step.kind != StepKind::Run {
                 return Err(ExecutionError::Unsupported("builtin step"));
             }
@@ -182,24 +204,23 @@ impl DockerCli {
             if !should_run {
                 continue;
             }
-            let output = self
-                .command(&[
-                    "exec",
-                    "--workdir",
-                    &specification.workspace,
+            let result = self
+                .execute_step(
+                    specification,
                     container,
-                    &specification.shell,
-                    "-e",
-                    "-c",
+                    step_index,
+                    &step.name,
                     &step.value,
-                ])
-                .await
-                .map_err(|_| ExecutionError::Unavailable {
-                    phase: "step_execute",
-                })?;
-            if !output.status.success() {
+                    &mut sequence,
+                    control,
+                )
+                .await?;
+            if result.status == ExecutionStatus::Cancelled {
+                return Ok(result);
+            }
+            if result.status == ExecutionStatus::Failed {
                 failed = true;
-                exit_code = output.status.code();
+                exit_code = result.exit_code;
             }
         }
         Ok(ExecutionResult {
@@ -210,6 +231,97 @@ impl DockerCli {
             },
             exit_code,
         })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_step(
+        &self,
+        specification: &ExecutionSpecification,
+        container: &str,
+        step_index: usize,
+        step_name: &str,
+        value: &str,
+        sequence: &mut u64,
+        control: &ExecutionControl<'_>,
+    ) -> Result<ExecutionResult, ExecutionError> {
+        let mut command = Command::new(&self.config.executable);
+        command.args([
+            "exec",
+            "--workdir",
+            &specification.workspace,
+            container,
+            &specification.shell,
+            "-e",
+            "-c",
+            value,
+        ]);
+        command
+            .kill_on_drop(true)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command.spawn().map_err(|_| ExecutionError::Unavailable {
+            phase: "step_execute",
+        })?;
+        let mut stdout = child.stdout.take().ok_or(ExecutionError::Unavailable {
+            phase: "step_execute",
+        })?;
+        let mut stderr = child.stderr.take().ok_or(ExecutionError::Unavailable {
+            phase: "step_execute",
+        })?;
+        let mut stdout_open = true;
+        let mut stderr_open = true;
+        let mut stdout_buffer = [0_u8; 16_384];
+        let mut stderr_buffer = [0_u8; 16_384];
+        let mut cancellation = tokio::time::interval(std::time::Duration::from_millis(250));
+        while stdout_open || stderr_open {
+            tokio::select! {
+                read = stdout.read(&mut stdout_buffer), if stdout_open => {
+                    let size = read.map_err(|_| ExecutionError::Unavailable { phase: "step_output" })?;
+                    stdout_open = size != 0;
+                    if size != 0 {
+                        emit_chunk(control.output, sequence, step_index, step_name, OutputChannel::Stdout, &stdout_buffer[..size]).await?;
+                    }
+                }
+                read = stderr.read(&mut stderr_buffer), if stderr_open => {
+                    let size = read.map_err(|_| ExecutionError::Unavailable { phase: "step_output" })?;
+                    stderr_open = size != 0;
+                    if size != 0 {
+                        emit_chunk(control.output, sequence, step_index, step_name, OutputChannel::Stderr, &stderr_buffer[..size]).await?;
+                    }
+                }
+                _ = cancellation.tick() => {
+                    if control.cancellation.requested().await? {
+                        let _ = self.command(&["stop", "--time", "5", container]).await;
+                        let _ = child.wait().await;
+                        return Ok(ExecutionResult { status: ExecutionStatus::Cancelled, exit_code: None });
+                    }
+                }
+            }
+        }
+        let status = child.wait().await.map_err(|_| ExecutionError::Unavailable {
+            phase: "step_execute",
+        })?;
+        Ok(ExecutionResult {
+            status: if status.success() {
+                ExecutionStatus::Succeeded
+            } else {
+                ExecutionStatus::Failed
+            },
+            exit_code: status.code(),
+        })
+    }
+
+    async fn ensure_image(&self, image: &str) -> Result<(), ExecutionError> {
+        let inspected = self
+            .command(&["image", "inspect", image])
+            .await
+            .map_err(|_| ExecutionError::Unavailable {
+                phase: "image_inspect",
+            })?;
+        if inspected.status.success() {
+            return Ok(());
+        }
+        self.checked(&["pull", image], "image_pull").await
     }
 
     fn create_args(
@@ -283,8 +395,47 @@ impl ExecutionRunner for DockerCli {
     async fn run(
         &self,
         specification: &ExecutionSpecification,
+        control: ExecutionControl<'_>,
     ) -> Result<ExecutionResult, ExecutionError> {
-        Self::run(self, specification).await
+        self.run_controlled(specification, control).await
+    }
+}
+
+async fn emit_chunk(
+    output: &dyn OutputSink,
+    sequence: &mut u64,
+    step: usize,
+    step_name: &str,
+    channel: OutputChannel,
+    bytes: &[u8],
+) -> Result<(), ExecutionError> {
+    *sequence += 1;
+    output
+        .append(OutputChunk {
+            sequence: *sequence,
+            step,
+            step_name: step_name.into(),
+            channel,
+            bytes: bytes.to_vec(),
+        })
+        .await
+}
+
+struct DiscardOutput;
+
+#[async_trait]
+impl OutputSink for DiscardOutput {
+    async fn append(&self, _chunk: OutputChunk) -> Result<(), ExecutionError> {
+        Ok(())
+    }
+}
+
+struct NeverCancel;
+
+#[async_trait]
+impl CancellationSignal for NeverCancel {
+    async fn requested(&self) -> Result<bool, ExecutionError> {
+        Ok(false)
     }
 }
 
