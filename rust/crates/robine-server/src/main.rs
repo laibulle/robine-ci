@@ -6,6 +6,7 @@ use robine_application::ControlPlane;
 use robine_oidc::OidcClient;
 use robine_persistence::Database;
 use robine_server::AppState;
+use tokio::sync::watch;
 
 #[actix_web::main]
 async fn main() -> io::Result<()> {
@@ -44,14 +45,36 @@ async fn main() -> io::Result<()> {
         }
     }
     let control_plane = Arc::new(control_plane);
-    let state = web::Data::new(AppState::new(database, control_plane));
+    let state = web::Data::new(AppState::new(database, control_plane.clone()));
 
-    HttpServer::new(move || {
+    let (shutdown_sender, shutdown_receiver) = watch::channel(false);
+    let worker_control_plane = control_plane.clone();
+    let outbox_worker = tokio::spawn(run_outbox_worker(worker_control_plane, shutdown_receiver));
+    let server = HttpServer::new(move || {
         App::new()
             .app_data(state.clone())
             .configure(robine_server::configure)
     })
     .bind(bind_address)?
-    .run()
-    .await
+    .run();
+    let result = server.await;
+    let _ = shutdown_sender.send(true);
+    let _ = outbox_worker.await;
+    result
+}
+
+async fn run_outbox_worker(control_plane: Arc<ControlPlane>, mut shutdown: watch::Receiver<bool>) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                let _ = control_plane.process_all_tenant_outboxes(25).await;
+            }
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    break;
+                }
+            }
+        }
+    }
 }

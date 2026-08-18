@@ -17,8 +17,8 @@ use robine_core::{
     identity::{OidcAuthorization, Role, User},
     pipelines::{
         AttemptProjection, CreatePipelineInput, JobState, NewJob, NewPipeline, NewWorkflowRevision,
-        PipelineProjection, RecordAttemptEvent, RecordRemoteAttemptEvent, RetryProjection,
-        RunnerLeaseHeartbeat, RunnerReconciliation, SchedulerClaim, source_digest,
+        OutboxDelivery, PipelineProjection, RecordAttemptEvent, RecordRemoteAttemptEvent,
+        RetryProjection, RunnerLeaseHeartbeat, RunnerReconciliation, SchedulerClaim, source_digest,
     },
     ports::{IdentityRepository, OidcProvider, PipelineRepository, PortError},
 };
@@ -110,6 +110,13 @@ pub struct IssuedSession {
     pub token: String,
     pub expires_at: chrono::DateTime<Utc>,
     pub user: User,
+}
+
+#[derive(Debug, Default, serde::Serialize)]
+pub struct OutboxBatch {
+    pub processed: u64,
+    pub delivered: u64,
+    pub dispatch_enqueued: u64,
 }
 
 impl ControlPlane {
@@ -882,6 +889,55 @@ impl ControlPlane {
             })
     }
 
+    /// Processes a bounded batch of pending durable outbox events.
+    ///
+    /// # Errors
+    ///
+    /// Returns unavailable when the durable delivery transaction fails.
+    pub async fn process_outbox_batch(
+        &self,
+        tenant_id: &str,
+        limit: usize,
+    ) -> Result<OutboxBatch, ApplicationError> {
+        let mut batch = OutboxBatch::default();
+        for _ in 0..limit.clamp(1, 100) {
+            let Some(delivery) = self
+                .pipelines
+                .process_next_outbox_event(tenant_id, Utc::now())
+                .await
+                .map_err(|_| ApplicationError::Unavailable)?
+            else {
+                break;
+            };
+            count_outbox_delivery(&mut batch, &delivery);
+        }
+        Ok(batch)
+    }
+
+    /// Processes one bounded outbox batch for every registered tenant.
+    ///
+    /// # Errors
+    ///
+    /// Returns unavailable when tenant discovery or any durable delivery transaction fails.
+    pub async fn process_all_tenant_outboxes(
+        &self,
+        per_tenant_limit: usize,
+    ) -> Result<OutboxBatch, ApplicationError> {
+        let tenants = self
+            .pipelines
+            .list_tenants()
+            .await
+            .map_err(|_| ApplicationError::Unavailable)?;
+        let mut total = OutboxBatch::default();
+        for tenant in tenants {
+            let batch = self.process_outbox_batch(&tenant, per_tenant_limit).await?;
+            total.processed += batch.processed;
+            total.delivered += batch.delivered;
+            total.dispatch_enqueued += batch.dispatch_enqueued;
+        }
+        Ok(total)
+    }
+
     async fn authenticate_runner(
         &self,
         tenant_id: &str,
@@ -925,6 +981,12 @@ impl ControlPlane {
         }
         Ok(())
     }
+}
+
+fn count_outbox_delivery(batch: &mut OutboxBatch, delivery: &OutboxDelivery) {
+    batch.processed += 1;
+    batch.delivered += u64::from(delivery.delivered);
+    batch.dispatch_enqueued += u64::from(delivery.dispatch_enqueued);
 }
 
 fn authentication_error(error: &PortError) -> ApplicationError {

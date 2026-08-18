@@ -1557,3 +1557,169 @@ async fn heartbeat_and_expiry_reconciliation_are_atomic_and_tenant_scoped() {
     assert_eq!(pipeline_status, "failed");
     assert_eq!(receipt_count, 2);
 }
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn sql_outbox_claims_once_enqueues_dispatch_and_dead_letters_bounded_failures() {
+    let Ok(database_url) = std::env::var("ROBINE_DATABASE_INTEGRATION_URL") else {
+        return;
+    };
+    let database = Database::connect(&database_url, 4)
+        .await
+        .expect("connect migrated database");
+    let tenant = format!("rust-outbox-{}", Uuid::new_v4());
+    let now = Utc::now();
+    let pipeline = NewPipeline {
+        id: Uuid::new_v4(),
+        repository_id: Uuid::new_v4(),
+        workflow_name: "SQL outbox".into(),
+        commit_sha: "4".repeat(40),
+        source_ref: None,
+        trigger: "manual".into(),
+        actor: Uuid::new_v4().to_string(),
+        correlation_id: Uuid::new_v4(),
+        inserted_at: now,
+        scheduled_for: None,
+        inputs: std::collections::BTreeMap::new(),
+        revision: NewWorkflowRevision {
+            id: Uuid::new_v4(),
+            path: "generated://sql-outbox".into(),
+            source: "{}".into(),
+            digest: source_digest("{}"),
+            normalized_graph: serde_json::json!({"jobs": {}}),
+            included_sources: serde_json::json!({}),
+        },
+        jobs: vec![NewJob {
+            id: Uuid::new_v4(),
+            key: "test".into(),
+            status: JobState::Queued,
+            needs: Vec::new(),
+            position: 0,
+            execution: serde_json::json!({}),
+        }],
+        event_id: Uuid::new_v4(),
+    };
+    database
+        .create(&tenant, &pipeline)
+        .await
+        .expect("create pending outbox event");
+    let process_at = now + Duration::seconds(1);
+    let first_database = database.clone();
+    let second_database = database.clone();
+    let first_tenant = tenant.clone();
+    let second_tenant = tenant.clone();
+    let (first, second) = tokio::join!(
+        async move {
+            first_database
+                .process_next_outbox_event(&first_tenant, process_at)
+                .await
+        },
+        async move {
+            second_database
+                .process_next_outbox_event(&second_tenant, process_at)
+                .await
+        }
+    );
+    let outcomes = [first.expect("first worker"), second.expect("second worker")];
+    assert_eq!(outcomes.iter().flatten().count(), 1);
+    let delivered = outcomes.into_iter().flatten().next().expect("one delivery");
+    assert!(delivered.delivered);
+    assert!(delivered.dispatch_enqueued);
+    assert_eq!(delivered.attempt, 1);
+    assert!(
+        database
+            .process_next_outbox_event(&tenant, process_at)
+            .await
+            .expect("idempotent poll")
+            .is_none()
+    );
+
+    let unsupported_id = Uuid::new_v4();
+    let mut fixture = database
+        .tenant_transaction(&tenant)
+        .await
+        .expect("outbox fixture transaction");
+    sqlx::query(
+        "INSERT INTO outbox_events \
+         (id, event_type, aggregate_id, payload, occurred_at, available_at, inserted_at, tenant_id) \
+         VALUES ($1, 'unsupported', $2, '{}', $3, $3, $3, $4)",
+    )
+    .bind(unsupported_id)
+    .bind(pipeline.id)
+    .bind(now)
+    .bind(&tenant)
+    .execute(&mut *fixture)
+    .await
+    .expect("insert unsupported event");
+    fixture.commit().await.expect("commit unsupported event");
+    let retry = database
+        .process_next_outbox_event(&tenant, now)
+        .await
+        .expect("process retryable failure")
+        .expect("failure outcome");
+    assert!(!retry.delivered);
+    assert_eq!(retry.attempt, 1);
+    let mut force_final = database
+        .tenant_transaction(&tenant)
+        .await
+        .expect("force final attempt transaction");
+    sqlx::query("UPDATE outbox_events SET delivery_attempts = 9, available_at = $2 WHERE id = $1")
+        .bind(unsupported_id)
+        .bind(now)
+        .execute(&mut *force_final)
+        .await
+        .expect("make retry due");
+    force_final.commit().await.expect("commit final attempt");
+    let discarded = database
+        .process_next_outbox_event(&tenant, now)
+        .await
+        .expect("process final failure")
+        .expect("discard outcome");
+    assert_eq!(discarded.attempt, 10);
+    assert!(!discarded.delivered);
+
+    let mut verification = database
+        .tenant_transaction(&tenant)
+        .await
+        .expect("outbox verification transaction");
+    let pipeline_status =
+        sqlx::query_scalar::<_, String>("SELECT status FROM pipelines WHERE id = $1")
+            .bind(pipeline.id)
+            .fetch_one(&mut *verification)
+            .await
+            .expect("read queued pipeline");
+    let durable_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM durable_jobs WHERE source_event_id = $1 AND kind = 'run_next_job'",
+    )
+    .bind(pipeline.event_id)
+    .fetch_one(&mut *verification)
+    .await
+    .expect("read durable dispatch");
+    let dead_lettered = sqlx::query_scalar::<_, bool>(
+        "SELECT dead_lettered_at IS NOT NULL FROM outbox_events WHERE id = $1",
+    )
+    .bind(unsupported_id)
+    .fetch_one(&mut *verification)
+    .await
+    .expect("read dead letter");
+    sqlx::query("DELETE FROM durable_jobs WHERE tenant_id = $1")
+        .bind(&tenant)
+        .execute(&mut *verification)
+        .await
+        .expect("cleanup durable jobs");
+    sqlx::query("DELETE FROM outbox_events WHERE tenant_id = $1")
+        .bind(&tenant)
+        .execute(&mut *verification)
+        .await
+        .expect("cleanup outbox");
+    sqlx::query("DELETE FROM pipelines WHERE id = $1")
+        .bind(pipeline.id)
+        .execute(&mut *verification)
+        .await
+        .expect("cleanup pipeline");
+    verification.commit().await.expect("commit cleanup");
+
+    assert_eq!(pipeline_status, "queued");
+    assert_eq!(durable_count, 1);
+    assert!(dead_lettered);
+}

@@ -586,6 +586,24 @@ pub struct RunnerReconciliation {
     pub lease_lost: Vec<Uuid>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct OutboxDelivery {
+    pub event_id: Uuid,
+    pub dispatch_enqueued: bool,
+    pub delivered: bool,
+    pub attempt: i32,
+}
+
+#[must_use]
+pub fn outbox_backoff_seconds(attempt: i32, event_id: Uuid) -> i64 {
+    let exponent = u32::try_from((attempt - 1).clamp(0, 30)).unwrap_or(0);
+    let base = 15_i64
+        .saturating_mul(2_i64.saturating_pow(exponent))
+        .min(1_790);
+    let jitter = i64::from(event_id.as_bytes()[0] % 11);
+    base + jitter
+}
+
 #[derive(Clone, Debug)]
 pub struct SchedulerClaim {
     pub global_limit: i64,
@@ -937,5 +955,15 @@ mod tests {
             ..attempt
         };
         assert_eq!(terminal.heartbeat(now, 60), Err(AttemptHeartbeatError));
+    }
+
+    #[test]
+    fn outbox_backoff_is_exponential_capped_and_stably_jittered() {
+        let event_id = Uuid::from_bytes([0; 16]);
+        assert_eq!(outbox_backoff_seconds(1, event_id), 15);
+        assert_eq!(outbox_backoff_seconds(5, event_id), 240);
+        assert_eq!(outbox_backoff_seconds(20, event_id), 1_790);
+        let jittered = Uuid::from_bytes([10; 16]);
+        assert_eq!(outbox_backoff_seconds(1, jittered), 25);
     }
 }

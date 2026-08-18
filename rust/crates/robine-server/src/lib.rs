@@ -551,6 +551,39 @@ async fn remote_job_offer(
 }
 
 #[derive(Deserialize)]
+struct OutboxProcessRequest {
+    limit: Option<usize>,
+}
+
+async fn process_outbox(
+    request: HttpRequest,
+    input: web::Json<OutboxProcessRequest>,
+    state: web::Data<AppState>,
+) -> impl Responder {
+    let Some(token) = bearer_token(&request) else {
+        return HttpResponse::Unauthorized().finish();
+    };
+    let user = match state.control_plane.authenticate(token).await {
+        Ok(user) => user,
+        Err(ApplicationError::InvalidCredentials | ApplicationError::Unauthenticated) => {
+            return HttpResponse::Unauthorized().finish();
+        }
+        Err(_) => return HttpResponse::ServiceUnavailable().finish(),
+    };
+    if user.role != Role::Administrator {
+        return HttpResponse::Forbidden().finish();
+    }
+    match state
+        .control_plane
+        .process_outbox_batch("standalone", input.limit.unwrap_or(25))
+        .await
+    {
+        Ok(batch) => HttpResponse::Ok().json(batch),
+        Err(_) => HttpResponse::ServiceUnavailable().finish(),
+    }
+}
+
+#[derive(Deserialize)]
 struct SignInRequest {
     email: String,
     password: String,
@@ -846,6 +879,10 @@ pub fn configure(config: &mut web::ServiceConfig) {
             "/api/v1/runners/attempts/{attempt_id}/offer",
             web::get().to(remote_job_offer),
         )
+        .route(
+            "/api/v1/internal/outbox/process",
+            web::post().to(process_outbox),
+        )
         .route("/api/v1/admin/users", web::get().to(list_users))
         .route(
             "/api/v1/admin/users/{user_id}/role",
@@ -960,6 +997,10 @@ mod tests {
 
     #[async_trait]
     impl PipelineRepository for StubBackend {
+        async fn list_tenants(&self) -> Result<Vec<String>, PortError> {
+            Ok(vec!["standalone".into()])
+        }
+
         async fn create(
             &self,
             _tenant_id: &str,
@@ -1166,6 +1207,14 @@ mod tests {
                 "job_key": "test",
                 "idempotency_token": Uuid::new_v4()
             }))
+        }
+
+        async fn process_next_outbox_event(
+            &self,
+            _tenant_id: &str,
+            _now: DateTime<Utc>,
+        ) -> Result<Option<robine_core::pipelines::OutboxDelivery>, PortError> {
+            Ok(None)
         }
     }
 
@@ -1485,6 +1534,16 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body: serde_json::Value = test::read_body_json(response).await;
         assert_eq!(body["reconciled"], 1);
+
+        let outbox = test::TestRequest::post()
+            .uri("/api/v1/internal/outbox/process")
+            .insert_header(("authorization", "Bearer administrator-session"))
+            .set_json(serde_json::json!({"limit": 10}))
+            .to_request();
+        let outbox_response = test::call_service(&app, outbox).await;
+        assert_eq!(outbox_response.status(), StatusCode::OK);
+        let outbox_body: serde_json::Value = test::read_body_json(outbox_response).await;
+        assert_eq!(outbox_body["processed"], 0);
     }
 
     #[actix_web::test]

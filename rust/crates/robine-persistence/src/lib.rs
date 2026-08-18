@@ -5,10 +5,11 @@ use chrono::{DateTime, NaiveDateTime, SecondsFormat, Utc};
 use robine_core::{
     identity::{LocalIdentity, OidcClaims, Role, User},
     pipelines::{
-        AttemptEventError, AttemptProjection, AttemptState, JobState, NewPipeline, PipelineEvent,
-        PipelineProjection, PipelineState, RecordAttemptEvent, RecordRemoteAttemptEvent,
-        RetryProjection, RunnerAuthenticationMaterial, RunnerLeaseHeartbeat, RunnerResume,
-        SchedulerClaim, UnknownPipelineState,
+        AttemptEventError, AttemptProjection, AttemptState, JobState, NewPipeline, OutboxDelivery,
+        PipelineEvent, PipelineProjection, PipelineState, RecordAttemptEvent,
+        RecordRemoteAttemptEvent, RetryProjection, RunnerAuthenticationMaterial,
+        RunnerLeaseHeartbeat, RunnerResume, SchedulerClaim, UnknownPipelineState,
+        outbox_backoff_seconds,
     },
     ports::{IdentityRepository, PipelineRepository, PortError},
 };
@@ -69,6 +70,12 @@ impl Database {
         tenant_id: &str,
     ) -> Result<Transaction<'_, Postgres>, PersistenceError> {
         let mut transaction = self.pool.begin().await?;
+        sqlx::query(
+            "INSERT INTO ci_tenants (id, inserted_at) VALUES ($1, NOW()) ON CONFLICT DO NOTHING",
+        )
+        .bind(tenant_id)
+        .execute(&mut *transaction)
+        .await?;
         sqlx::query("SELECT set_config('robine.tenant_id', $1, true)")
             .bind(tenant_id)
             .execute(&mut *transaction)
@@ -420,6 +427,18 @@ impl IdentityRepository for Database {
 
 #[async_trait]
 impl PipelineRepository for Database {
+    async fn list_tenants(&self) -> Result<Vec<String>, PortError> {
+        let mut tenants =
+            sqlx::query_scalar::<_, String>("SELECT id FROM ci_tenants ORDER BY inserted_at, id")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|_| PortError::Unavailable)?;
+        if !tenants.iter().any(|tenant| tenant == "standalone") {
+            tenants.insert(0, "standalone".into());
+        }
+        Ok(tenants)
+    }
+
     async fn create(
         &self,
         tenant_id: &str,
@@ -1316,6 +1335,148 @@ impl PipelineRepository for Database {
         ]);
         Ok(serde_json::Value::Object(execution))
     }
+
+    async fn process_next_outbox_event(
+        &self,
+        tenant_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<OutboxDelivery>, PortError> {
+        let mut transaction = self
+            .tenant_transaction(tenant_id)
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        let event = sqlx::query_as::<_, PendingOutboxRow>(
+            "SELECT id, event_type, aggregate_id, payload, delivery_attempts \
+             FROM outbox_events WHERE tenant_id = $1 AND delivered_at IS NULL \
+               AND dead_lettered_at IS NULL \
+               AND COALESCE(available_at, occurred_at) <= $2 \
+             ORDER BY occurred_at, id LIMIT 1 FOR UPDATE SKIP LOCKED",
+        )
+        .bind(tenant_id)
+        .bind(now)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|_| PortError::Unavailable)?;
+        let Some(event) = event else {
+            transaction
+                .commit()
+                .await
+                .map_err(|_| PortError::Unavailable)?;
+            return Ok(None);
+        };
+        let attempt = event.delivery_attempts + 1;
+        let delivery = prepare_outbox_delivery(&mut transaction, tenant_id, &event).await;
+        let dispatch = match delivery {
+            Ok(dispatch) => dispatch,
+            Err(reason) => {
+                let dead_lettered_at = (attempt >= 10).then_some(now);
+                let available_at =
+                    now + chrono::Duration::seconds(outbox_backoff_seconds(attempt, event.id));
+                sqlx::query(
+                    "UPDATE outbox_events SET delivery_attempts = $2, available_at = $3, \
+                     last_error = $4, dead_lettered_at = $5 WHERE id = $1 AND tenant_id = $6",
+                )
+                .bind(event.id)
+                .bind(attempt)
+                .bind(available_at)
+                .bind(reason)
+                .bind(dead_lettered_at)
+                .bind(tenant_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| PortError::Unavailable)?;
+                transaction
+                    .commit()
+                    .await
+                    .map_err(|_| PortError::Unavailable)?;
+                return Ok(Some(OutboxDelivery {
+                    event_id: event.id,
+                    dispatch_enqueued: false,
+                    delivered: false,
+                    attempt,
+                }));
+            }
+        };
+        if dispatch {
+            sqlx::query(
+                "INSERT INTO durable_jobs \
+                 (id, source_event_id, kind, payload, status, attempts, available_at, \
+                  inserted_at, updated_at, tenant_id) \
+                 VALUES ($1, $2, 'run_next_job', $3, 'available', 0, $4, $4, $4, $5) \
+                 ON CONFLICT (tenant_id, source_event_id, kind) DO NOTHING",
+            )
+            .bind(Uuid::new_v4())
+            .bind(event.id)
+            .bind(serde_json::json!({"pipeline_id": event.aggregate_id}))
+            .bind(now)
+            .bind(tenant_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        }
+        sqlx::query(
+            "UPDATE outbox_events SET delivered_at = $2, delivery_attempts = $3, \
+             last_error = NULL WHERE id = $1 AND tenant_id = $4",
+        )
+        .bind(event.id)
+        .bind(now)
+        .bind(attempt)
+        .bind(tenant_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| PortError::Unavailable)?;
+        transaction
+            .commit()
+            .await
+            .map_err(|_| PortError::Unavailable)?;
+        Ok(Some(OutboxDelivery {
+            event_id: event.id,
+            dispatch_enqueued: dispatch,
+            delivered: true,
+            attempt,
+        }))
+    }
+}
+
+async fn prepare_outbox_delivery(
+    transaction: &mut Transaction<'_, Postgres>,
+    tenant_id: &str,
+    event: &PendingOutboxRow,
+) -> Result<bool, &'static str> {
+    match event.event_type.as_str() {
+        "pipeline.created" => {
+            let status = sqlx::query_scalar::<_, String>(
+                "SELECT status FROM pipelines WHERE id = $1 AND tenant_id = $2 FOR UPDATE",
+            )
+            .bind(event.aggregate_id)
+            .bind(tenant_id)
+            .fetch_optional(&mut **transaction)
+            .await
+            .map_err(|_| "pipeline lookup failed")?
+            .ok_or("pipeline not found")?;
+            match status.as_str() {
+                "created" => {
+                    sqlx::query(
+                        "UPDATE pipelines SET status = 'queued' WHERE id = $1 AND tenant_id = $2",
+                    )
+                    .bind(event.aggregate_id)
+                    .bind(tenant_id)
+                    .execute(&mut **transaction)
+                    .await
+                    .map_err(|_| "pipeline queue failed")?;
+                }
+                "queued" | "running" => {}
+                _ => return Err("pipeline cannot be queued"),
+            }
+            Ok(true)
+        }
+        "pipeline.projection_requested" => event
+            .payload
+            .get("dispatch")
+            .and_then(serde_json::Value::as_bool)
+            .ok_or("projection dispatch flag missing"),
+        _ => Err("unsupported outbox event"),
+    }
 }
 
 fn unique_violation(error: &sqlx::Error) -> bool {
@@ -1961,6 +2122,15 @@ struct RemoteOfferRow {
     trigger: String,
     started_at: Option<NaiveDateTime>,
     inserted_at: NaiveDateTime,
+}
+
+#[derive(sqlx::FromRow)]
+struct PendingOutboxRow {
+    id: Uuid,
+    event_type: String,
+    aggregate_id: Uuid,
+    payload: serde_json::Value,
+    delivery_attempts: i32,
 }
 
 impl AttemptEventRow {

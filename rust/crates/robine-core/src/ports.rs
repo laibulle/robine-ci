@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::{
     identity::{LocalIdentity, OidcAuthorization, OidcClaims, Role, User},
     pipelines::{
-        AttemptProjection, NewPipeline, PipelineProjection, RecordAttemptEvent,
+        AttemptProjection, NewPipeline, OutboxDelivery, PipelineProjection, RecordAttemptEvent,
         RecordRemoteAttemptEvent, RetryProjection, RunnerAuthenticationMaterial,
         RunnerLeaseHeartbeat, RunnerResume, SchedulerClaim,
     },
@@ -104,6 +104,8 @@ pub trait OidcProvider: Send + Sync {
 
 #[async_trait]
 pub trait PipelineRepository: Send + Sync {
+    async fn list_tenants(&self) -> Result<Vec<String>, PortError>;
+
     async fn create(
         &self,
         tenant_id: &str,
@@ -206,4 +208,10 @@ pub trait PipelineRepository: Send + Sync {
         runner_id: Uuid,
         attempt_id: Uuid,
     ) -> Result<serde_json::Value, PortError>;
+
+    async fn process_next_outbox_event(
+        &self,
+        tenant_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<Option<OutboxDelivery>, PortError>;
 }
