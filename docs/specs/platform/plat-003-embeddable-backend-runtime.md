@@ -9,11 +9,11 @@
 
 ## Summary
 
-Robine CI can run either as its standalone product or as a backend engine supervised by another OTP application. Embedded consumers own the complete human interface, authentication, navigation, and visual integration; Robine publishes only backend contracts and runtime children.
+Robine CI can run either as its standalone Actix product or as a backend engine assembled by another Rust application. Embedded consumers own the complete human interface, authentication, navigation, supervision, and visual integration; Robine publishes framework-independent crates and explicit adapter boundaries.
 
 ## Problem
 
-Starting Robine as a dependency currently starts its Phoenix endpoint, standalone identity system, and UI. Its execution context also has no host-owned tenant boundary. This prevents Robine Workspace from presenting CI as a native product while safely reusing the CI engine.
+An embedding host must be able to reuse Robine without starting its Actix endpoint, standalone identity system, UI, or implicit workers. Every host call still needs an explicit tenant and capability boundary.
 
 ## Goals
 
@@ -21,7 +21,7 @@ Starting Robine as a dependency currently starts its Phoenix endpoint, standalon
 - Let a host supervise the CI backend without starting Robine's human endpoint or identity delivery.
 - Carry a mandatory tenant and explicit capabilities for embedded calls.
 - Keep authorization and tenant isolation inside Robine's backend boundary.
-- Publish stable Elixir entry points and migration/runtime metadata for consumers.
+- Publish stable Rust entry points and Rust-owned schema bootstrap metadata for consumers.
 
 ## Non-goals
 
@@ -38,20 +38,20 @@ An OTP application such as Robine Workspace that wants to expose CI with its own
 ### Use cases
 
 1. A standalone release starts the complete Robine product unchanged.
-2. A host starts `Robine.Runtime` with the `:embedded` profile and supplies actor, tenant, and capabilities for each backend call.
-3. A host runs versioned Robine migrations in an isolated PostgreSQL prefix.
+2. A host assembles `ControlPlane` without Actix and supplies actor, tenant, and capabilities for each backend call.
+3. A host applies the versioned Rust schema bootstrap to a dedicated PostgreSQL database.
 
 ## Requirements
 
 ### Functional requirements
 
-- **FR-1:** Robine MUST expose `Robine.Runtime.child_spec/1` for host supervision.
-- **FR-2:** The `:standalone` profile MUST start the current web product and standalone identity services.
-- **FR-3:** The `:embedded` profile MUST NOT start Robine's Endpoint, human authentication services, or UI-specific processes.
+- **FR-1:** Robine MUST expose framework-independent `robine-core` and `robine-application` library boundaries for host assembly.
+- **FR-2:** The standalone `robine-server` binary MUST assemble the current web product, identity delivery, adapters, and shutdown-aware workers.
+- **FR-3:** Constructing the embedded `ControlPlane` MUST NOT start Actix, human authentication delivery, UI assets, or background tasks.
 - **FR-4:** Embedded callers MUST construct contexts with a non-empty tenant ID and explicit capabilities.
 - **FR-5:** Backend authorization MUST be evaluated by Robine and MUST NOT trust a UI-supplied repository or tenant filter as an isolation boundary.
 - **FR-6:** The host MUST own all human UI and authentication in embedded mode.
-- **FR-7:** Robine MUST publish its migration path, default database prefix, and version so a host can run migrations without copying them.
+- **FR-7:** Robine MUST publish its Rust-owned schema bootstrap and version so a host can migrate without copying SQL into its source tree.
 
 ### UX requirements
 
@@ -59,27 +59,27 @@ An OTP application such as Robine Workspace that wants to expose CI with its own
 
 ### Operational requirements
 
-- **OR-1:** The runtime supervisor ID and name MUST be configurable. One engine instance owns Robine's reserved Repo, PubSub, Oban, and adapter process names within a BEAM node.
-- **OR-2:** Runtime configuration MUST fail fast on unsupported profiles or incomplete embedded contexts.
+- **OR-1:** The host MUST own Tokio task supervision, restart policy, shutdown signals, and adapter sharing.
+- **OR-2:** Runtime assembly MUST fail fast on incomplete adapters or embedded contexts.
 - **OR-3:** Tenant-owned durable records MUST be isolated in persistence queries and constraints.
-- **OR-4:** Robine tables SHOULD use the `robine_ci` PostgreSQL prefix when embedded to avoid collisions with host tables.
+- **OR-4:** Embedded deployment SHOULD use a dedicated PostgreSQL database or restricted role to avoid host-table collisions.
 
 ## Proposed design
 
-`Robine.Application` starts `Robine.Runtime` with the configured profile. A dependency declared with `runtime: false` can instead place `{Robine.Runtime, profile: :embedded}` in the host supervision tree. Runtime children are grouped into engine, standalone identity delivery, and standalone web delivery.
+`robine-server` explicitly assembles `Database`, `ControlPlane`, adapters, Actix delivery, and shutdown-aware Tokio workers. An embedded host constructs the same `ControlPlane` library value with only the adapters it needs; construction has no process or network side effects.
 
-`Robine.ExecutionContext` contains `actor`, `tenant_id`, `capabilities`, `correlation_id`, and assembled dependencies. Standalone contexts use the reserved tenant `"standalone"` and translate existing instance roles into capabilities. Embedded contexts accept host identifiers as opaque strings and never depend on a host schema.
+`ExecutionContext` contains `actor`, `tenant_id`, `capabilities`, and `correlation_id`. Standalone contexts use the reserved tenant `"standalone"` and translate instance roles into capabilities. Embedded contexts accept host identifiers as opaque strings and never depend on a host schema. `ControlPlane::list_pipelines_for_context` is the reference public embedded query and derives scope only from that validated context.
 
-The public integration boundary consists of context facades, PubSub/event contracts, runtime supervision, and migration metadata. Ecto schemas and adapters remain private.
+The public integration boundary consists of context types, application methods, ports, explicit adapters, bounded worker methods, and Rust schema bootstrap. SQLx record details and Actix delivery remain private to their adapter crates.
 
 ## Failure modes and recovery
 
 | Failure | Expected behavior | Recovery |
 |---|---|---|
-| Unsupported runtime profile | Startup fails before children start | Correct host configuration |
+| Missing adapter | Assembly or the affected operation fails closed | Supply the required typed adapter |
 | Missing tenant or capabilities | Context construction returns an error | Supply an authorized host scope |
-| Host does not run migrations | Repo operations fail and health reports storage unavailable | Run published migrations |
-| Duplicate engine instance | Reserved engine child names reject the second instance | Run one engine per BEAM node |
+| Host does not bootstrap the schema | Persistence fails closed | Run `Database::bootstrap_schema()` |
+| Worker task exits | Host supervisor observes task completion | Apply the host's restart or shutdown policy |
 
 ## Security and privacy
 
@@ -87,21 +87,21 @@ Tenant IDs and capabilities are trusted only when supplied by the host's server-
 
 ## Observability
 
-Runtime profile and package version are available as metadata. Existing health, telemetry, audit, and outbox facilities remain active for engine children. Embedded hosts may attach their own telemetry handlers.
+The Cargo package version is available at compile time. Existing health queries, audit records, outbox state, and bounded worker results remain available through application boundaries; embedded hosts own logging and task instrumentation.
 
 ## Acceptance criteria
 
-- [x] Standalone startup retains the Endpoint and existing behavior.
-- [x] Embedded startup has a live engine Repo/PubSub/Oban tree and no Robine Endpoint or login/identity delivery process.
-- [x] A host can obtain migration path, prefix, and package version from a public module.
+- [x] Standalone startup retains the Actix endpoint and existing behavior.
+- [x] Constructing an embedded `ControlPlane` starts no Actix endpoint, identity delivery, UI process, or worker.
+- [x] A host can run the public Rust schema bootstrap and obtain the Cargo package version.
 - [x] Embedded context creation rejects missing tenant IDs and empty capabilities.
 - [x] Context-backed operations cannot read or mutate records belonging to another tenant.
-- [x] No RobineWeb module is required by the embedded public API.
-- [x] The full precommit suite passes.
+- [x] No Actix module is required by the embedded public API.
+- [x] The full Rust workspace suite passes.
 
 ## Open questions
 
-- None blocking. Runner HTTP/WebSocket delivery will be mounted by a host adapter in a later contract; it is not the human UI endpoint.
+- None blocking. Runner HTTP/WebSocket delivery remains a host-selected adapter; it is not part of the framework-independent embedded boundary.
 
 ## Out of scope / future work
 

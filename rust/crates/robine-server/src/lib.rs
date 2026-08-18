@@ -965,13 +965,13 @@ fn render_runner_fleet(
         cards.push_str("<p class=\"empty\">No remote runner is enrolled yet.</p>");
     }
     let notice = notice.map_or_else(String::new, |value| format!("<aside class=\"secret\" role=\"status\"><strong>One-time secret</strong><code>{}</code></aside>", escape_html(value)));
-    let html = format!(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>Runner fleet · Robine</title><link rel=\"stylesheet\" href=\"/assets/app.css\"></head><body><main><nav><span class=\"brand\">Robine</span><a aria-current=\"page\" href=\"/admin/runners\">Runner fleet</a></nav><section class=\"hero\"><p class=\"eyebrow\">Infrastructure</p><h1>Runner fleet</h1><p>Operate trusted build capacity without exposing permanent storage credentials.</p><form method=\"post\" action=\"/admin/runners/enrollments\"><input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\"><button class=\"primary\">Generate enrollment command</button></form></section>{notice}<section class=\"fleet\">{cards}</section></main></body></html>"
-    );
-    HttpResponse::Ok()
-        .insert_header((header::CACHE_CONTROL, "no-store"))
-        .content_type("text/html; charset=utf-8")
-        .body(html)
+    html_page(
+        "Runner fleet",
+        &format!(
+            "{}<section class=\"hero\"><p class=\"eyebrow\">Administration / Runners</p><h1>Runner fleet</h1><p>Operate trusted build capacity without exposing permanent storage credentials.</p><form method=\"post\" action=\"/admin/runners/enrollments\"><input type=\"hidden\" name=\"csrf_token\" value=\"{csrf}\"><button class=\"primary\">Generate enrollment command</button></form></section>{notice}<section class=\"fleet\">{cards}</section>",
+            admin_navigation("runners")
+        ),
+    )
 }
 
 async fn application_css() -> HttpResponse {
@@ -2364,6 +2364,110 @@ async fn build_information() -> HttpResponse {
 }
 
 async fn browser_admin(request: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    let (_, _) = match browser_administrator(&request, &state).await {
+        Ok(authentication) => authentication,
+        Err(ApplicationError::Forbidden) => return HttpResponse::Forbidden().finish(),
+        Err(_) => {
+            return HttpResponse::SeeOther()
+                .insert_header((header::LOCATION, "/sign-in"))
+                .finish();
+        }
+    };
+    let metrics = state
+        .control_plane
+        .operational_metrics()
+        .await
+        .unwrap_or_else(|_| serde_json::json!({}));
+    html_page(
+        "Administration overview",
+        &format!(
+            "{}<section id=\"admin-dashboard\"><p class=\"eyebrow\">Instance administration</p><h1>Operational overview</h1><p>Review control-plane capacity and durable work before opening the focused administration areas.</p><dl id=\"admin-health\"><dt>Queued pipelines</dt><dd>{}</dd><dt>Running pipelines</dt><dd>{}</dd><dt>Pending outbox</dt><dd>{}</dd><dt>Available durable jobs</dt><dd>{}</dd><dt>Online runners</dt><dd>{}</dd></dl></section>",
+            admin_navigation("overview"),
+            metric_value(&metrics, "pipelines_queued"),
+            metric_value(&metrics, "pipelines_running"),
+            metric_value(&metrics, "outbox_pending"),
+            metric_value(&metrics, "durable_available"),
+            metric_value(&metrics, "runners_online")
+        ),
+    )
+}
+
+fn admin_navigation(current: &str) -> String {
+    let areas = [
+        ("overview", "/admin", "Overview"),
+        ("runners", "/admin/runners", "Runners"),
+        ("source-control", "/admin/source-control", "Source control"),
+        ("security", "/admin/security", "Security"),
+        ("users", "/admin/users", "Users"),
+    ];
+    let links = areas
+        .iter()
+        .fold(String::new(), |mut output, (key, href, label)| {
+            let current_attribute = if *key == current {
+                " aria-current=\"page\""
+            } else {
+                ""
+            };
+            let _ = write!(output, "<a href=\"{href}\"{current_attribute}>{label}</a>");
+            output
+        });
+    format!("<nav id=\"admin-navigation\" aria-label=\"Administration areas\">{links}</nav>")
+}
+
+async fn browser_admin_source_control(
+    request: HttpRequest,
+    state: web::Data<AppState>,
+) -> HttpResponse {
+    let (actor, _) = match browser_administrator(&request, &state).await {
+        Ok(authentication) => authentication,
+        Err(ApplicationError::Forbidden) => return HttpResponse::Forbidden().finish(),
+        Err(_) => {
+            return HttpResponse::SeeOther()
+                .insert_header((header::LOCATION, "/sign-in"))
+                .finish();
+        }
+    };
+    let health = state.control_plane.github_api_health(&actor).await.ok();
+    let detail = health.map_or_else(
+        || "<p role=\"status\">GitHub is not configured.</p>".into(),
+        |health| {
+            let outcome = health.outcome.as_deref().unwrap_or("not_checked");
+            let operation = health.operation.as_deref().unwrap_or("none");
+            let remaining = health.rate_limit_remaining.map_or_else(|| "unknown".into(), |value| value.to_string());
+            let limit = health.rate_limit_limit.map_or_else(|| "unknown".into(), |value| value.to_string());
+            let checked = health.checked_at.map_or_else(|| "Never".into(), |value| value.to_rfc3339());
+            format!("<dl id=\"github-api-health\"><dt>Configuration</dt><dd>{}</dd><dt>Health</dt><dd>{}</dd><dt>Last operation</dt><dd>{}</dd><dt>Last outcome</dt><dd>{}</dd><dt>Rate limit remaining</dt><dd>{remaining} / {limit}</dd><dt>Last checked</dt><dd>{}</dd></dl>", if health.configured { "configured" } else { "missing credentials" }, if health.healthy { "healthy" } else { "degraded" }, escape_html(operation), escape_html(outcome), escape_html(&checked))
+        },
+    );
+    html_page(
+        "Source control administration",
+        &format!(
+            "{}<section id=\"admin-source-control\"><p class=\"eyebrow\">Administration / Source control</p><h1>Source control</h1><p>GitHub is the status-projection provider for this cutover. Repository trust and write-only App credentials are managed from the repository catalogue.</p>{detail}<p><a class=\"primary\" href=\"/repositories#github-app-assistant\">Configure GitHub and repositories</a></p></section>",
+            admin_navigation("source-control")
+        ),
+    )
+}
+
+async fn browser_admin_security(request: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
+    let (_, _) = match browser_administrator(&request, &state).await {
+        Ok(authentication) => authentication,
+        Err(ApplicationError::Forbidden) => return HttpResponse::Forbidden().finish(),
+        Err(_) => {
+            return HttpResponse::SeeOther()
+                .insert_header((header::LOCATION, "/sign-in"))
+                .finish();
+        }
+    };
+    html_page(
+        "Security administration",
+        &format!(
+            "{}<section id=\"admin-security\"><p class=\"eyebrow\">Administration / Security</p><h1>Security</h1><div class=\"surface-panel\"><h2>Authentication</h2><p>Local break-glass authentication and configured OIDC sign-in remain available. Sessions are opaque, revocable, and expire after seven days.</p></div><div class=\"surface-panel\"><h2>Secrets</h2><p>Instance and repository credentials are encrypted and write-only. Runtime jobs receive only explicitly declared names.</p><a href=\"/repositories\">Review repository secret stores</a></div><div class=\"surface-panel\"><h2>Runner credentials</h2><p>Enrollment, rotation, draining, and immediate revocation are isolated in the runner area.</p><a href=\"/admin/runners\">Open runner security controls</a></div></section>",
+            admin_navigation("security")
+        ),
+    )
+}
+
+async fn browser_admin_users(request: HttpRequest, state: web::Data<AppState>) -> HttpResponse {
     let (actor, token) = match browser_administrator(&request, &state).await {
         Ok(authentication) => authentication,
         Err(ApplicationError::Forbidden) => return HttpResponse::Forbidden().finish(),
@@ -2376,29 +2480,6 @@ async fn browser_admin(request: HttpRequest, state: web::Data<AppState>) -> Http
     let Ok(users) = state.control_plane.list_users(&actor).await else {
         return HttpResponse::ServiceUnavailable().finish();
     };
-    let metrics = state
-        .control_plane
-        .operational_metrics()
-        .await
-        .unwrap_or_else(|_| serde_json::json!({}));
-    let github = state.control_plane.github_api_health(&actor).await.ok();
-    let github_health = github.map_or_else(
-        || "<p role=\"status\">GitHub is not assembled.</p>".into(),
-        |health| {
-            let outcome = health.outcome.as_deref().unwrap_or("not_checked");
-            let operation = health.operation.as_deref().unwrap_or("none");
-            let remaining = health
-                .rate_limit_remaining
-                .map_or_else(|| "unknown".into(), |value| value.to_string());
-            let limit = health
-                .rate_limit_limit
-                .map_or_else(|| "unknown".into(), |value| value.to_string());
-            let checked = health
-                .checked_at
-                .map_or_else(|| "Never".into(), |value| value.to_rfc3339());
-            format!("<dl id=\"github-api-health\"><dt>Configuration</dt><dd>{}</dd><dt>Health</dt><dd>{}</dd><dt>Last operation</dt><dd>{}</dd><dt>Last outcome</dt><dd>{}</dd><dt>Rate limit remaining</dt><dd>{remaining} / {limit}</dd><dt>Last checked</dt><dd>{}</dd></dl>", if health.configured { "configured" } else { "missing credentials" }, if health.healthy { "healthy" } else { "degraded" }, escape_html(operation), escape_html(outcome), escape_html(&checked))
-        },
-    );
     let csrf = csrf_token(&token);
     let rows = users.iter().fold(String::new(), |mut output, user| {
         let selected = |role| if user.role == role { " selected" } else { "" };
@@ -2406,14 +2487,10 @@ async fn browser_admin(request: HttpRequest, state: web::Data<AppState>) -> Http
         output
     });
     html_page(
-        "Administration",
+        "User administration",
         &format!(
-            "<section id=\"admin-dashboard\"><p class=\"eyebrow\">Instance administration</p><h1>Health and identities</h1><p><a class=\"primary\" href=\"/admin/runners\">Operate runner fleet</a></p><dl id=\"admin-health\"><dt>Queued pipelines</dt><dd>{}</dd><dt>Running pipelines</dt><dd>{}</dd><dt>Pending outbox</dt><dd>{}</dd><dt>Available durable jobs</dt><dd>{}</dd><dt>Online runners</dt><dd>{}</dd></dl><h2>GitHub API</h2>{github_health}<h2>Users</h2><table><thead><tr><th>Email</th><th>Role</th><th>State</th><th>Change role</th></tr></thead><tbody>{rows}</tbody></table></section>",
-            metric_value(&metrics, "pipelines_queued"),
-            metric_value(&metrics, "pipelines_running"),
-            metric_value(&metrics, "outbox_pending"),
-            metric_value(&metrics, "durable_available"),
-            metric_value(&metrics, "runners_online")
+            "{}<section id=\"admin-users\"><p class=\"eyebrow\">Administration / Users</p><h1>Users and roles</h1><p>The final usable administrator cannot be removed.</p><table><thead><tr><th>Email</th><th>Role</th><th>State</th><th>Change role</th></tr></thead><tbody>{rows}</tbody></table></section>",
+            admin_navigation("users")
         ),
     )
 }
@@ -2459,7 +2536,7 @@ async fn browser_change_user_role(
         .await
     {
         Ok(_) => HttpResponse::SeeOther()
-            .insert_header((header::LOCATION, "/admin"))
+            .insert_header((header::LOCATION, "/admin/users"))
             .finish(),
         Err(ApplicationError::LastAdministrator) => HttpResponse::Conflict().finish(),
         Err(ApplicationError::Forbidden) => HttpResponse::Forbidden().finish(),
@@ -4200,6 +4277,12 @@ pub fn configure(config: &mut web::ServiceConfig) {
         .route("/build-information", web::get().to(build_information))
         .route("/admin", web::get().to(browser_admin))
         .route(
+            "/admin/source-control",
+            web::get().to(browser_admin_source_control),
+        )
+        .route("/admin/security", web::get().to(browser_admin_security))
+        .route("/admin/users", web::get().to(browser_admin_users))
+        .route(
             "/admin/users/{user_id}/role",
             web::post().to(browser_change_user_role),
         )
@@ -5724,8 +5807,30 @@ mod tests {
         let body = test::read_body(response).await;
         let html = std::str::from_utf8(&body).expect("HTML");
         assert!(html.contains("admin-dashboard"));
-        assert!(html.contains("github-api-health"));
-        assert!(html.contains("4999 / 5000"));
+        assert!(html.contains("admin-navigation"));
+        assert!(html.contains("href=\"/admin\" aria-current=\"page\""));
+
+        for (path, marker) in [
+            ("/admin/runners", "Runner fleet"),
+            ("/admin/source-control", "admin-source-control"),
+            ("/admin/security", "admin-security"),
+            ("/admin/users", "admin-users"),
+        ] {
+            let request = test::TestRequest::get()
+                .uri(path)
+                .insert_header((header::COOKIE, "robine_session=session"))
+                .to_request();
+            let response = test::call_service(&admin, request).await;
+            assert_eq!(response.status(), StatusCode::OK, "{path}");
+            let body = test::read_body(response).await;
+            let html = std::str::from_utf8(&body).expect("HTML");
+            assert!(html.contains(marker), "{path}");
+            assert!(html.contains("aria-current=\"page\""), "{path}");
+            if path == "/admin/source-control" {
+                assert!(html.contains("github-api-health"));
+                assert!(html.contains("4999 / 5000"));
+            }
+        }
 
         let request = test::TestRequest::post()
             .uri(&format!("/admin/users/{}/role", Uuid::nil()))
@@ -5743,7 +5848,7 @@ mod tests {
                 .headers()
                 .get(header::LOCATION)
                 .and_then(|value| value.to_str().ok()),
-            Some("/admin")
+            Some("/admin/users")
         );
     }
 

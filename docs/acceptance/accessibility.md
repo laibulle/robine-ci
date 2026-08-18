@@ -22,4 +22,4 @@ For every journey, the tester uses the keyboard only and confirms that focus ord
 5. Diagnose the first failing step and find the local reproduction command.
 6. Cancel an active pipeline and retry an eligible failed job through the confirmations.
 
-Record each result in a copy of `accessibility.template.json`. A journey with a blocking issue cannot pass. Major or critical findings must be fixed and retested; only minor or moderate findings may be explicitly accepted with a durable issue/decision reference. Run `mix robine.verify_acceptance` with both external evidence files and the retained release `SHA256SUMS` manifest after the retest.
+Record each result in a copy of `accessibility.template.json`. A journey with a blocking issue cannot pass. Major or critical findings must be fixed and retested; only minor or moderate findings may be explicitly accepted with a durable issue/decision reference. Run `robine verify-acceptance` with both external evidence files and the retained release `SHA256SUMS` manifest after the retest.

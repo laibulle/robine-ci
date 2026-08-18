@@ -1959,3 +1959,39 @@ fn yaml_line_key(line: &str) -> Option<(&str, &str)> {
     let key = key.trim().trim_matches(['\'', '"']);
     (!key.is_empty()).then_some((key, value.trim()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parser_builds_a_minimal_exact_execution_contract() {
+        let source = r"
+version: 1
+name: CI
+on:
+  push: {}
+jobs:
+  test:
+    image: alpine:3.22
+    steps:
+      - name: Test
+        run: echo ok
+";
+        let workflow = parse(
+            source,
+            ".robine-ci/workflows/ci.yml",
+            &WorkflowLimits::default(),
+        )
+        .expect("minimal workflow");
+
+        assert_eq!(workflow.name, "CI");
+        assert_eq!(workflow.order, ["test"]);
+        assert_eq!(workflow.jobs["test"].execution["image"], "alpine:3.22");
+        assert_eq!(workflow.jobs["test"].execution["steps"][0]["kind"], "run");
+        assert_eq!(
+            workflow.jobs["test"].execution["steps"][0]["value"],
+            "echo ok"
+        );
+    }
+}

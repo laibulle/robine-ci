@@ -104,7 +104,7 @@ The service exposes structured application logs, health endpoints, webhook proce
 
 None blocking.
 
-The external timing session follows `docs/acceptance/first-pipeline.md`. Release evidence is retained outside the public repository when it contains private tester or repository information and is schema-checked with `mix robine.verify_acceptance` before this criterion is marked complete.
+The external timing session follows `docs/acceptance/first-pipeline.md`. Release evidence is retained outside the public repository when it contains private tester or repository information and is schema-checked with `robine verify-acceptance` before this criterion is marked complete.
 
 ## Decisions
 

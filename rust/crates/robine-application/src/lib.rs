@@ -883,6 +883,23 @@ impl ControlPlane {
         )
         .map_err(|_| ApplicationError::Forbidden)?;
 
+        self.list_pipelines_for_context(&context, repository_id, limit)
+            .await
+    }
+
+    /// Lists pipelines for a host-owned tenant through the framework-independent
+    /// embedded boundary. The tenant is always taken from the validated context.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApplicationError::Forbidden`] without the exact `pipelines:read`
+    /// capability and [`ApplicationError::Unavailable`] when persistence fails.
+    pub async fn list_pipelines_for_context(
+        &self,
+        context: &ExecutionContext,
+        repository_id: Option<Uuid>,
+        limit: i64,
+    ) -> Result<Vec<PipelineProjection>, ApplicationError> {
         if !context.permits("pipelines:read") {
             return Err(ApplicationError::Forbidden);
         }

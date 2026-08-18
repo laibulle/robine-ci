@@ -213,6 +213,80 @@ fn make_executable(_path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_governed_specification_has_live_rust_contract_evidence() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .expect("workspace root");
+        let index = fs::read_to_string(root.join("docs/operations/rust-contract-coverage.md"))
+            .expect("contract coverage index");
+        let evidence = index
+            .lines()
+            .filter(|line| line.starts_with("| ") && !line.starts_with("| Contract"))
+            .filter_map(|line| {
+                let columns = line
+                    .trim_matches('|')
+                    .split('|')
+                    .map(str::trim)
+                    .collect::<Vec<_>>();
+                (columns.len() == 3 && columns[0] != "---").then(|| {
+                    (
+                        columns[0].to_owned(),
+                        (columns[1].to_owned(), columns[2].to_owned()),
+                    )
+                })
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        let specs_root = root.join("docs/specs");
+        for domain in fs::read_dir(specs_root).expect("specification domains") {
+            let domain = domain.expect("specification domain");
+            if !domain.file_type().expect("domain type").is_dir() {
+                continue;
+            }
+            for spec in fs::read_dir(domain.path()).expect("domain specifications") {
+                let spec = spec.expect("specification");
+                if spec.path().extension().and_then(std::ffi::OsStr::to_str) != Some("md") {
+                    continue;
+                }
+                let source = fs::read_to_string(spec.path()).expect("specification source");
+                if ![
+                    "**State:** Accepted",
+                    "**State:** Implementing",
+                    "**State:** Shipped",
+                ]
+                .iter()
+                .any(|state| source.contains(state))
+                {
+                    continue;
+                }
+                let identifier = source
+                    .lines()
+                    .next()
+                    .and_then(|line| line.strip_prefix("# "))
+                    .and_then(|title| title.split_once(" — "))
+                    .map(|(identifier, _)| identifier)
+                    .expect("stable specification identifier");
+                let (unit, integration) = evidence
+                    .get(identifier)
+                    .unwrap_or_else(|| panic!("missing Rust coverage evidence for {identifier}"));
+                for (kind, path) in [("unit", unit), ("integration", integration)] {
+                    let source = fs::read_to_string(root.join(path)).unwrap_or_else(|error| {
+                        panic!("missing {kind} evidence for {identifier} at {path}: {error}")
+                    });
+                    assert!(
+                        source.contains("#[test]")
+                            || source.contains("#[actix_web::test]")
+                            || source.contains("#[tokio::test]"),
+                        "{kind} evidence for {identifier} has no Rust tests: {path}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn default_output_is_dist() {
         assert_eq!(arguments_for(&[]), PathBuf::from("dist"));

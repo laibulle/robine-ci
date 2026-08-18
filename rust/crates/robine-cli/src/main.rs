@@ -12,8 +12,12 @@ use std::{
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+mod acceptance;
+
 const DEFAULT_WORKFLOW: &str = ".robine-ci/workflows/ci.yml";
-const TEMPLATE: &str = "version: 1\nname: CI\non:\n  push: {}\n  pull_request: {}\njobs:\n  test:\n    image: alpine:3.22\n    steps:\n      - name: test\n        run: echo \"Configure your test command\"\n";
+const GENERIC_TEMPLATE: &str = "version: 1\nname: CI\non:\n  push: {}\n  pull_request: {}\njobs:\n  test:\n    image: alpine:3.22\n    steps:\n      - name: test\n        run: echo \"Configure your test command\"\n";
+const ELIXIR_TEMPLATE: &str = "version: 1\nname: CI\non:\n  push: {}\n  pull_request: {}\njobs:\n  test:\n    image: hexpm/elixir:1.18.4-erlang-27.3.4-debian-bookworm-20250428-slim\n    steps:\n      - name: dependencies\n        run: mix deps.get\n      - name: test\n        run: mix test\n";
+const NODE_TEMPLATE: &str = "version: 1\nname: CI\non:\n  push: {}\n  pull_request: {}\njobs:\n  test:\n    image: node:22-bookworm-slim\n    steps:\n      - name: dependencies\n        run: npm ci\n      - name: test\n        run: npm test\n";
 
 fn main() -> ExitCode {
     let arguments = env::args().skip(1).collect::<Vec<_>>();
@@ -40,6 +44,9 @@ fn run(arguments: &[String], directory: &Path) -> Result<String, (u8, String)> {
         [command, rest @ ..] if command == "validate" => validate(rest, directory),
         [command, rest @ ..] if command == "init" => initialize(rest, directory),
         [command, rest @ ..] if command == "run" => execute(rest, directory),
+        [command, rest @ ..] if command == "verify-acceptance" => {
+            acceptance::verify_command(rest, directory)
+        }
         [] => Err((64, usage("a command is required"))),
         [command, ..] => Err((64, usage(&format!("unknown command {command}")))),
     }
@@ -660,6 +667,7 @@ fn initialize(arguments: &[String], directory: &Path) -> Result<String, (u8, Str
         return Err((64, usage("unknown init option")));
     }
     let path = directory.join(DEFAULT_WORKFLOW);
+    let (project, template) = starter_template(directory);
     if path.exists() && !force {
         return Err((
             4,
@@ -671,13 +679,13 @@ fn initialize(arguments: &[String], directory: &Path) -> Result<String, (u8, Str
     }
     if !yes {
         return Ok(format!(
-            "Would create {}:\n\n{TEMPLATE}\nRun `robine init --yes` to write it.",
-            path.display()
+            "Detected {project} project.\nWould create {}:\n\n{template}\nRun `robine init --yes` to write it.",
+            path.display(),
         ));
     }
     fs::create_dir_all(path.parent().unwrap_or(directory))
         .map_err(|error| (3, format!("Cannot create workflow directory: {error}")))?;
-    fs::write(&path, TEMPLATE)
+    fs::write(&path, template)
         .map_err(|error| (3, format!("Cannot create {}: {error}", path.display())))?;
     Ok(format!(
         "Created {}\nNext: run `robine validate`.",
@@ -685,9 +693,19 @@ fn initialize(arguments: &[String], directory: &Path) -> Result<String, (u8, Str
     ))
 }
 
+fn starter_template(directory: &Path) -> (&'static str, &'static str) {
+    if directory.join("mix.exs").is_file() {
+        ("Elixir/Mix", ELIXIR_TEMPLATE)
+    } else if directory.join("package.json").is_file() {
+        ("Node.js", NODE_TEMPLATE)
+    } else {
+        ("generic", GENERIC_TEMPLATE)
+    }
+}
+
 fn usage(reason: &str) -> String {
     format!(
-        "{reason}\nUsage: robine <version|init|validate|run> [options]\n       robine run [job-id] [--workflow path] [--input name=value]... [--step name-or-index] [--env-file path] [--no-deps] [--verbose]"
+        "{reason}\nUsage: robine <version|init|validate|run|verify-acceptance> [options]\n       robine run [job-id] [--workflow path] [--input name=value]... [--step name-or-index] [--env-file path] [--no-deps] [--verbose]\n       robine verify-acceptance --first-pipeline FILE --accessibility FILE --artifact-manifest FILE [--format human|json]"
     )
 }
 
@@ -703,6 +721,29 @@ mod tests {
                 .starts_with("robine ")
         );
         assert_eq!(run(&[], Path::new(".")).unwrap_err().0, 64);
+    }
+
+    #[test]
+    fn init_detects_projects_without_execution_and_protects_existing_workflows() {
+        let root = std::env::temp_dir().join(format!("robine-init-{}", Uuid::new_v4()));
+        fs::create_dir(&root).expect("temporary repository");
+        fs::write(root.join("mix.exs"), "raise \"must never execute\"").expect("mix fixture");
+        let preview = initialize(&[], &root).expect("preview");
+        assert!(preview.contains("Detected Elixir/Mix"));
+        assert!(preview.contains("run: mix test"));
+        assert!(!root.join(DEFAULT_WORKFLOW).exists());
+        initialize(&["--yes".into()], &root).expect("write workflow");
+        assert!(fs::read_to_string(root.join(DEFAULT_WORKFLOW)).unwrap().contains("mix deps.get"));
+        assert_eq!(initialize(&["--yes".into()], &root).unwrap_err().0, 4);
+        fs::remove_dir_all(root).expect("cleanup repository");
+
+        let root = std::env::temp_dir().join(format!("robine-init-{}", Uuid::new_v4()));
+        fs::create_dir(&root).expect("temporary repository");
+        fs::write(root.join("package.json"), "not even parsed").expect("node fixture");
+        let preview = initialize(&[], &root).expect("preview");
+        assert!(preview.contains("Detected Node.js"));
+        assert!(preview.contains("run: npm ci"));
+        fs::remove_dir_all(root).expect("cleanup repository");
     }
 
     #[test]

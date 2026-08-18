@@ -246,11 +246,12 @@ impl Database {
         let records = sqlx::query_as::<_, PipelineRecordRow>(
             "SELECT id, repository_id, workflow_name, commit_sha, status, inserted_at \
              FROM pipelines \
-             WHERE ($2::uuid IS NULL OR repository_id = $2) \
+             WHERE tenant_id = $3 AND ($2::uuid IS NULL OR repository_id = $2) \
              ORDER BY inserted_at DESC, id DESC LIMIT $1",
         )
         .bind(limit.clamp(1, 100))
         .bind(repository_id)
+        .bind(tenant_id)
         .fetch_all(&mut *transaction)
         .await?;
         transaction.commit().await?;

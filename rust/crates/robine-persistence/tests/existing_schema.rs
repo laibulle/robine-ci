@@ -12,6 +12,7 @@ use chrono::{Duration, Timelike, Utc};
 use hmac::{Hmac, Mac};
 use robine_application::{ApplicationError, ControlPlane, RetentionConfig};
 use robine_core::{
+    execution_context::{Actor, ActorKind, Capability, ExecutionContext},
     identity::{OidcAuthorization, OidcClaims, Role, User},
     pipelines::{
         CreatePipelineInput, JobState, NewJob, NewPipeline, NewWorkflowRevision,
@@ -44,6 +45,99 @@ struct WorkflowArchive(Vec<u8>);
 
 #[derive(Default)]
 struct RecordingStatusProjector(AtomicI64);
+
+#[tokio::test]
+async fn embedded_application_boundary_derives_pipeline_scope_from_context() {
+    let Ok(database_url) = std::env::var("ROBINE_DATABASE_INTEGRATION_URL") else {
+        return;
+    };
+    let database = Arc::new(Database::connect(&database_url, 3).await.expect("database"));
+    let suffix = Uuid::new_v4();
+    let tenants = [
+        format!("embedded-a-{suffix}"),
+        format!("embedded-b-{suffix}"),
+    ];
+    let mut pipeline_ids = Vec::new();
+    let mut repository_ids = Vec::new();
+    for (position, tenant) in tenants.iter().enumerate() {
+        let repository_id = Uuid::new_v4();
+        let pipeline_id = Uuid::new_v4();
+        let mut transaction = database
+            .tenant_transaction(tenant)
+            .await
+            .expect("tenant setup");
+        let provider_id =
+            i64::from_be_bytes(repository_id.as_bytes()[..8].try_into().unwrap()) & i64::MAX;
+        sqlx::query("INSERT INTO github_repositories (id, provider_id, installation_id, owner, name, full_name, trusted, inserted_at, provider, provider_instance, tenant_id) VALUES ($1, $2, 1, 'embedded', $3, $4, TRUE, $5, 'github', 'https://github.com', $6)")
+            .bind(repository_id).bind(provider_id)
+            .bind(format!("repository-{position}"))
+            .bind(format!("embedded/repository-{position}"))
+            .bind(Utc::now()).bind(tenant).execute(&mut *transaction).await.expect("repository");
+        sqlx::query("INSERT INTO pipelines (id, repository_id, workflow_name, commit_sha, status, inserted_at, tenant_id) VALUES ($1, $2, $3, $4, 'succeeded', $5, $6)")
+            .bind(pipeline_id).bind(repository_id).bind(format!("tenant-{position}"))
+            .bind(if position == 0 { "a".repeat(40) } else { "b".repeat(40) })
+            .bind(Utc::now()).bind(tenant).execute(&mut *transaction).await.expect("pipeline");
+        transaction.commit().await.expect("commit setup");
+        pipeline_ids.push(pipeline_id);
+        repository_ids.push(repository_id);
+    }
+    let control_plane = ControlPlane::new(database.clone(), database.clone());
+    for (position, tenant) in tenants.iter().enumerate() {
+        let context = ExecutionContext::embedded(
+            Actor {
+                id: "host-user".into(),
+                kind: ActorKind::User,
+            },
+            tenant,
+            [Capability::new("pipelines:read")],
+            Uuid::new_v4(),
+        )
+        .expect("embedded context");
+        let visible = control_plane
+            .list_pipelines_for_context(&context, None, 50)
+            .await
+            .expect("embedded query");
+        assert_eq!(
+            visible
+                .iter()
+                .map(|pipeline| pipeline.id)
+                .collect::<Vec<_>>(),
+            [pipeline_ids[position]]
+        );
+    }
+    let forbidden = ExecutionContext::embedded(
+        Actor {
+            id: "host-user".into(),
+            kind: ActorKind::User,
+        },
+        &tenants[0],
+        [Capability::new("pipelines:run")],
+        Uuid::new_v4(),
+    )
+    .expect("embedded context");
+    assert!(matches!(
+        control_plane
+            .list_pipelines_for_context(&forbidden, None, 50)
+            .await,
+        Err(ApplicationError::Forbidden)
+    ));
+    for ((tenant, pipeline_id), repository_id) in
+        tenants.iter().zip(pipeline_ids).zip(repository_ids)
+    {
+        let mut transaction = database.tenant_transaction(tenant).await.expect("cleanup");
+        sqlx::query("DELETE FROM pipelines WHERE id = $1")
+            .bind(pipeline_id)
+            .execute(&mut *transaction)
+            .await
+            .expect("delete pipeline");
+        sqlx::query("DELETE FROM github_repositories WHERE id = $1")
+            .bind(repository_id)
+            .execute(&mut *transaction)
+            .await
+            .expect("delete repository");
+        transaction.commit().await.expect("commit cleanup");
+    }
+}
 
 #[tokio::test]
 async fn instance_github_credentials_are_encrypted_write_only_and_replaceable() {
