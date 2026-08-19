@@ -20,6 +20,7 @@ defmodule RobineWeb.RepositoryLive.Index do
        repository_load_error: false,
        repository_count: 0,
        result_count: 0,
+       repository_summary: empty_repository_summary(),
        available_repositories: [],
        available_count: 0,
        discovery_query: "",
@@ -163,12 +164,18 @@ defmodule RobineWeb.RepositoryLive.Index do
         |> assign(
           repository_load_error: false,
           repository_count: length(enriched),
-          result_count: length(filtered)
+          result_count: length(filtered),
+          repository_summary: summarize_repositories(enriched)
         )
         |> stream(:repositories, filtered, reset: true)
 
       {:error, _reason} ->
-        assign(socket, repository_load_error: true, repository_count: 0, result_count: 0)
+        assign(socket,
+          repository_load_error: true,
+          repository_count: 0,
+          result_count: 0,
+          repository_summary: empty_repository_summary()
+        )
     end
   end
 
@@ -282,6 +289,34 @@ defmodule RobineWeb.RepositoryLive.Index do
   defp active_filters?(filters), do: compact_filters(filters) != %{}
   defp active_status?(status), do: status in @active_statuses
 
+  defp empty_repository_summary,
+    do: %{attention: 0, active_runs: 0, healthy: 0, inactive: 0, unknown: 0}
+
+  defp summarize_repositories(repositories) do
+    Enum.reduce(repositories, empty_repository_summary(), fn repository, summary ->
+      summary
+      |> Map.update!(:active_runs, &(&1 + repository.active_count))
+      |> Map.update!(repository.activity_state, &(&1 + 1))
+    end)
+  end
+
+  defp sort_label("name"), do: "Alphabetical"
+  defp sort_label("connected"), do: "Newest connections"
+  defp sort_label(_activity), do: "Latest activity"
+
+  defp repository_owner(repository), do: repository.owner
+  defp repository_name(repository), do: repository.name
+
+  defp activity_label(:attention), do: "Needs attention"
+  defp activity_label(:healthy), do: "Operating normally"
+  defp activity_label(:inactive), do: "Waiting for a first run"
+  defp activity_label(:unknown), do: "Activity unavailable"
+
+  defp activity_icon(:attention), do: "hero-exclamation-triangle"
+  defp activity_icon(:healthy), do: "hero-check-circle"
+  defp activity_icon(:inactive), do: "hero-moon"
+  defp activity_icon(:unknown), do: "hero-question-mark-circle"
+
   defp provider_label(:github), do: "GitHub"
 
   defp discovery_installation(:github, repository),
@@ -305,39 +340,83 @@ defmodule RobineWeb.RepositoryLive.Index do
   def render(assigns) do
     ~H"""
     <Layouts.app flash={@flash} current_actor={@current_actor} nav_section={:repositories}>
-      <section class="space-y-7">
-        <.page_header
-          eyebrow="Your source, close by"
-          title="Repositories"
-          description="The projects you care about, their latest signals, and exactly what Robine is trusted to run."
-        >
-          <:actions>
-            <a
-              :if={@current_actor.role == :administrator}
-              id="connect-repository-action"
-              href="#connect-repositories"
-              phx-click="open-connect-repositories"
-              class="btn btn-primary"
-            >
-              <.icon name="hero-plus" class="size-4" /> Connect repository
-            </a>
-          </:actions>
-        </.page_header>
+      <section class="space-y-8">
+        <header class="repository-hero">
+          <div class="repository-hero-copy">
+            <div class="flex items-center gap-3">
+              <span class="repository-hero-index">01</span>
+              <p class="page-eyebrow">Source field</p>
+            </div>
+            <h1 class="repository-hero-title">
+              A living index of<br />everything Robine<br />is trusted to run.
+            </h1>
+            <p class="repository-hero-description">
+              Not a wall of settings. A precise view of the projects moving, resting, or asking for your attention.
+            </p>
+            <div class="mt-8 flex flex-wrap items-center gap-3">
+              <a
+                :if={@current_actor.role == :administrator}
+                id="connect-repository-action"
+                href="#connect-repositories"
+                phx-click="open-connect-repositories"
+                class="btn btn-primary"
+              >
+                <.icon name="hero-plus" class="size-4" /> Connect repository
+              </a>
+              <.link navigate={~p"/pipelines"} class="repository-text-link">
+                All pipelines <.icon name="hero-arrow-long-right" class="size-4" />
+              </.link>
+            </div>
+          </div>
+
+          <div class="repository-landscape" aria-hidden="true">
+            <span class="repository-landscape-word">ROBINE</span>
+            <span class="repository-landscape-axis"></span>
+            <span class="repository-landscape-orbit repository-landscape-orbit-one"></span>
+            <span class="repository-landscape-orbit repository-landscape-orbit-two"></span>
+            <span class="repository-landscape-node repository-landscape-node-one"></span>
+            <span class="repository-landscape-node repository-landscape-node-two"></span>
+            <span class="repository-landscape-node repository-landscape-node-three"></span>
+            <span class="repository-landscape-monogram">R</span>
+          </div>
+
+          <dl id="repository-overview" class="repository-pulse" aria-label="Repository overview">
+            <div>
+              <dt>Trusted</dt>
+              <dd>{@repository_count}</dd>
+            </div>
+            <div>
+              <dt>Needs attention</dt>
+              <dd>{@repository_summary.attention}</dd>
+            </div>
+            <div>
+              <dt>Runs in motion</dt>
+              <dd>{@repository_summary.active_runs}</dd>
+            </div>
+            <div>
+              <dt>Quietly healthy</dt>
+              <dd>{@repository_summary.healthy}</dd>
+            </div>
+          </dl>
+        </header>
 
         <.form
           for={@filter_form}
           id="repository-filters"
           phx-change="filter"
-          class="surface-panel grid gap-3 rounded-2xl p-3 md:grid-cols-2 md:items-end xl:grid-cols-[minmax(15rem,1fr)_11rem_12rem_11rem_auto]"
+          class="repository-filter-bar grid gap-3 py-4 md:grid-cols-2 md:items-end xl:grid-cols-[minmax(18rem,1fr)_10rem_11rem_11rem_auto]"
         >
-          <.input
-            field={@filter_form[:query]}
-            id="repository-search"
-            type="search"
-            label="Search repositories"
-            placeholder="Owner or repository"
-            phx-debounce="250"
-          />
+          <div class="repository-search-wrap">
+            <.icon name="hero-magnifying-glass" class="repository-search-icon size-4" />
+            <.input
+              field={@filter_form[:query]}
+              id="repository-search"
+              type="search"
+              label="Find a repository"
+              placeholder="Search owner or project…"
+              phx-debounce="250"
+            />
+          </div>
           <.input
             field={@filter_form[:provider]}
             id="repository-provider-filter"
@@ -379,22 +458,16 @@ defmodule RobineWeb.RepositoryLive.Index do
           >Clear</.link>
         </.form>
 
-        <div class="flex items-center justify-between text-sm">
-          <p id="repository-result-count" class="font-semibold">
+        <div class="repository-catalogue-heading">
+          <p id="repository-result-count" class="flex items-center gap-2 font-bold">
+            <span class="repository-catalogue-number">02</span>
             {@result_count} {if(@result_count == 1, do: "repository", else: "repositories")}
             <span :if={@result_count != @repository_count} class="font-normal text-base-content/45">
               of {@repository_count}
             </span>
           </p>
-          <span class="text-xs text-base-content/40">
-            {if(@filters["sort"] == "name",
-              do: "Sorted by name",
-              else:
-                if(@filters["sort"] == "connected",
-                  do: "Newest connections first",
-                  else: "Latest activity first"
-                )
-            )}
+          <span class="flex items-center gap-1.5 text-xs text-base-content/40">
+            <.icon name="hero-arrows-up-down" class="size-3.5" /> {sort_label(@filters["sort"])}
           </span>
         </div>
 
@@ -428,59 +501,72 @@ defmodule RobineWeb.RepositoryLive.Index do
           </:actions>
         </.ui_state>
 
-        <div id="trusted-repositories" phx-update="stream" class="grid gap-3">
+        <div id="trusted-repositories" phx-update="stream" class="repository-ledger">
           <article
             :for={{id, repository} <- @streams.repositories}
             id={id}
-            class="surface-panel group relative grid gap-4 overflow-hidden rounded-2xl p-5 transition hover:-translate-y-0.5 hover:border-primary/35 hover:shadow-panel focus-within:outline-3 focus-within:outline-offset-2 focus-within:outline-primary md:grid-cols-[minmax(0,1.4fr)_minmax(12rem,0.8fr)_auto] md:items-center"
+            data-activity={repository.activity_state}
+            class="repository-card group relative focus-within:outline-3 focus-within:outline-offset-2 focus-within:outline-primary"
           >
-            <div class="min-w-0">
-              <div class="flex flex-wrap items-center gap-2">
-                <span class="badge badge-outline badge-sm">{provider_label(repository.provider)}</span>
-                <span class="badge badge-success badge-sm">Trusted</span>
-                <span class="badge badge-ghost badge-sm">Health unchecked</span>
+            <div class="repository-card-signal" aria-hidden="true"></div>
+            <div class="repository-card-body">
+              <div class="repository-card-identity">
+                <span class="repository-row-number" aria-hidden="true"></span>
+                <div class="min-w-0">
+                  <div class="flex flex-wrap items-center gap-2">
+                    <span class="repository-provider">{provider_label(repository.provider)}</span>
+                    <span class="repository-trust"><.icon
+                      name="hero-lock-closed-micro"
+                      class="size-3"
+                    /> Trusted</span>
+                    <span class="repository-health">Health unchecked</span>
+                  </div>
+                  <.link
+                    navigate={~p"/repositories/#{repository.id}"}
+                    class="repository-name"
+                    aria-label={"Open #{repository.full_name}"}
+                  >
+                    <span>{repository_owner(repository)}</span><span class="repository-name-slash">/</span><strong>{repository_name(
+                      repository
+                    )}</strong>
+                  </.link>
+                  <p class="repository-activity-copy">
+                    <.icon name={activity_icon(repository.activity_state)} class="size-3.5" />
+                    {activity_label(repository.activity_state)}
+                    <span aria-hidden="true">·</span> {repository.provider_instance}
+                  </p>
+                </div>
               </div>
-              <.link
-                navigate={~p"/repositories/#{repository.id}"}
-                class="mt-2 block truncate text-lg font-bold after:absolute after:inset-0 group-hover:text-primary"
-                aria-label={"Open #{repository.full_name}"}
-              >{repository.full_name}</.link>
-              <p class="mt-1 text-xs text-base-content/45">Instance {repository.provider_instance}</p>
-            </div>
 
-            <div class="grid grid-cols-2 gap-3 text-sm sm:grid-cols-3">
-              <div>
-                <p class="text-[0.65rem] font-bold uppercase tracking-wider text-base-content/40">
-                  Active
-                </p>
-                <p class="mt-1 font-bold">{repository.active_count}</p>
+              <div class="repository-latest-signal">
+                <p>Latest signal</p>
+                <%= if repository.latest_pipeline do %>
+                  <div class="mt-2 flex min-w-0 items-center gap-2">
+                    <.status_badge status={repository.latest_pipeline.status} size="sm" />
+                    <span class="truncate text-sm font-bold">{repository.latest_pipeline.workflow_name}</span>
+                  </div>
+                  <span class="mt-1 block text-xs text-base-content/40">
+                    {relative_time(repository.latest_pipeline.inserted_at)}
+                  </span>
+                <% else %>
+                  <span class="mt-2 block text-sm font-semibold text-base-content/45">No pipelines yet</span>
+                <% end %>
               </div>
-              <div>
-                <p class="text-[0.65rem] font-bold uppercase tracking-wider text-base-content/40">
-                  Workflows
-                </p>
-                <p class="mt-1 font-bold">{repository.workflow_count}</p>
-              </div>
-              <div>
-                <p class="text-[0.65rem] font-bold uppercase tracking-wider text-base-content/40">
-                  Last activity
-                </p>
-                <p class="mt-1 font-semibold">
-                  {relative_time(repository.latest_pipeline && repository.latest_pipeline.inserted_at)}
-                </p>
-              </div>
-            </div>
 
-            <div class="flex items-center justify-between gap-3 border-t border-base-300/60 pt-3 md:block md:border-0 md:pt-0 md:text-right">
-              <%= if repository.latest_pipeline do %>
-                <.status_badge status={repository.latest_pipeline.status} size="sm" />
-                <p class="mt-1 max-w-44 truncate text-xs text-base-content/50">
-                  {repository.latest_pipeline.workflow_name}
-                </p>
-              <% else %>
-                <span class="text-xs font-semibold text-base-content/45">No pipelines yet</span>
-              <% end %>
+              <dl class="repository-card-metrics">
+                <div>
+                  <dt>Active</dt>
+                  <dd>{repository.active_count}</dd>
+                </div>
+                <div>
+                  <dt>Workflows</dt>
+                  <dd>{repository.workflow_count}</dd>
+                </div>
+              </dl>
             </div>
+            <span class="repository-card-arrow" aria-hidden="true">
+              <.icon name="hero-arrow-up-right" class="size-4" />
+            </span>
           </article>
         </div>
 
@@ -488,12 +574,19 @@ defmodule RobineWeb.RepositoryLive.Index do
           :if={@current_actor.role == :administrator}
           id="connect-repositories"
           open={@connect_repositories_open? or @discovery_state != :not_run}
-          class="surface-panel scroll-mt-8 rounded-2xl"
+          class="connect-repositories-panel scroll-mt-8 rounded-2xl"
         >
-          <summary class="cursor-pointer list-none rounded-2xl p-5 font-bold focus-visible:outline-3 focus-visible:outline-primary">
-            <span class="flex items-center justify-between gap-3">
-              <span><.icon name="hero-link" class="mr-2 inline size-4" />Connect repositories</span>
-              <span class="text-xs font-normal text-base-content/45">Administrative action</span>
+          <summary class="group cursor-pointer list-none rounded-2xl p-5 focus-visible:outline-3 focus-visible:outline-primary sm:p-6">
+            <span class="flex items-center gap-4">
+              <span class="grid size-10 shrink-0 place-items-center rounded-xl bg-primary/10 text-primary">
+                <.icon name="hero-link" class="size-5" />
+              </span>
+              <span class="min-w-0 flex-1">
+                <span class="block font-extrabold">Connect another project</span>
+                <span class="mt-0.5 block text-xs font-normal text-base-content/45">Discover, review, then grant execution trust</span>
+              </span>
+              <span class="hidden text-[0.65rem] font-bold uppercase tracking-wider text-base-content/35 sm:block">Admin only</span>
+              <.icon name="hero-chevron-down" class="size-4 transition group-open:rotate-180" />
             </span>
           </summary>
           <div class="border-t border-base-300/70 p-5 sm:p-6">

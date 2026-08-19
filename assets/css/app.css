@@ -430,6 +430,295 @@
   .app-mobile-nav {
     box-shadow: 0 -12px 40px color-mix(in oklab, var(--color-base-content) 10%, transparent);
   }
+
+  .connect-repositories-panel {
+    border: 1px dashed color-mix(in oklab, var(--color-base-content) 20%, transparent);
+    background: color-mix(in oklab, var(--color-base-100) 62%, transparent);
+  }
+
+  .connect-repositories-panel[open] {
+    border-style: solid;
+    border-color: color-mix(in oklab, var(--color-primary) 25%, transparent);
+    background: color-mix(in oklab, var(--color-base-100) 92%, transparent);
+    box-shadow: 0 18px 48px color-mix(in oklab, var(--color-base-content) 5%, transparent);
+  }
+
+  .connect-repositories-panel[open] summary .hero-chevron-down {
+    transform: rotate(180deg);
+  }
+
+  /* Repository field: an editorial catalogue, deliberately quieter than a dashboard. */
+  .repository-hero {
+    grid-template-columns: 1fr;
+    gap: 1rem;
+    overflow: visible;
+    border: 0;
+    border-radius: 0;
+    padding: 1rem 0 0;
+    background: none;
+    box-shadow: none;
+  }
+
+  .repository-hero::before {
+    top: -6rem;
+    right: 5%;
+    width: 28rem;
+    height: 28rem;
+    border: 0;
+    border-radius: 50%;
+    background: radial-gradient(circle, color-mix(in oklab, var(--color-primary) 9%, transparent), transparent 67%);
+    transform: none;
+    filter: blur(12px);
+  }
+
+  .repository-hero-index,
+  .repository-catalogue-number {
+    display: inline-grid;
+    width: 2rem;
+    height: 2rem;
+    place-items: center;
+    border: 1px solid color-mix(in oklab, var(--color-base-content) 16%, transparent);
+    border-radius: 50%;
+    color: color-mix(in oklab, var(--color-base-content) 40%, transparent);
+    font-size: 0.6rem;
+    font-weight: 800;
+    letter-spacing: 0.08em;
+  }
+
+  .repository-hero-title {
+    margin-top: 1.65rem;
+    max-width: 48rem;
+    font-size: clamp(2.8rem, 7vw, 5.65rem);
+    font-weight: 880;
+    line-height: 0.91;
+    letter-spacing: -0.068em;
+  }
+
+  .repository-hero-description {
+    max-width: 35rem;
+    margin-top: 1.75rem;
+    color: color-mix(in oklab, var(--color-base-content) 57%, transparent);
+    font-size: 0.96rem;
+    line-height: 1.7;
+  }
+
+  .repository-text-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.65rem 0.25rem;
+    color: color-mix(in oklab, var(--color-base-content) 55%, transparent);
+    font-size: 0.78rem;
+    font-weight: 760;
+    transition: gap 160ms ease, color 160ms ease;
+  }
+
+  .repository-text-link:hover { gap: 0.75rem; color: var(--color-primary); }
+
+  .repository-landscape {
+    position: relative;
+    min-height: 20rem;
+    overflow: hidden;
+    border-radius: 50% 50% 1.75rem 1.75rem;
+    background:
+      linear-gradient(155deg, color-mix(in oklab, var(--color-primary) 12%, transparent), transparent 45%),
+      linear-gradient(25deg, color-mix(in oklab, var(--color-accent) 9%, transparent), transparent 50%);
+  }
+
+  .repository-landscape-word {
+    position: absolute;
+    right: -0.35rem;
+    bottom: -0.75rem;
+    color: color-mix(in oklab, var(--color-base-content) 4.5%, transparent);
+    font-size: clamp(4rem, 10vw, 8.5rem);
+    font-weight: 950;
+    line-height: 1;
+    letter-spacing: -0.08em;
+  }
+
+  .repository-landscape-axis {
+    position: absolute;
+    inset: 50% 10% auto;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, color-mix(in oklab, var(--color-primary) 45%, transparent), transparent);
+    transform: rotate(-33deg);
+  }
+
+  .repository-landscape-orbit {
+    position: absolute;
+    border: 1px solid color-mix(in oklab, var(--color-base-content) 12%, transparent);
+    border-radius: 50%;
+  }
+
+  .repository-landscape-orbit-one { inset: 13% 12% 10% 16%; transform: rotate(-18deg); }
+  .repository-landscape-orbit-two { inset: 27% 25% 22% 2%; transform: rotate(31deg); }
+
+  .repository-landscape-node {
+    position: absolute;
+    width: 0.65rem;
+    height: 0.65rem;
+    border-radius: 50%;
+    background: var(--color-primary);
+    box-shadow: 0 0 0 0.45rem color-mix(in oklab, var(--color-primary) 11%, transparent);
+  }
+
+  .repository-landscape-node-one { top: 19%; right: 26%; }
+  .repository-landscape-node-two { right: 13%; bottom: 27%; background: var(--color-accent); }
+  .repository-landscape-node-three { bottom: 19%; left: 19%; width: 0.4rem; height: 0.4rem; }
+
+  .repository-landscape-monogram {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    display: grid;
+    width: 5.5rem;
+    height: 5.5rem;
+    place-items: center;
+    border: 1px solid color-mix(in oklab, var(--color-primary) 30%, transparent);
+    border-radius: 50%;
+    background: color-mix(in oklab, var(--color-base-100) 62%, transparent);
+    color: var(--color-primary);
+    font-size: 2.2rem;
+    font-weight: 950;
+    transform: translate(-50%, -50%);
+    backdrop-filter: blur(12px);
+  }
+
+  .repository-pulse {
+    position: relative;
+    z-index: 1;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-column: 1 / -1;
+    margin-top: 1.5rem;
+    border-block: 1px solid color-mix(in oklab, var(--color-base-content) 12%, transparent);
+  }
+
+  .repository-pulse > div { padding: 1rem 0.5rem; }
+  .repository-pulse dt { color: color-mix(in oklab, var(--color-base-content) 43%, transparent); font-size: 0.64rem; font-weight: 720; }
+  .repository-pulse dd { margin-top: 0.25rem; font-size: 1.25rem; font-weight: 850; font-variant-numeric: tabular-nums; }
+
+  .repository-filter-bar {
+    border: 0;
+    border-bottom: 1px solid color-mix(in oklab, var(--color-base-content) 12%, transparent);
+    border-radius: 0;
+    background: none;
+    box-shadow: none;
+  }
+
+  .repository-search-wrap { position: relative; }
+  .repository-search-icon { position: absolute; z-index: 1; right: 0.85rem; bottom: 0.8rem; color: color-mix(in oklab, var(--color-base-content) 35%, transparent); pointer-events: none; }
+
+  .repository-catalogue-heading {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding-top: 1rem;
+    font-size: 0.8rem;
+  }
+
+  .repository-ledger {
+    counter-reset: repository-row;
+    border-top: 1px solid color-mix(in oklab, var(--color-base-content) 17%, transparent);
+  }
+
+  .repository-card {
+    counter-increment: repository-row;
+    overflow: hidden;
+    border: 0;
+    border-bottom: 1px solid color-mix(in oklab, var(--color-base-content) 12%, transparent);
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+    transform: none;
+  }
+
+  .repository-card:hover {
+    border-color: color-mix(in oklab, var(--color-primary) 30%, transparent);
+    background: linear-gradient(90deg, color-mix(in oklab, var(--color-primary) 7%, transparent), transparent 78%);
+    box-shadow: none;
+    transform: none;
+  }
+
+  .repository-card-signal { inset: auto 0 0; width: auto; height: 2px; background: var(--color-base-300); transform: scaleX(0); transform-origin: left; transition: transform 220ms ease; }
+  .repository-card[data-activity="attention"] .repository-card-signal { background: var(--color-error); }
+  .repository-card[data-activity="healthy"] .repository-card-signal { background: var(--color-success); }
+  .repository-card[data-activity="inactive"] .repository-card-signal { background: var(--color-accent); }
+  .repository-card:hover .repository-card-signal { transform: scaleX(1); }
+
+  .repository-card-body {
+    display: grid;
+    gap: 1.5rem;
+    padding: 1.6rem 2.75rem 1.6rem 0;
+  }
+
+  .repository-card-identity { display: flex; min-width: 0; gap: 1rem; align-items: flex-start; }
+  .repository-row-number { flex: none; padding-top: 0.15rem; color: color-mix(in oklab, var(--color-base-content) 26%, transparent); font-family: "SFMono-Regular", Consolas, monospace; font-size: 0.62rem; }
+  .repository-row-number::before { content: counter(repository-row, decimal-leading-zero); }
+
+  .repository-provider,
+  .repository-trust,
+  .repository-health {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    border-radius: 999px;
+    padding: 0.23rem 0.52rem;
+    font-size: 0.58rem;
+    font-weight: 760;
+    line-height: 1;
+  }
+
+  .repository-provider { border: 1px solid color-mix(in oklab, var(--color-base-content) 15%, transparent); color: color-mix(in oklab, var(--color-base-content) 58%, transparent); }
+  .repository-trust { background: color-mix(in oklab, var(--color-success) 12%, transparent); color: color-mix(in oklab, var(--color-success) 68%, var(--color-base-content)); }
+  .repository-health { color: color-mix(in oklab, var(--color-base-content) 38%, transparent); }
+
+  .repository-name {
+    display: flex;
+    min-width: 0;
+    align-items: baseline;
+    gap: 0.38rem;
+    margin-top: 0.75rem;
+    font-size: clamp(1.35rem, 3vw, 2rem);
+    font-weight: 500;
+    letter-spacing: -0.045em;
+  }
+
+  .repository-name > span:first-child { overflow: hidden; color: color-mix(in oklab, var(--color-base-content) 40%, transparent); text-overflow: ellipsis; }
+  .repository-name strong { overflow: hidden; font-weight: 850; text-overflow: ellipsis; }
+  .repository-name-slash { color: color-mix(in oklab, var(--color-primary) 55%, transparent); }
+  .repository-card:hover .repository-name strong { color: var(--color-primary); }
+
+  .repository-activity-copy { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; margin-top: 0.45rem; color: color-mix(in oklab, var(--color-base-content) 44%, transparent); font-size: 0.68rem; }
+  .repository-latest-signal > p { color: color-mix(in oklab, var(--color-base-content) 38%, transparent); font-size: 0.62rem; font-weight: 760; text-transform: uppercase; letter-spacing: 0.1em; }
+
+  .repository-card-metrics {
+    display: flex;
+    gap: 1.5rem;
+    overflow: visible;
+    border: 0;
+    border-radius: 0;
+    background: none;
+  }
+
+  .repository-card-metrics > div { padding: 0; background: none; }
+  .repository-card-metrics dt { color: color-mix(in oklab, var(--color-base-content) 38%, transparent); font-size: 0.62rem; font-weight: 700; }
+  .repository-card-metrics dd { margin-top: 0.2rem; font-size: 1.05rem; font-weight: 850; }
+  .repository-card-arrow { top: 50%; right: 0.2rem; transform: translateY(-50%); }
+  .repository-card:hover .repository-card-arrow { background: none; transform: translate(2px, -50%); }
+
+  @media (min-width: 48rem) {
+    .repository-pulse { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .repository-pulse > div + div { border-left: 1px solid color-mix(in oklab, var(--color-base-content) 10%, transparent); }
+    .repository-card-body { grid-template-columns: minmax(0, 1.4fr) minmax(10rem, 0.65fr) auto; align-items: center; }
+  }
+
+  @media (min-width: 64rem) {
+    .repository-hero { grid-template-columns: minmax(0, 1.18fr) minmax(21rem, 0.82fr); column-gap: clamp(2rem, 6vw, 6rem); }
+    .repository-landscape { min-height: 29rem; }
+  }
 }
 
 /* Make LiveView wrapper divs transparent for layout */
