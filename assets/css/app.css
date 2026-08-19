@@ -536,6 +536,105 @@
     letter-spacing: -0.08em;
   }
 
+  .repository-focus-link {
+    position: relative;
+    z-index: 2;
+    display: flex;
+    min-height: 20rem;
+    flex-direction: column;
+    justify-content: flex-end;
+    padding: clamp(1.4rem, 4vw, 2.5rem);
+    color: var(--color-base-content);
+    background: linear-gradient(0deg, color-mix(in oklab, var(--color-base-100) 82%, transparent), transparent 78%);
+  }
+
+  .repository-focus-kicker {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    color: color-mix(in oklab, var(--color-base-content) 52%, transparent);
+    font-size: 0.62rem;
+    font-weight: 800;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+  }
+
+  .repository-focus-beacon {
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background: var(--color-primary);
+    box-shadow: 0 0 0 0.35rem color-mix(in oklab, var(--color-primary) 12%, transparent);
+  }
+
+  .repository-focus-name {
+    display: flex;
+    min-width: 0;
+    align-items: baseline;
+    gap: 0.45rem;
+    margin-top: 1rem;
+    font-size: clamp(1.65rem, 4vw, 2.7rem);
+    line-height: 1;
+    letter-spacing: -0.055em;
+  }
+
+  .repository-focus-name > span { overflow: hidden; color: color-mix(in oklab, var(--color-base-content) 42%, transparent); text-overflow: ellipsis; }
+  .repository-focus-name strong { overflow: hidden; font-weight: 900; text-overflow: ellipsis; }
+
+  .repository-focus-workflow {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 0.6rem;
+    margin-top: 0.9rem;
+    font-size: 0.78rem;
+    font-weight: 700;
+  }
+
+  .repository-focus-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.7rem 1.2rem;
+    margin-top: 1.4rem;
+    padding-top: 1rem;
+    border-top: 1px solid color-mix(in oklab, var(--color-base-content) 12%, transparent);
+    color: color-mix(in oklab, var(--color-base-content) 48%, transparent);
+    font-size: 0.65rem;
+  }
+
+  .repository-focus-meta strong { color: var(--color-base-content); font-size: 0.8rem; }
+
+  .repository-focus-action {
+    position: absolute;
+    top: 1.25rem;
+    right: 1.25rem;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    color: color-mix(in oklab, var(--color-base-content) 44%, transparent);
+    font-size: 0.65rem;
+    font-weight: 750;
+    transition: gap 160ms ease, color 160ms ease;
+  }
+
+  .repository-focus-link:hover .repository-focus-action { gap: 0.65rem; color: var(--color-primary); }
+  .repository-focus-link:hover .repository-focus-name strong { color: var(--color-primary); }
+
+  .repository-focus-empty {
+    position: relative;
+    z-index: 2;
+    display: grid;
+    min-height: 20rem;
+    place-content: center;
+    justify-items: center;
+    gap: 0.4rem;
+    color: color-mix(in oklab, var(--color-base-content) 45%, transparent);
+    text-align: center;
+  }
+
+  .repository-focus-empty p { color: var(--color-base-content); font-weight: 800; }
+  .repository-focus-empty span { font-size: 0.7rem; }
+
   .repository-landscape-axis {
     position: absolute;
     inset: 50% 10% auto;
@@ -552,37 +651,6 @@
 
   .repository-landscape-orbit-one { inset: 13% 12% 10% 16%; transform: rotate(-18deg); }
   .repository-landscape-orbit-two { inset: 27% 25% 22% 2%; transform: rotate(31deg); }
-
-  .repository-landscape-node {
-    position: absolute;
-    width: 0.65rem;
-    height: 0.65rem;
-    border-radius: 50%;
-    background: var(--color-primary);
-    box-shadow: 0 0 0 0.45rem color-mix(in oklab, var(--color-primary) 11%, transparent);
-  }
-
-  .repository-landscape-node-one { top: 19%; right: 26%; }
-  .repository-landscape-node-two { right: 13%; bottom: 27%; background: var(--color-accent); }
-  .repository-landscape-node-three { bottom: 19%; left: 19%; width: 0.4rem; height: 0.4rem; }
-
-  .repository-landscape-monogram {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    display: grid;
-    width: 5.5rem;
-    height: 5.5rem;
-    place-items: center;
-    border: 1px solid color-mix(in oklab, var(--color-primary) 30%, transparent);
-    border-radius: 50%;
-    background: color-mix(in oklab, var(--color-base-100) 62%, transparent);
-    color: var(--color-primary);
-    font-size: 2.2rem;
-    font-weight: 950;
-    transform: translate(-50%, -50%);
-    backdrop-filter: blur(12px);
-  }
 
   .repository-pulse {
     position: relative;
@@ -717,7 +785,8 @@
 
   @media (min-width: 64rem) {
     .repository-hero { grid-template-columns: minmax(0, 1.18fr) minmax(21rem, 0.82fr); column-gap: clamp(2rem, 6vw, 6rem); }
-    .repository-landscape { min-height: 29rem; }
+    .repository-landscape { min-height: 24rem; }
+    .repository-focus-link, .repository-focus-empty { min-height: 24rem; }
   }
 }
 

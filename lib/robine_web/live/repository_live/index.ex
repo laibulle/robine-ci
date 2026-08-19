@@ -21,6 +21,7 @@ defmodule RobineWeb.RepositoryLive.Index do
        repository_count: 0,
        result_count: 0,
        repository_summary: empty_repository_summary(),
+       repository_spotlight: nil,
        available_repositories: [],
        available_count: 0,
        discovery_query: "",
@@ -165,7 +166,8 @@ defmodule RobineWeb.RepositoryLive.Index do
           repository_load_error: false,
           repository_count: length(enriched),
           result_count: length(filtered),
-          repository_summary: summarize_repositories(enriched)
+          repository_summary: summarize_repositories(enriched),
+          repository_spotlight: repository_spotlight(enriched)
         )
         |> stream(:repositories, filtered, reset: true)
 
@@ -174,7 +176,8 @@ defmodule RobineWeb.RepositoryLive.Index do
           repository_load_error: true,
           repository_count: 0,
           result_count: 0,
-          repository_summary: empty_repository_summary()
+          repository_summary: empty_repository_summary(),
+          repository_spotlight: nil
         )
     end
   end
@@ -300,6 +303,31 @@ defmodule RobineWeb.RepositoryLive.Index do
     end)
   end
 
+  defp repository_spotlight([]), do: nil
+
+  defp repository_spotlight(repositories) do
+    Enum.min_by(repositories, fn repository ->
+      latest_at =
+        if repository.latest_pipeline,
+          do: DateTime.to_unix(repository.latest_pipeline.inserted_at, :microsecond),
+          else: 0
+
+      {spotlight_priority(repository), -latest_at}
+    end)
+  end
+
+  defp spotlight_priority(%{latest_pipeline: %{status: :failed}}), do: 0
+  defp spotlight_priority(%{active_count: active_count}) when active_count > 0, do: 1
+  defp spotlight_priority(%{activity_state: :unknown}), do: 2
+  defp spotlight_priority(%{activity_state: :healthy}), do: 3
+  defp spotlight_priority(_repository), do: 4
+
+  defp spotlight_eyebrow(%{latest_pipeline: %{status: :failed}}), do: "Failure to inspect"
+  defp spotlight_eyebrow(%{active_count: active_count}) when active_count > 0, do: "Running now"
+  defp spotlight_eyebrow(%{activity_state: :unknown}), do: "Signal unavailable"
+  defp spotlight_eyebrow(%{activity_state: :healthy}), do: "Latest healthy signal"
+  defp spotlight_eyebrow(_repository), do: "Ready for a first run"
+
   defp sort_label("name"), do: "Alphabetical"
   defp sort_label("connected"), do: "Newest connections"
   defp sort_label(_activity), do: "Latest activity"
@@ -345,13 +373,11 @@ defmodule RobineWeb.RepositoryLive.Index do
           <div class="repository-hero-copy">
             <div class="flex items-center gap-3">
               <span class="repository-hero-index">01</span>
-              <p class="page-eyebrow">Source field</p>
+              <p class="page-eyebrow">Repository operations</p>
             </div>
-            <h1 class="repository-hero-title">
-              A living index of<br />everything Robine<br />is trusted to run.
-            </h1>
+            <h1 class="repository-hero-title">Repositories</h1>
             <p class="repository-hero-description">
-              Not a wall of settings. A precise view of the projects moving, resting, or asking for your attention.
+              Current execution posture across every project Robine is trusted to run.
             </p>
             <div class="mt-8 flex flex-wrap items-center gap-3">
               <a
@@ -369,15 +395,54 @@ defmodule RobineWeb.RepositoryLive.Index do
             </div>
           </div>
 
-          <div class="repository-landscape" aria-hidden="true">
-            <span class="repository-landscape-word">ROBINE</span>
-            <span class="repository-landscape-axis"></span>
-            <span class="repository-landscape-orbit repository-landscape-orbit-one"></span>
-            <span class="repository-landscape-orbit repository-landscape-orbit-two"></span>
-            <span class="repository-landscape-node repository-landscape-node-one"></span>
-            <span class="repository-landscape-node repository-landscape-node-two"></span>
-            <span class="repository-landscape-node repository-landscape-node-three"></span>
-            <span class="repository-landscape-monogram">R</span>
+          <div id="repository-focus" class="repository-landscape">
+            <span class="repository-landscape-word" aria-hidden="true">SIGNAL</span>
+            <span class="repository-landscape-axis" aria-hidden="true"></span>
+            <span class="repository-landscape-orbit repository-landscape-orbit-one" aria-hidden="true"></span>
+            <span class="repository-landscape-orbit repository-landscape-orbit-two" aria-hidden="true"></span>
+
+            <.link
+              :if={@repository_spotlight}
+              navigate={~p"/repositories/#{@repository_spotlight.id}"}
+              class="repository-focus-link group"
+              aria-label={"Open priority repository #{@repository_spotlight.full_name}"}
+            >
+              <span class="repository-focus-kicker">
+                <span class="repository-focus-beacon" aria-hidden="true"></span>
+                {spotlight_eyebrow(@repository_spotlight)}
+              </span>
+              <span class="repository-focus-name">
+                <span>{@repository_spotlight.owner} /</span>
+                <strong>{@repository_spotlight.name}</strong>
+              </span>
+              <%= if @repository_spotlight.latest_pipeline do %>
+                <span class="repository-focus-workflow">
+                  <.status_badge status={@repository_spotlight.latest_pipeline.status} size="sm" />
+                  <span class="truncate">{@repository_spotlight.latest_pipeline.workflow_name}</span>
+                </span>
+              <% else %>
+                <span class="repository-focus-workflow">No pipeline has run yet</span>
+              <% end %>
+              <span class="repository-focus-meta">
+                <span><strong>{@repository_spotlight.active_count}</strong> active</span>
+                <span><strong>{@repository_spotlight.workflow_count}</strong> workflows</span>
+                <span>
+                  {relative_time(
+                    @repository_spotlight.latest_pipeline &&
+                      @repository_spotlight.latest_pipeline.inserted_at
+                  )}
+                </span>
+              </span>
+              <span class="repository-focus-action">
+                Inspect repository <.icon name="hero-arrow-up-right" class="size-4" />
+              </span>
+            </.link>
+
+            <div :if={is_nil(@repository_spotlight)} class="repository-focus-empty">
+              <.icon name="hero-code-bracket-square" class="size-6" />
+              <p>No repository signal yet</p>
+              <span>Connect a trusted project to begin.</span>
+            </div>
           </div>
 
           <dl id="repository-overview" class="repository-pulse" aria-label="Repository overview">
