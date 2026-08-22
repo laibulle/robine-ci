@@ -215,8 +215,9 @@ defmodule RobineWeb.PipelineLiveTest do
                  attempt_id: attempt.id,
                  sequence: 1_000_001,
                  phase: :execution,
-                 step_position: 1,
-                 step_name: "Test",
+                 stream: :system,
+                 step_position: 0,
+                 step_name: "Runner preparation",
                  status: :failed,
                  duration_ms: 12,
                  content: "runner unavailable"
@@ -244,8 +245,16 @@ defmodule RobineWeb.PipelineLiveTest do
     assert {:ok, index_view, _index_html} = live(conn, ~p"/pipelines")
     assert has_element?(index_view, "#pipeline-#{pipeline.id}", "Failed in test")
 
-    assert {:ok, _view, html} = live(conn, ~p"/pipelines/#{pipeline.id}")
+    assert {:ok, view, html} = live(conn, ~p"/pipelines/#{pipeline.id}")
     assert html =~ "Infrastructure failure"
+    assert html =~ "runner unavailable"
+
+    assert has_element?(
+             view,
+             "#pipeline-failure-detail-#{attempt.job_id}",
+             "runner unavailable"
+           )
+
     assert html =~ "Trigger"
     assert html =~ "manual"
     assert html =~ "Actor"

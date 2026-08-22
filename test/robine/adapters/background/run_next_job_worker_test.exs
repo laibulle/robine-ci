@@ -119,4 +119,62 @@ defmodule Robine.Adapters.Background.RunNextJobWorkerTest do
     persisted_job = Repo.one!(from(job in Robine.Adapters.Persistence.Postgres.Schemas.Job))
     refute inspect(persisted_job.execution_spec) =~ "unpersisted-secret-value"
   end
+
+  test "persists an actionable diagnostic when a declared secret is missing" do
+    repository_id = Ecto.UUID.generate()
+    context = Dependencies.context(%{id: "admin", role: :administrator}, "missing-secret-runner")
+
+    assert {:ok, pipeline} =
+             Pipelines.create_pipeline(
+               %{
+                 repository_id: repository_id,
+                 workflow_name: "CI",
+                 commit_sha: String.duplicate("3", 40),
+                 jobs: %{
+                   "test" => %{
+                     needs: [],
+                     image: "postgres:18-alpine",
+                     secrets: ["MISSING_TOKEN"],
+                     steps: [%{name: "Check", kind: :run, value: "test -n \"$MISSING_TOKEN\""}]
+                   }
+                 }
+               },
+               context
+             )
+
+    outbox_job =
+      Repo.one!(from job in Oban.Job, where: job.queue == "outbox", order_by: [desc: job.id])
+
+    assert :ok = perform_job(OutboxDeliveryWorker, outbox_job.args)
+
+    scheduler_job =
+      Repo.one!(
+        from job in Oban.Job,
+          where: job.worker == ^inspect(RunNextJobWorker),
+          order_by: [desc: job.id]
+      )
+
+    assert {:error, {:secrets_missing, ["MISSING_TOKEN"]}} =
+             perform_job(RunNextJobWorker, scheduler_job.args)
+
+    attempt = Repo.one!(Attempt)
+    assert attempt.status == :failed
+    assert attempt.result_reason == :system_failure
+    assert attempt.last_sequence == 2
+    assert Repo.get!(Pipeline, pipeline.id).status == :failed
+
+    diagnostic = Repo.one!(LogChunk)
+    assert diagnostic.phase == "execution"
+    assert diagnostic.stream == "system"
+    assert diagnostic.step_name == "Job preparation"
+    assert diagnostic.step_status == "failed"
+
+    assert diagnostic.content ==
+             "Required CI secret is unavailable: MISSING_TOKEN. Add it in repository secrets, then retry the job."
+
+    assert {:ok, snapshot} =
+             Pipelines.pipeline_snapshot(%{pipeline_id: pipeline.id}, context)
+
+    assert hd(snapshot.jobs).failure_detail == diagnostic.content
+  end
 end

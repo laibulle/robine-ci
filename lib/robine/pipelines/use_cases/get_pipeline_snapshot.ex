@@ -29,14 +29,16 @@ defmodule Robine.Pipelines.UseCases.GetPipelineSnapshot do
          scheduled_for: pipeline.scheduled_for,
          inputs: pipeline.inputs,
          duration_ms: duration_ms(pipeline.started_at, pipeline.finished_at || now),
-         jobs: Enum.map(jobs, &job_projection(&1, deps.job_repository, now))
+         jobs: Enum.map(jobs, &job_projection(&1, deps, now))
        }}
     end
   end
 
   def call(_input, %ExecutionContext{}), do: {:error, :forbidden}
 
-  defp job_projection(job, repository, now) do
+  defp job_projection(job, deps, now) do
+    repository = deps.job_repository
+
     attempt =
       case repository.latest_attempt(job.id) do
         {:ok, value} -> value
@@ -51,9 +53,32 @@ defmodule Robine.Pipelines.UseCases.GetPipelineSnapshot do
       matrix_values: Map.get(job.execution, "matrix_values", %{}),
       phase: attempt && attempt.status,
       result_reason: attempt && attempt.result_reason,
+      failure_detail: failure_detail(attempt, deps.log_repository),
       infrastructure_failure: attempt && attempt.result_reason in [:runner_lost, :system_failure],
       duration_ms: attempt && duration_ms(attempt.inserted_at, terminal_time(attempt, now))
     })
+  end
+
+  defp failure_detail(nil, _repository), do: nil
+
+  defp failure_detail(attempt, log_repository) do
+    case log_repository.latest(attempt.id, 1) do
+      {:ok,
+       [
+         %{
+           stream: "system",
+           step_position: 0,
+           step_name: step_name,
+           step_status: "failed",
+           content: content
+         }
+       ]}
+      when step_name in ["Job preparation", "Runner preparation"] and is_binary(content) ->
+        String.slice(content, 0, 1_000)
+
+      _unavailable_or_regular_output ->
+        nil
+    end
   end
 
   defp terminal_time(%{status: status, updated_at: updated_at}, _now)
