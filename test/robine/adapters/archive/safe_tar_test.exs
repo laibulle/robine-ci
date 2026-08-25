@@ -21,6 +21,15 @@ defmodule Robine.Adapters.Archive.SafeTarTest do
     assert Map.new(extracted) == files
   end
 
+  test "allows large repository archives within the bounded default" do
+    assert SafeTar.max_archive_bytes() == 250_000_000
+
+    assert {:ok, archive} = SafeTar.create_source(%{"README.md" => "hello"})
+
+    assert {:error, :source_archive_too_large} =
+             SafeTar.extract_source(archive, max_archive_bytes: byte_size(archive) - 1)
+  end
+
   test "rejects traversal, links, devices, and other special entries" do
     assert {:error, :unsafe_source_archive_path} =
              SafeTar.validate_table([entry("root/../escape", :regular, 1)], 10)
