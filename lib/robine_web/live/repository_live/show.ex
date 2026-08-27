@@ -315,6 +315,11 @@ defmodule RobineWeb.RepositoryLive.Show do
           <:actions>
             <a href="#run-workflow" class="btn btn-primary btn-sm">Run workflow</a>
             <.link
+              navigate={~p"/repositories/#{@repository.id}/releases"}
+              id="repository-releases"
+              class="btn btn-outline btn-sm"
+            >Public releases</.link>
+            <.link
               :if={@current_actor.role in [:administrator, :maintainer]}
               navigate={~p"/repositories/#{@repository.id}/secrets"}
               class="btn btn-outline btn-sm"

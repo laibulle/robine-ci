@@ -487,7 +487,71 @@ These items are intentionally unordered and must receive specifications before i
 - [ ] Micro-VM isolation for untrusted workloads.
 - [ ] Managed Robine cloud and commercial support operations.
 - [ ] SAML, LDAP, SCIM, and identity group mapping.
-- [ ] Deployment environments, approvals, and release workflows.
+- [ ] Deployment environments and approvals — specified by DEP-001; implementation tracked in Phase 18.
+- [ ] Public release assets independent from repository visibility — specified by REL-003; implementation tracked in Phase 19.
+
+## Phase 18 — Ansible deployments
+
+### DEP-101 — Establish deployment domain and persistence
+
+- **Spec:** [DEP-001](docs/specs/deployments/dep-001-ansible-deployments.md)
+- **Depends on:** IAM-102, RUN-203, SCM-802, WEB-103
+- [ ] Add pure environment, deployment, and transition-policy modules with path, protection, and state invariants.
+- [ ] Persist environment configuration, immutable deployment snapshots, approval, audit correlation, and terminal outcomes with tenant isolation.
+- [ ] Expose administrator-authorized configuration and deployment operations through the `Robine.Deployments` facade.
+- [ ] Prove transition, authorization, self-approval, concurrency, and restart-safety behavior.
+
+### DEP-102 — Execute shared Ansible recipes safely
+
+- **Spec:** [DEP-001](docs/specs/deployments/dep-001-ansible-deployments.md)
+- **Depends on:** DEP-101
+- [ ] Resolve and pin the application and recipe revisions before approval.
+- [ ] Generate an argument-safe, attempt-scoped Ansible execution specification and dispatch it through compatible runners.
+- [ ] Transfer only referenced secrets, reuse cursor-based redacted logs, and guarantee attempt cleanup.
+- [ ] Serialize deployments per environment and integrate cancellation, lease recovery, and capacity explanations.
+- [ ] Verify successful playbooks through a bounded, same-origin Req health-check adapter.
+
+### DEP-103 — Deliver the deployment experience
+
+- **Spec:** [DEP-001](docs/specs/deployments/dep-001-ansible-deployments.md)
+- **Depends on:** DEP-102, OPS-101
+- [ ] Add accessible environment configuration and overview to repository administration.
+- [ ] Add deployment request, separate production approval, timeline, grouped live logs, cancellation, redeploy, and retry-verification journeys.
+- [ ] Emit bounded metrics, structured correlation events, audit events, and deployment readiness diagnostics.
+- [ ] Verify staging and protected-production journeys end to end with a fixture recipe and target.
+
+## Phase 19 — Public artifact publication
+
+### REL-301 — Establish publication policy and domain
+
+- **Spec:** [REL-003](docs/specs/releases/rel-003-public-artifact-publication.md)
+- **Depends on:** IAM-102, WEB-103, DATA-102
+- [ ] Add pure publication, repository-policy, public-name, and transition modules.
+- [ ] Persist repository opt-in, opaque public slug, immutable publication identity, provenance, state, and audit correlation with tenant isolation.
+- [ ] Expose administrator policy and publication operations through the `Robine.Publications` facade.
+- [ ] Prove default privacy, authorization, immutable conflict, withdrawal, quota, and transition behavior.
+  - Partial: repository policy, public slug validation, publication read projection, audit, tenant isolation, and administrator/viewer boundaries are implemented; publication transitions, conflicts, withdrawal, and quotas remain.
+
+### REL-302 — Stage and deliver public objects
+
+- **Spec:** [REL-003](docs/specs/releases/rel-003-public-artifact-publication.md)
+- **Depends on:** REL-301
+- [ ] Extend workflow v1 with a validated `publications/stage` built-in restricted to authenticated semantic-version tag runs.
+- [ ] Reuse attempt-scoped private transfer and create durable publication intents without exposing non-terminal content.
+- [ ] Add independently configured local and S3-compatible public object adapters with deterministic digest-safe keys.
+- [ ] Publish only after successful terminal projection with idempotent retry, verification, and conflict handling.
+- [ ] Pass the public-store contract against a pinned Garage fixture, including multipart interruption and withdrawal.
+
+### REL-303 — Deliver public downloads and repository UX
+
+- **Spec:** [REL-003](docs/specs/releases/rel-003-public-artifact-publication.md)
+- **Depends on:** REL-302, OPS-101
+- [ ] Add bounded proxy download and optional validated direct-delivery URLs with immutable, range, checksum, MIME, disposition, and nosniff behavior.
+- [x] Add the non-cached stable `latest` filename alias without weakening immutable release URLs.
+- [ ] Add repository publication settings, release history, provenance, copyable URLs, retry, and withdrawal journeys.
+  - Partial: repository settings, release history, provenance, policy state, and download actions are implemented; copy interaction, retry, and withdrawal remain.
+- [ ] Add a public metadata page isolated from authenticated repository navigation and private identity.
+- [ ] Emit bounded metrics and correlated audit events and verify a private-repository-to-public-Garage journey end to end.
 
 ## Phase 10 — Service containers
 

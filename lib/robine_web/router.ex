@@ -48,6 +48,7 @@ defmodule RobineWeb.Router do
       live "/pipelines/:id/jobs/:job_id", JobLive.Show, :show
       live "/repositories", RepositoryLive.Index, :index
       live "/repositories/:id", RepositoryLive.Show, :show
+      live "/repositories/:id/releases", RepositoryLive.Releases, :index
       live "/build-information", BuildInfoLive.Show, :show
     end
 
@@ -99,6 +100,7 @@ defmodule RobineWeb.Router do
   scope "/", RobineWeb do
     get "/badges/:provider/:owner/:repository/coverage.svg", CoverageBadgeController, :show
     get "/badges/:provider/:owner/:repository/build.svg", BuildBadgeController, :show
+    get "/downloads/:slug/latest/:filename", LatestReleaseController, :show
     get "/metrics", MetricsController, :index
   end
 

@@ -7,6 +7,7 @@ defmodule Robine.Runtime.Dependencies do
   alias Robine.Identities.Dependencies, as: IdentityDependencies
   alias Robine.Operations.Dependencies, as: OperationsDependencies
   alias Robine.Pipelines.Dependencies, as: PipelineDependencies
+  alias Robine.Publications.Dependencies, as: PublicationDependencies
   alias Robine.Repositories.Dependencies, as: RepositoryDependencies
   alias Robine.Runners.Dependencies, as: RunnerDependencies
   alias Robine.Secrets.Dependencies, as: SecretDependencies
@@ -102,6 +103,7 @@ defmodule Robine.Runtime.Dependencies do
     if profile == :standalone, do: IdentityDependencies.validate!(identity_dependencies())
     AutoscalingDependencies.validate!(autoscaling_dependencies())
     RunnerDependencies.validate!(runner_dependencies())
+    PublicationDependencies.validate!(publication_dependencies())
 
     TransferDependencies.validate!(%TransferDependencies{
       archive: Robine.Adapters.Archive.SafeTar
@@ -183,6 +185,7 @@ defmodule Robine.Runtime.Dependencies do
         retention: Robine.Adapters.Persistence.Postgres.StorageRetention,
         blob_store: blob_store
       },
+      publications: publication_dependencies(),
       secrets: %SecretDependencies{
         repository: Robine.Adapters.Persistence.Postgres.SecretRepository,
         cipher: Robine.Adapters.Security.AesGcmCipher,
@@ -241,6 +244,14 @@ defmodule Robine.Runtime.Dependencies do
     %AutoscalingDependencies{
       repository: Robine.Adapters.Persistence.Postgres.AutoscalingRepository,
       provider: Robine.Adapters.Autoscaling.DisabledProvider,
+      clock: Robine.Adapters.System.Clock,
+      id_generator: Robine.Adapters.System.IdGenerator
+    }
+  end
+
+  defp publication_dependencies do
+    %PublicationDependencies{
+      repository: Robine.Adapters.Persistence.Postgres.PublicationRepository,
       clock: Robine.Adapters.System.Clock,
       id_generator: Robine.Adapters.System.IdGenerator
     }

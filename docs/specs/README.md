@@ -52,3 +52,5 @@ New specifications MUST start from [TEMPLATE.md](TEMPLATE.md). A feature is not 
 | Source control | [SCM-001 GitLab and Forgejo integration](source-control/scm-001-gitlab-forgejo-integration.md) | Provider-neutral exact-SHA integration and status projection |
 | Quality | [QUAL-001 coverage reporting](quality/qual-001-coverage-reporting.md) | Local coverage enforcement and future provider publication |
 | Releases | [REL-002 GitHub tag releases](releases/rel-002-github-tag-releases.md) | Build and publish immutable GitHub release payloads from tags |
+| Releases | [REL-003 public artifact publication](releases/rel-003-public-artifact-publication.md) | Publish immutable public downloads independently from repository visibility |
+| Deployments | [DEP-001 Ansible deployments](deployments/dep-001-ansible-deployments.md) | Protected environments, shared Ansible recipes, deployment history, and verification |
