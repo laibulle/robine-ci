@@ -17,7 +17,9 @@ defmodule Robine.Deployments.DeploymentLifecycleTest do
   }
 
   alias Robine.{Deployments, Repo}
+  alias Robine.Adapters.Runner.RemoteDeploymentOffer
   alias Robine.Runtime.Dependencies
+  alias Robine.TestSupport.SuccessfulDeploymentVerifier
 
   @now ~U[2026-08-27 17:00:00.000000Z]
 
@@ -166,6 +168,18 @@ defmodule Robine.Deployments.DeploymentLifecycleTest do
 
     runner = Dependencies.context(%{id: context.runner_id, role: :runner}, "runner-events")
 
+    assert {:ok, remote} =
+             Deployments.remote_execution(%{deployment_id: assigned.id}, runner)
+
+    assert remote["deployment_id"] == assigned.id
+    assert remote["idempotency_token"] == assigned.idempotency_token
+    assert remote["artifact"]["digest"] == assigned.artifact.digest
+    assert remote["secret_names"] == ["postgres-password", "secret-key-base"]
+
+    assert {:ok, offer} = RemoteDeploymentOffer.build(assigned.id, runner)
+    assert String.ends_with?(offer["artifact_url"], "/#{assigned.id}/artifact")
+    assert String.ends_with?(offer["secrets_url"], "/#{assigned.id}/secrets")
+
     assert {:error, :stale_deployment_attempt} =
              Deployments.record_runner_event(
                %{
@@ -183,12 +197,11 @@ defmodule Robine.Deployments.DeploymentLifecycleTest do
         {1, :preparing},
         {2, :migrating},
         {3, :activating},
-        {4, :verifying},
-        {5, :succeeded}
+        {4, :verifying}
       ]
       |> Enum.map(fn {sequence, status} -> {sequence, status, Ecto.UUID.generate()} end)
 
-    final =
+    _verifying =
       events
       |> Enum.reduce(assigned, fn {sequence, status, message_id}, _deployment ->
         assert {:ok, projected} =
@@ -205,6 +218,11 @@ defmodule Robine.Deployments.DeploymentLifecycleTest do
 
         projected
       end)
+
+    verifier = with_verifier(approver)
+
+    assert {:ok, final} =
+             Deployments.verify_deployment(%{deployment_id: requested.id}, verifier)
 
     {last_sequence, last_status, last_message_id} = List.last(events)
 
@@ -257,6 +275,75 @@ defmodule Robine.Deployments.DeploymentLifecycleTest do
 
     assert length(overview.environments) == 1
     assert hd(overview.deployments).status == :succeeded
+  end
+
+  test "retries a failed exact-version verification without replaying runner effects", context do
+    admin = Dependencies.context(%{id: "admin", role: :administrator}, "retry-configure")
+
+    assert {:ok, environment} =
+             Deployments.configure_environment(environment_input(context.repository_id), admin)
+
+    requester = Dependencies.context(%{id: "maintainer", role: :maintainer}, "retry-request")
+
+    assert {:ok, requested} =
+             Deployments.request_deployment(
+               %{environment_id: environment.id, artifact_id: context.artifact_id},
+               requester
+             )
+
+    approver = Dependencies.context(%{id: "approver", role: :administrator}, "retry-approve")
+
+    assert {:ok, _approved} =
+             Deployments.approve_deployment(%{deployment_id: requested.id}, approver)
+
+    assert {:ok, assigned} =
+             Deployments.assign_deployment(
+               %{deployment_id: requested.id, runner_id: context.runner_id, lease_seconds: 60},
+               admin
+             )
+
+    runner = Dependencies.context(%{id: context.runner_id, role: :runner}, "retry-runner")
+
+    failed =
+      [
+        {1, :preparing, nil},
+        {2, :migrating, nil},
+        {3, :activating, nil},
+        {4, :verifying, nil},
+        {5, :verification_failed, "deployed_version_mismatch"}
+      ]
+      |> Enum.reduce(assigned, fn {sequence, status, reason}, _deployment ->
+        assert {:ok, projected} =
+                 Deployments.record_runner_event(
+                   %{
+                     deployment_id: requested.id,
+                     idempotency_token: assigned.idempotency_token,
+                     message_id: Ecto.UUID.generate(),
+                     sequence: sequence,
+                     status: status,
+                     reason: reason
+                   },
+                   runner
+                 )
+
+        projected
+      end)
+
+    assert failed.status == :verification_failed
+    verifier = with_verifier(approver)
+
+    assert {:ok, retrying} =
+             Deployments.retry_verification(%{deployment_id: requested.id}, verifier)
+
+    assert retrying.status == :verifying
+    assert retrying.event_sequence == 6
+
+    assert {:ok, succeeded} =
+             Deployments.verify_deployment(%{deployment_id: requested.id}, verifier)
+
+    assert succeeded.status == :succeeded
+    assert succeeded.event_sequence == 7
+    assert Repo.aggregate(DeploymentEvent, :count) == 7
   end
 
   test "allows requester cancellation before remote effects", context do
@@ -367,5 +454,16 @@ defmodule Robine.Deployments.DeploymentLifecycleTest do
         }
       ]
     }
+  end
+
+  defp with_verifier(context) do
+    deployment_dependencies = %{
+      context.dependencies.deployments
+      | verifier: SuccessfulDeploymentVerifier
+    }
+
+    dependencies = Map.put(context.dependencies, :deployments, deployment_dependencies)
+
+    %{context | dependencies: dependencies}
   end
 end

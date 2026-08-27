@@ -10,4 +10,12 @@ defmodule Robine.TestSupport.DeploymentExecutorAdapter do
   def send_deployment_event(_client, event, config) do
     Agent.update(Map.fetch!(config, :event_agent), &[event | &1])
   end
+
+  def docker(arguments, config) do
+    Agent.update(Map.fetch!(config, :docker_agent), &[arguments | &1])
+
+    if "inspect" in arguments,
+      do: {:error, :not_found},
+      else: {:ok, "ok"}
+  end
 end

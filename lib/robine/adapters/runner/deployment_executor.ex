@@ -221,7 +221,13 @@ defmodule Robine.Adapters.Runner.DeploymentExecutor do
            :ok <- SafeTar.validate_workspace_archive(inner),
            :ok <- File.mkdir_p(staged_release),
            {:ok, _output} <-
-             command(config, "tar", ["-xzf", server_archive, "-C", staged_release]),
+             command(config, "tar", [
+               "-xzf",
+               server_archive,
+               "-C",
+               staged_release,
+               "--strip-components=1"
+             ]),
            true <- File.regular?(Path.join(staged_release, "bin/robine")),
            :ok <-
              File.write(Path.join(staged_release, ".robine-artifact-sha256"), artifact.digest),
