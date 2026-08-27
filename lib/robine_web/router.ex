@@ -74,12 +74,6 @@ defmodule RobineWeb.Router do
     post "/webhooks", GitHubWebhookController, :create
   end
 
-  scope "/api", RobineWeb do
-    pipe_through :api
-    post "/gitlab/webhooks", SourceControlWebhookController, :gitlab
-    post "/forgejo/webhooks", SourceControlWebhookController, :forgejo
-  end
-
   scope "/api/v1/runners", RobineWeb do
     pipe_through :runner_api
     post "/enroll", RunnerEnrollmentController, :create

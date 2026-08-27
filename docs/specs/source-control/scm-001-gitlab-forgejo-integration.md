@@ -2,10 +2,12 @@
 
 ## Status
 
-- **State:** Shipped
+- **State:** Deprecated
 - **Owner:** Integrations
 - **Target:** Post-MVP
-- **Last updated:** 2026-08-09
+- **Last updated:** 2026-08-19
+
+This shipped implementation is retained internally but is no longer exposed by the product. [SCM-002](scm-002-github-only-product-surface.md) is the current source of truth for supported source-control behavior.
 
 ## Summary
 

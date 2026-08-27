@@ -129,6 +129,14 @@ defmodule RobineWeb.PipelineLive.Show do
             <p class="text-sm">
               A runner or Robine service failed independently of the repository command. Retry after checking instance health.
             </p>
+            <div
+              :for={job <- Enum.filter(@pipeline.jobs, & &1.failure_detail)}
+              id={"pipeline-failure-detail-#{job.id}"}
+              class="mt-3 rounded-xl border border-error/25 bg-base-100/65 p-3 text-sm text-base-content"
+            >
+              <p class="font-semibold">{job.job_key}</p>
+              <p class="mt-1">{job.failure_detail}</p>
+            </div>
           </div>
         </div>
         <dl class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">

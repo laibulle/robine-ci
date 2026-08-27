@@ -6,7 +6,7 @@ defmodule RobineWeb.RepositoryLive.Secrets do
   def mount(%{"id" => id}, _session, socket) do
     with {:ok, repositories} <-
            Repositories.list_repositories(%{}, socket.assigns.execution_context),
-         repository when not is_nil(repository) <- Enum.find(repositories, &(&1.id == id)) do
+         %{provider: :github} = repository <- Enum.find(repositories, &(&1.id == id)) do
       {:ok,
        socket
        |> assign(repository: repository, form: to_form(%{"name" => "", "value" => ""}))

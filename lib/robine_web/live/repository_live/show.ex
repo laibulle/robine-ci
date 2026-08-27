@@ -6,7 +6,7 @@ defmodule RobineWeb.RepositoryLive.Show do
   def mount(%{"id" => id}, _session, socket) do
     with {:ok, repositories} <-
            Repositories.list_repositories(%{}, socket.assigns.execution_context),
-         repository when not is_nil(repository) <- Enum.find(repositories, &(&1.id == id)),
+         %{provider: :github} = repository <- Enum.find(repositories, &(&1.id == id)),
          {:ok, pipelines} <-
            Pipelines.list_pipelines(
              %{repository_id: id, limit: 100},
@@ -54,27 +54,6 @@ defmodule RobineWeb.RepositoryLive.Show do
       {:error, :forbidden} ->
         {:noreply,
          put_flash(socket, :error, "You do not have permission to check GitHub installations.")}
-
-      result ->
-        {:noreply,
-         assign(socket,
-           github_preflight: result,
-           github_preflight_checked_at: DateTime.utc_now()
-         )}
-    end
-  end
-
-  def handle_event("check-source-control-connection", _params, socket) do
-    result =
-      Repositories.check_source_control_connection(
-        %{repository_id: socket.assigns.repository.id},
-        socket.assigns.execution_context
-      )
-
-    case result do
-      {:error, :forbidden} ->
-        {:noreply,
-         put_flash(socket, :error, "You do not have permission to check provider access.")}
 
       result ->
         {:noreply,
@@ -196,8 +175,6 @@ defmodule RobineWeb.RepositoryLive.Show do
   defp manual_form_id(path), do: "manual-workflow-#{:erlang.phash2(path)}"
 
   defp provider_label(:github), do: "GitHub"
-  defp provider_label(:gitlab), do: "GitLab"
-  defp provider_label(:forgejo), do: "Forgejo"
 
   defp active_status?(status), do: status in [:created, :queued, :running, :cancelling]
 
@@ -382,10 +359,7 @@ defmodule RobineWeb.RepositoryLive.Show do
                 {provider_label(@repository.provider)} integration
               </h2>
               <p class="mt-1 text-sm text-base-content/60">
-                {if @repository.provider == :github,
-                  do: "Required repository permissions: Metadata read, Contents write, Checks write.",
-                  else:
-                    "Verify repository read access and commit-status write access at the configured provider origin."}
+                Required repository permissions: Metadata read, Contents write, Checks write.
               </p>
             </div>
             <button
@@ -398,16 +372,6 @@ defmodule RobineWeb.RepositoryLive.Show do
               phx-disable-with="Checking…"
               class="btn btn-outline btn-sm"
             >Check permissions</button>
-            <button
-              :if={
-                @repository.provider in [:gitlab, :forgejo] and
-                  @current_actor.role in [:administrator, :maintainer]
-              }
-              id="check-source-control-connection"
-              phx-click="check-source-control-connection"
-              phx-disable-with="Checking…"
-              class="btn btn-outline btn-sm"
-            >Check connection</button>
           </div>
           <p :if={@github_preflight == :not_run} class="mt-4 text-sm text-base-content/60">
             Health has not been checked in this browser session. Trust remains enabled independently.

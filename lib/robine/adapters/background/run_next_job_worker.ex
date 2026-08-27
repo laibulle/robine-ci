@@ -78,8 +78,18 @@ defmodule Robine.Adapters.Background.RunNextJobWorker do
   end
 
   defp execute(attempt, context) do
-    with {:ok, _preparing} <- record(attempt, 1, :preparing, nil, context),
-         {:ok, raw_specification} <-
+    case record(attempt, 1, :preparing, nil, context) do
+      {:ok, preparing_attempt} ->
+        prepare_and_execute(preparing_attempt, context)
+
+      {:error, reason} ->
+        log_system_failure(attempt, reason, :attempt_preparation, context)
+        {:error, reason}
+    end
+  end
+
+  defp prepare_and_execute(attempt, context) do
+    with {:ok, raw_specification} <-
            Pipelines.job_execution(%{idempotency_token: attempt.idempotency_token}, context),
          correlated_context = correlate(context, raw_specification),
          :ok <- log_execution_start(attempt, raw_specification, correlated_context),
@@ -95,19 +105,104 @@ defmodule Robine.Adapters.Background.RunNextJobWorker do
         cleanup_source(source_path)
       end
     else
-      {:error, reason} ->
-        _ = record(attempt, 3, :failed, :system_failure, context)
-
-        Log.event(:error, "runner.attempt.completed", %{
-          correlation_id: context.correlation_id,
-          attempt_id: attempt.id,
-          runner_id: "local",
-          outcome: :system_failure
-        })
-
-        {:error, reason}
+      {:error, reason} -> fail_attempt(attempt, reason, :job_preparation, context)
     end
   end
+
+  defp fail_attempt(attempt, reason, phase, context) do
+    _ = persist_failure_diagnostic(attempt, reason, phase, context)
+
+    result =
+      record(
+        attempt,
+        attempt.last_sequence + 1,
+        :failed,
+        :system_failure,
+        context
+      )
+
+    log_system_failure(attempt, reason, phase, context)
+
+    case result do
+      {:ok, _failed_attempt} -> {:error, reason}
+      {:error, record_reason} -> {:error, {:failure_recording_failed, record_reason, reason}}
+    end
+  end
+
+  defp log_system_failure(attempt, reason, phase, context) do
+    Log.event(:error, "runner.attempt.completed", %{
+      correlation_id: context.correlation_id,
+      attempt_id: attempt.id,
+      runner_id: "local",
+      outcome: :system_failure,
+      failure_class: failure_class(reason),
+      phase: phase
+    })
+  end
+
+  defp persist_failure_diagnostic(attempt, reason, phase, context) do
+    Pipelines.append_log_event(
+      %{
+        attempt_id: attempt.id,
+        sequence: 1,
+        phase: :execution,
+        stream: :system,
+        step_position: 0,
+        step_name: failure_step_name(phase),
+        status: :failed,
+        exit_code: nil,
+        duration_ms: 0,
+        content: failure_message(reason)
+      },
+      context
+    )
+  end
+
+  defp failure_step_name(:job_preparation), do: "Job preparation"
+  defp failure_step_name(_phase), do: "Runner preparation"
+
+  defp failure_class({:secrets_missing, _names}), do: :secrets_missing
+  defp failure_class({:secret_decryption_failed, _name, _reason}), do: :secret_decryption_failed
+  defp failure_class({:source_materialization, _reason}), do: :source_materialization
+  defp failure_class({:cache_checksum, _reason}), do: :cache_checksum
+  defp failure_class({:invalid_specification, _field}), do: :invalid_specification
+  defp failure_class({:invalid_specification, _field, _value}), do: :invalid_specification
+  defp failure_class(_reason), do: :system_failure
+
+  defp failure_message({:secrets_missing, names}) do
+    "Required CI #{pluralize_secret(names)} unavailable: #{Enum.join(names, ", ")}. " <>
+      "Add #{pronoun_for_secrets(names)} in repository secrets, then retry the job."
+  end
+
+  defp failure_message({:secret_decryption_failed, name, _reason}) do
+    "Required CI secret #{name} could not be decrypted. Ask an administrator to replace it, then retry the job."
+  end
+
+  defp failure_message({:source_materialization, _reason}) do
+    "Robine could not prepare the repository source for this job. Check source-control access and retry."
+  end
+
+  defp failure_message({:cache_checksum, :checkout_required}) do
+    "A cache checksum requires a checkout step, but no source checkout is available. Update the workflow and retry."
+  end
+
+  defp failure_message({:invalid_specification, field}) do
+    "Robine rejected the prepared job specification at #{field}. Update the workflow and retry."
+  end
+
+  defp failure_message({:invalid_specification, field, _value}) do
+    "Robine rejected the prepared job specification at #{field}. Update the workflow and retry."
+  end
+
+  defp failure_message(_reason) do
+    "Robine could not prepare this job for execution. Check instance health and retry."
+  end
+
+  defp pluralize_secret([_name]), do: "secret is"
+  defp pluralize_secret(_names), do: "secrets are"
+
+  defp pronoun_for_secrets([_name]), do: "it"
+  defp pronoun_for_secrets(_names), do: "them"
 
   defp execute_specification(attempt, raw, specification, context) do
     execution_result =

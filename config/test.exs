@@ -6,8 +6,16 @@ import Config
 # to provide built-in test partitioning in CI environment.
 # Run `mix help test` for more information.
 config :robine, Robine.Repo,
-  username: "postgres",
-  password: "postgres",
+  username:
+    System.get_env(
+      "ROBINE_TEST_DATABASE_USER",
+      System.get_env("ROBINE_DEV_DATABASE_USER", "postgres")
+    ),
+  password:
+    System.get_env(
+      "ROBINE_TEST_DATABASE_PASSWORD",
+      System.get_env("ROBINE_DEV_DATABASE_PASSWORD", "postgres")
+    ),
   hostname: System.get_env("ROBINE_TEST_DATABASE_HOST", "localhost"),
   port: System.get_env("ROBINE_TEST_DATABASE_PORT", "5432") |> String.to_integer(),
   database: "robine_test#{System.get_env("MIX_TEST_PARTITION")}",

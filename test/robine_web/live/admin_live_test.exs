@@ -28,6 +28,8 @@ defmodule RobineWeb.AdminLiveTest do
     assert_patch(view, "/admin?section=source-control")
     assert has_element?(view, "#github-setup-assistant")
     assert has_element?(view, "#github-setup-create")
+    refute render(view) =~ "GitLab"
+    refute render(view) =~ "Forgejo"
 
     view |> element("#github-setup-step-2") |> render_click()
     assert has_element?(view, "#github-setup-permissions")
@@ -72,18 +74,6 @@ defmodule RobineWeb.AdminLiveTest do
     view |> element("#verify-github-setup") |> render_click()
     assert has_element?(view, "#github-setup-verify")
     assert has_element?(view, "a[href='/repositories']", "Trust repositories in Robine")
-
-    gitlab_token = "gitlab-encrypted-token"
-
-    rendered =
-      view
-      |> form("#gitlab-token-form", %{"value" => gitlab_token})
-      |> render_submit()
-
-    assert rendered =~ "GitLab API token encrypted and stored"
-    refute rendered =~ gitlab_token
-    stored_gitlab = Repo.get_by!(Secret, name: "GITLAB_TOKEN", scope: :instance)
-    refute stored_gitlab.ciphertext =~ gitlab_token
 
     view |> element("#admin-section-runners") |> render_click()
 

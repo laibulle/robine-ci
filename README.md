@@ -3,7 +3,7 @@
 [![build](https://ci.base59.dev/badges/github/laibulle/robine-ci/build.svg)](https://ci.base59.dev/repositories)
 [![coverage](https://ci.base59.dev/badges/github/laibulle/robine-ci/coverage.svg)](https://ci.base59.dev/repositories)
 
-Robine CI is an open-source, self-hosted continuous integration service built with Elixir and Phoenix. It targets explicitly trusted GitHub, GitLab, and Forgejo repositories and executes jobs in isolated local or outbound-only remote Docker runners.
+Robine CI is an open-source, self-hosted continuous integration service built with Elixir and Phoenix. It targets explicitly trusted GitHub repositories and executes jobs in isolated local or outbound-only remote Docker runners.
 
 The project is under active development. The product contract is documented in [the specification index](docs/specs/README.md), implementation work is tracked in [TASKS.md](TASKS.md), and contributors must follow [AGENTS.md](AGENTS.md).
 
@@ -19,7 +19,7 @@ The project is under active development. The product contract is documented in [
 - Stable workflow diagnostic codes and dependency-cycle detection
 - Isolated local/remote Docker execution, attempt-private service containers, and the `robine` validation/execution CLI
 - Encrypted secrets, immutable artifacts, local or S3-compatible caches/artifacts, and cursor-based redacted logs
-- Authenticated GitHub, GitLab, and Forgejo webhooks, exact-SHA workflows, and durable check/status projection
+- Authenticated GitHub webhooks, exact-SHA workflows, and durable check projection
 - Local Argon2id authentication, revocable sessions, and optional OpenID Connect SSO
 - Authenticated LiveView pipeline, job, log, cancellation, and retry experiences
 - Outbound-only remote Docker runners with versioned restart-safe sessions and fleet administration
@@ -43,6 +43,24 @@ Start PostgreSQL:
 ```bash
 docker compose up -d --wait postgres
 ```
+
+Compose and Ecto share the `ROBINE_DEV_DATABASE_USER`, `ROBINE_DEV_DATABASE_PASSWORD`,
+`ROBINE_DEV_DATABASE_NAME`, and `ROBINE_DEV_DATABASE_PORT` variables, with the local defaults
+`postgres`, `postgres`, `robine_dev`, and `5432`. The authenticated healthcheck fails when a
+persistent volume contains different credentials instead of reporting a false healthy state.
+
+If an existing development volume has a stale password, repair the role through PostgreSQL's local
+socket without deleting databases:
+
+```bash
+docker compose exec postgres \
+  psql --username postgres --dbname postgres \
+  --command="ALTER ROLE postgres WITH PASSWORD 'postgres'"
+docker compose up -d --wait postgres
+```
+
+When overriding the development user or password, use the configured values in the repair command.
+Reserve `docker compose down -v` for cases where losing all local development data is intentional.
 
 Configure the mandatory secret-encryption master key for the server process:
 
@@ -240,39 +258,6 @@ export GITHUB_WEBHOOK_SECRET="..."
 ```
 
 `GITHUB_APP_PRIVATE_KEY` and `GITHUB_WEBHOOK_SECRET` are bootstrap and break-glass inputs. After the first administrator signs in, the Administration page can store replacements encrypted in PostgreSQL with the versioned instance AES-256-GCM key; encrypted values take precedence and are never displayed again. `GITHUB_APP_ID` remains non-secret configuration. Installation access tokens and their granted-permission projection are cached only until shortly before GitHub expires them.
-
-## GitLab and Forgejo
-
-Configure one GitLab and/or Forgejo origin. Origins are non-secret, must be HTTPS in production, and are fixed at startup:
-
-```bash
-export GITLAB_URL="https://gitlab.com"
-export GITLAB_TOKEN="..."
-export GITLAB_WEBHOOK_SECRET="..."
-
-export FORGEJO_URL="https://code.example.com"
-export FORGEJO_TOKEN="..."
-export FORGEJO_WEBHOOK_SECRET="..."
-```
-
-GitLab projects use a project/group token limited to the connected projects with API access sufficient for repository reads and commit-status writes. Configure push and merge-request webhooks at `<ROBINE_PUBLIC_URL>/api/gitlab/webhooks` and use the same random value for GitLab's secret-token field and `GITLAB_WEBHOOK_SECRET`.
-
-Forgejo tokens require repository content read and commit-status write access. Configure push and pull-request webhooks at `<ROBINE_PUBLIC_URL>/api/forgejo/webhooks` with a secret matching `FORGEJO_WEBHOOK_SECRET`; Robine verifies Forgejo's HMAC-SHA256 signature over the raw body.
-
-The environment token and webhook variables are bootstrap and recovery fallbacks. Administrators can replace all four values from Instance Administration; stored values are encrypted, write-only, and take precedence. Repository discovery is always repeated server-side before an exact project ID/name selection becomes trusted.
-
-Provider adapters have opt-in contract smokes against pinned official containers. Each smoke creates an isolated temporary provider, user, repository, exact commit, and terminal status, then removes the container:
-
-```bash
-docker pull codeberg.org/forgejo/forgejo:16.0.2-rootless
-mix test test/robine/adapters/source_control/forgejo_integration_test.exs
-
-docker pull gitlab/gitlab-ce:19.2.1-ce.0
-ROBINE_GITLAB_INTEGRATION=1 mix test \
-  test/robine/adapters/source_control/git_lab_integration_test.exs
-```
-
-The GitLab smoke is excluded from ordinary QA because a cold Omnibus startup takes several minutes and materially more resources. Unit and provider-neutral vertical tests remain part of every QA run.
 
 ## OpenID Connect
 

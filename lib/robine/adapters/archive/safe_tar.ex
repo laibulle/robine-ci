@@ -2,13 +2,19 @@ defmodule Robine.Adapters.Archive.SafeTar do
   @moduledoc false
   @behaviour Robine.Transfers.Ports.Archive
 
+  @max_archive_bytes 250_000_000
+
   @defaults [
-    max_archive_bytes: 100_000_000,
+    max_archive_bytes: @max_archive_bytes,
     max_files: 10_000,
     max_expanded_bytes: 1_000_000_000,
     max_ratio: 100,
     timeout_ms: 10_000
   ]
+
+  @doc false
+  @spec max_archive_bytes() :: pos_integer()
+  def max_archive_bytes, do: @max_archive_bytes
 
   @impl true
   def create_source(files, options \\ []) when is_map(files) do

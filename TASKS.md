@@ -74,6 +74,7 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - [x] Configure PostgreSQL, Tailwind, test environment, formatter, and deterministic local setup.
 - [x] Add AGPL-3.0-or-later license and source headers policy if required.
 - [x] Add `mix setup`, a full verification alias, and Docker Compose for application dependencies.
+- [x] Keep Compose and Ecto development/test credentials aligned, authenticate PostgreSQL health checks, and document non-destructive stale-password recovery.
 - [x] Document supported Elixir, Erlang/OTP, PostgreSQL, Node, and Docker versions.
 - [x] Verify a clean source export can fetch dependencies, compile without Robine warnings, migrate, and pass the complete test suite without reused build artifacts.
 
@@ -763,3 +764,13 @@ These items are intentionally unordered and must receive specifications before i
 - [x] Verify successful, malformed/missing marker, pagination, retry, and authorization journeys, including a live GitHub publication with `Checks: write`.
 - [x] Expose authenticated report downloads from provider checks and a stable public repository coverage badge.
 - [x] Expose a stable public build badge backed by the newest repository pipeline status.
+
+## Phase 18 — Source-control scope
+
+### SCM-901 — Restrict the MVP product surface to GitHub
+
+- **Spec:** [SCM-002](docs/specs/source-control/scm-002-github-only-product-surface.md)
+- **Depends on:** GH-102, SCM-801
+- [x] Remove deferred-provider controls, labels, credentials, health cards, LiveView events, and webhook routes from the product surface.
+- [x] Keep provider-neutral persistence and dormant adapters intact for a future explicit reactivation decision.
+- [x] Verify the GitHub-only UI and unavailable webhook paths with focused tests and full precommit QA (396 tests passed; 6 integration tests skipped).

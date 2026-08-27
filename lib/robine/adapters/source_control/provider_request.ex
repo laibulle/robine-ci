@@ -1,8 +1,9 @@
 defmodule Robine.Adapters.SourceControl.ProviderRequest do
   @moduledoc false
 
+  alias Robine.Adapters.Archive.SafeTar
+
   @default_max_body 2_097_152
-  @archive_max_body 100_000_000
 
   @spec call(:gitlab | :forgejo, atom(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()}
@@ -23,7 +24,7 @@ defmodule Robine.Adapters.SourceControl.ProviderRequest do
   end
 
   @spec archive_max_body() :: pos_integer()
-  def archive_max_body, do: @archive_max_body
+  def archive_max_body, do: SafeTar.max_archive_bytes()
 
   defp request(config, provider, method, url, token, options) do
     started = System.monotonic_time()
