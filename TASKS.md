@@ -491,35 +491,36 @@ These items are intentionally unordered and must receive specifications before i
 - [ ] Deployment environments and approvals — specified by DEP-001; implementation tracked in Phase 18.
 - [ ] Public release assets independent from repository visibility — specified by REL-003; implementation tracked in Phase 19.
 
-## Phase 18 — Ansible deployments
+## Phase 18 — Native deployments
 
 ### DEP-101 — Establish deployment domain and persistence
 
-- **Spec:** [DEP-001](docs/specs/deployments/dep-001-ansible-deployments.md)
+- **Spec:** [DEP-001](docs/specs/deployments/dep-001-native-deployments.md)
 - **Depends on:** IAM-102, RUN-203, SCM-802, WEB-103
-- [ ] Add pure environment, deployment, and transition-policy modules with path, protection, and state invariants.
-- [ ] Persist environment configuration, immutable deployment snapshots, approval, audit correlation, and terminal outcomes with tenant isolation.
+- [ ] Add pure environment, service specification, artifact snapshot, deployment, and transition-policy modules with name, path, protection, digest, volume, and state invariants.
+- [ ] Persist environment configuration, immutable artifact and desired-state snapshots, approval, ordered phase events, audit correlation, and terminal outcomes with tenant isolation.
 - [ ] Expose administrator-authorized configuration and deployment operations through the `Robine.Deployments` facade.
 - [ ] Prove transition, authorization, self-approval, concurrency, and restart-safety behavior.
 
-### DEP-102 — Execute shared Ansible recipes safely
+### DEP-102 — Execute native Docker deployments safely
 
-- **Spec:** [DEP-001](docs/specs/deployments/dep-001-ansible-deployments.md)
+- **Spec:** [DEP-001](docs/specs/deployments/dep-001-native-deployments.md)
 - **Depends on:** DEP-101
-- [ ] Resolve and pin the application and recipe revisions before approval.
-- [ ] Generate an argument-safe, attempt-scoped Ansible execution specification and dispatch it through compatible runners.
-- [ ] Transfer only referenced secrets, reuse cursor-based redacted logs, and guarantee attempt cleanup.
-- [ ] Serialize deployments per environment and integrate cancellation, lease recovery, and capacity explanations.
-- [ ] Verify successful playbooks through a bounded, same-origin Req health-check adapter.
+- [ ] Resolve and pin the application artifact, source revision, persistent-service specs, and normalized desired-state digests before approval.
+- [ ] Add a deployment-capable runner offer and a locally allowlisted Docker convergence executor without arbitrary shell or Compose input.
+- [ ] Transfer only referenced secrets and the exact digest-verified artifact, reuse cursor-based redacted logs, and guarantee attempt cleanup without deleting persistent volumes.
+- [ ] Serialize deployments per environment and integrate ordered events, cancellation, lease recovery, remote observation, and capacity explanations.
+- [ ] Verify successful activation through bounded same-origin Req health and exact-version checks.
+- [ ] Require fresh backup evidence for PostgreSQL major upgrades and reject automatic downgrade or unsafe application rollback.
 
 ### DEP-103 — Deliver the deployment experience
 
-- **Spec:** [DEP-001](docs/specs/deployments/dep-001-ansible-deployments.md)
+- **Spec:** [DEP-001](docs/specs/deployments/dep-001-native-deployments.md)
 - **Depends on:** DEP-102, OPS-101
-- [ ] Add accessible environment configuration and overview to repository administration.
+- [ ] Add accessible application/platform environment configuration and overview to repository administration.
 - [ ] Add deployment request, separate production approval, timeline, grouped live logs, cancellation, redeploy, and retry-verification journeys.
 - [ ] Emit bounded metrics, structured correlation events, audit events, and deployment readiness diagnostics.
-- [ ] Verify staging and protected-production journeys end to end with a fixture recipe and target.
+- [ ] Verify staging and protected-production journeys end to end with real PostgreSQL, S3-compatible storage, application, ingress, persistent volumes, and a deployment runner restart.
 
 ## Phase 19 — Public artifact publication
 
