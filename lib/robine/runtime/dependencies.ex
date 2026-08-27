@@ -3,6 +3,7 @@ defmodule Robine.Runtime.Dependencies do
 
   alias Robine.ExecutionContext
   alias Robine.Autoscaling.Dependencies, as: AutoscalingDependencies
+  alias Robine.Deployments.Dependencies, as: DeploymentDependencies
   alias Robine.Execution.Dependencies, as: ExecutionDependencies
   alias Robine.Identities.Dependencies, as: IdentityDependencies
   alias Robine.Operations.Dependencies, as: OperationsDependencies
@@ -103,6 +104,7 @@ defmodule Robine.Runtime.Dependencies do
     if profile == :standalone, do: IdentityDependencies.validate!(identity_dependencies())
     AutoscalingDependencies.validate!(autoscaling_dependencies())
     RunnerDependencies.validate!(runner_dependencies())
+    DeploymentDependencies.validate!(deployment_dependencies())
     PublicationDependencies.validate!(publication_dependencies())
 
     TransferDependencies.validate!(%TransferDependencies{
@@ -179,6 +181,7 @@ defmodule Robine.Runtime.Dependencies do
       execution: %ExecutionDependencies{runner: Robine.Adapters.Execution.DockerRunner},
       autoscaling: autoscaling_dependencies(),
       runners: runner_dependencies(),
+      deployments: deployment_dependencies(),
       transfers: %TransferDependencies{archive: Robine.Adapters.Archive.SafeTar},
       operations: %OperationsDependencies{
         health: Robine.Adapters.System.SystemHealth,
@@ -235,6 +238,18 @@ defmodule Robine.Runtime.Dependencies do
       digester: Robine.Adapters.Security.HmacRunnerCredentials,
       token_generator: Robine.Adapters.Security.OpaqueTokenGenerator,
       session_notifier: Robine.Adapters.Runner.PhoenixSessionNotifier,
+      clock: Robine.Adapters.System.Clock,
+      id_generator: Robine.Adapters.System.IdGenerator
+    }
+  end
+
+  defp deployment_dependencies do
+    %DeploymentDependencies{
+      repository: Robine.Adapters.Persistence.Postgres.DeploymentRepository,
+      artifact_resolver: Robine.Adapters.Deployments.ArtifactResolver,
+      container_runtime: Robine.Adapters.Deployments.DockerEnvironment,
+      verifier: Robine.Adapters.Deployments.HttpVerifier,
+      dispatcher: Robine.Adapters.Deployments.ObanDispatcher,
       clock: Robine.Adapters.System.Clock,
       id_generator: Robine.Adapters.System.IdGenerator
     }

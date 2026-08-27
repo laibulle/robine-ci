@@ -7,6 +7,15 @@ defmodule RobineWeb.HealthControllerTest do
     assert %{"status" => "ok"} = json_response(conn, 200)
   end
 
+  test "version exposes the exact semantic release identity used by deployment verification", %{
+    conn: conn
+  } do
+    conn = get(conn, ~p"/health/version")
+
+    assert %{"version" => "v" <> version} = json_response(conn, 200)
+    assert version == Mix.Project.config()[:version]
+  end
+
   test "readiness exposes no component or configuration details", %{conn: conn} do
     conn = get(conn, ~p"/health/ready")
     body = response(conn, conn.status)

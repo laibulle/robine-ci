@@ -56,6 +56,55 @@ defmodule Robine.Adapters.Runner.CLITest do
              CLI.run(["start", "--config", path])
   end
 
+  test "requires an absolute allowlisted root for deployment runners" do
+    directory =
+      Path.join(
+        System.tmp_dir!(),
+        "robine-runner-deployments-#{System.unique_integer([:positive])}"
+      )
+
+    path = Path.join(directory, "config.json")
+    File.mkdir_p!(directory)
+    on_exit(fn -> File.rm_rf!(directory) end)
+
+    base = %{
+      "server_url" => "https://ci.example.test",
+      "runner_id" => Ecto.UUID.generate(),
+      "credential" => "rrc_" <> String.duplicate("a", 43),
+      "deployments" => true
+    }
+
+    File.write!(path, Jason.encode!(Map.put(base, "deployment_roots", ["relative/root"])))
+    File.chmod!(path, 0o600)
+
+    assert {:exit, 3, "Cannot load runner config: invalid_deployment_roots"} =
+             CLI.run(["start", "--config", path])
+
+    File.write!(path, Jason.encode!(Map.put(base, "deployment_roots", ["/srv/robine"])))
+    File.chmod!(path, 0o600)
+
+    assert {:start, config} = CLI.run(["start", "--config", path])
+    assert config["deployment_roots"] == ["/srv/robine"]
+  end
+
+  test "requires deployment root when enrolling a deployment runner" do
+    System.put_env("ROBINE_RUNNER_ENROLLMENT_TOKEN", "one-use-token")
+
+    assert {:exit, 64, message} =
+             CLI.run([
+               "enroll",
+               "--server",
+               "https://ci.example.test",
+               "--name",
+               "deployer",
+               "--config",
+               "/tmp/not-written",
+               "--deployments"
+             ])
+
+    assert message =~ "--deployment-root is required"
+  end
+
   test "requires enrollment secrets through the environment, not argv" do
     System.delete_env("ROBINE_RUNNER_ENROLLMENT_TOKEN")
 

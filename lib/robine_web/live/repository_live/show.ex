@@ -297,6 +297,11 @@ defmodule RobineWeb.RepositoryLive.Show do
               class="btn btn-outline btn-sm"
             >Public releases</.link>
             <.link
+              navigate={~p"/repositories/#{@repository.id}/deployments"}
+              id="repository-deployments"
+              class="btn btn-outline btn-sm"
+            >Deployments</.link>
+            <.link
               :if={@current_actor.role in [:administrator, :maintainer]}
               navigate={~p"/repositories/#{@repository.id}/secrets"}
               class="btn btn-outline btn-sm"

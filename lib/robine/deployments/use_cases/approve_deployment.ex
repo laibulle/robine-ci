@@ -21,6 +21,7 @@ defmodule Robine.Deployments.UseCases.ApproveDeployment do
              correlation_id: correlation_id,
              action: "deployment.approved"
            }) do
+      _ = deps.dispatcher.enqueue()
       {:ok, view(approved)}
     end
   end

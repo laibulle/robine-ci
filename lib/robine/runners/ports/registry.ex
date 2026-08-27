@@ -17,6 +17,8 @@ defmodule Robine.Runners.Ports.Registry do
 
   @callback heartbeat(String.t(), pos_integer(), DateTime.t()) :: :ok | {:error, term()}
   @callback next_available(DateTime.t()) :: {:ok, map()} | {:error, :none}
+  @callback next_deployment_available([String.t()], DateTime.t()) ::
+              {:ok, map()} | {:error, :none}
   @callback get(String.t()) :: {:ok, Runner.t()} | {:error, :not_found}
   @callback list_fleet(DateTime.t()) :: {:ok, [map()]} | {:error, term()}
   @callback update_configuration(Runner.t(), map()) :: :ok | {:error, term()}

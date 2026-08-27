@@ -36,6 +36,7 @@ defmodule Robine.Adapters.Runner.RemoteClientTest do
     assert {:ok, ["1", "1", "runner:v1", "phx_join", hello]} = Jason.decode(encoded)
     assert hello["supported_protocol_versions"] == [1]
     assert hello["active_attempt_ids"] == ["attempt-1"]
+    assert hello["active_deployment_ids"] == ["deployment-1"]
     refute encoded =~ state.credential
 
     status = RemoteClient.format_status(:normal, [[], connected])
@@ -163,6 +164,58 @@ defmodule Robine.Adapters.Runner.RemoteClientTest do
     assert_receive {:runner_message, "job_offer", ^offer}
   end
 
+  test "durably accepts and replays deployment offers and events" do
+    state = %{state() | joined?: true, active_deployment_ids: []}
+
+    offer = %{
+      "deployment_id" => "deployment-2",
+      "idempotency_token" => "deployment-token-2",
+      "kind" => "application"
+    }
+
+    frame = Jason.encode!([nil, "server-2", "runner:v1", "deployment_offer", offer])
+
+    assert {:reply, {:text, acceptance_frame}, accepting} =
+             RemoteClient.handle_frame({:text, frame}, state)
+
+    assert {:ok, ["1", reference, "runner:v1", "deployment_accept", acceptance]} =
+             Jason.decode(acceptance_frame)
+
+    assert acceptance["deployment_id"] == "deployment-2"
+    assert acceptance["idempotency_token"] == "deployment-token-2"
+    refute_received {:runner_message, "deployment_offer", _offer}
+
+    reply =
+      Jason.encode!([
+        "1",
+        reference,
+        "runner:v1",
+        "phx_reply",
+        %{"status" => "ok", "response" => %{"acknowledged_sequence" => 1}}
+      ])
+
+    assert {:ok, accepted} = RemoteClient.handle_frame({:text, reply}, accepting)
+    assert_receive {:runner_message, "deployment_offer", ^offer}
+
+    event = %{
+      "deployment_id" => "deployment-2",
+      "idempotency_token" => "deployment-token-2",
+      "message_id" => Ecto.UUID.generate(),
+      "sequence" => 2,
+      "status" => "converging_services"
+    }
+
+    assert {:reply, {:text, event_frame}, pending} =
+             RemoteClient.handle_cast({:deployment_event, event}, accepted)
+
+    assert {:ok, ["1", event_reference, "runner:v1", "deployment_event", ^event]} =
+             Jason.decode(event_frame)
+
+    disconnected = %{pending | joined?: false}
+    assert {:ok, _ready} = RemoteClient.handle_frame({:text, welcome_frame()}, disconnected)
+    assert_receive {:replay_deployment_event, ^event_reference, ^event}
+  end
+
   test "forwards immediate revocation cancellation to the runner supervisor" do
     state = %{state() | joined?: true}
 
@@ -188,7 +241,9 @@ defmodule Robine.Adapters.Runner.RemoteClientTest do
       supported_protocol_versions: [1],
       capabilities: %{"docker" => true},
       active_attempt_ids: ["attempt-1"],
+      active_deployment_ids: ["deployment-1"],
       pending_events: %{},
+      pending_deployment_events: %{},
       pending_offers: %{},
       owner: self(),
       reconnect_attempt: 0,
@@ -200,4 +255,17 @@ defmodule Robine.Adapters.Runner.RemoteClientTest do
   end
 
   defp state(overrides), do: Map.merge(state(), overrides)
+
+  defp welcome_frame do
+    Jason.encode!([
+      "1",
+      "1",
+      "runner:v1",
+      "phx_reply",
+      %{
+        "status" => "ok",
+        "response" => %{"heartbeat_interval_seconds" => 20, "resume" => []}
+      }
+    ])
+  end
 end

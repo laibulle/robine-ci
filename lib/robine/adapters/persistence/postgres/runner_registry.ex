@@ -6,6 +6,7 @@ defmodule Robine.Adapters.Persistence.Postgres.RunnerRegistry do
 
   alias Robine.Adapters.Persistence.Postgres.Schemas.{
     AuditEvent,
+    Deployment,
     RemoteRunner,
     RunnerCredential,
     RunnerEnrollmentToken,
@@ -183,6 +184,7 @@ defmodule Robine.Adapters.Persistence.Postgres.RunnerRegistry do
             runner.last_seen_at >= ^stale_before and
             (fragment("COALESCE((?->>'docker')::boolean, false)", runner.capabilities) or
                fragment("COALESCE((?->>'native')::boolean, false)", runner.capabilities)) and
+            not fragment("COALESCE((?->>'deployments')::boolean, false)", runner.capabilities) and
             fragment(
               "COALESCE(?, 0) < COALESCE(NULLIF(?->>'concurrency', '')::integer, 1)",
               active.active_count,
@@ -202,6 +204,50 @@ defmodule Robine.Adapters.Persistence.Postgres.RunnerRegistry do
       runner -> {:ok, runner}
     end
   end
+
+  @impl true
+  def next_deployment_available(labels, now) when is_list(labels) do
+    stale_before = DateTime.add(now, -60, :second)
+
+    active_statuses = [
+      :queued,
+      :preparing,
+      :converging_services,
+      :migrating,
+      :activating,
+      :verifying
+    ]
+
+    busy_runners =
+      from deployment in Deployment,
+        where: deployment.status in ^active_statuses and not is_nil(deployment.runner_id),
+        select: deployment.runner_id
+
+    query =
+      from runner in RemoteRunner,
+        where:
+          runner.admin_state == :enabled and runner.protocol_version == 1 and
+            runner.last_seen_at >= ^stale_before and
+            fragment("COALESCE((?->>'docker')::boolean, false)", runner.capabilities) and
+            fragment("COALESCE((?->>'deployments')::boolean, false)", runner.capabilities) and
+            fragment("? @> ?::text[]", runner.labels, ^labels) and
+            runner.id not in subquery(busy_runners),
+        order_by: [asc: runner.last_seen_at, asc: runner.id],
+        limit: 1,
+        select: %{
+          id: runner.id,
+          name: runner.name,
+          capabilities: runner.capabilities,
+          labels: runner.labels
+        }
+
+    case Repo.one(query) do
+      nil -> {:error, :none}
+      runner -> {:ok, runner}
+    end
+  end
+
+  def next_deployment_available(_labels, _now), do: {:error, :none}
 
   @impl true
   def get(runner_id) do

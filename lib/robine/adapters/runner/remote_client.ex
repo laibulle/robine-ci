@@ -27,6 +27,10 @@ defmodule Robine.Adapters.Runner.RemoteClient do
   @spec send_attempt_event(pid(), map()) :: :ok
   def send_attempt_event(client, event), do: WebSockex.cast(client, {:attempt_event, event})
 
+  @spec send_deployment_event(pid(), map()) :: :ok
+  def send_deployment_event(client, event),
+    do: WebSockex.cast(client, {:deployment_event, event})
+
   @spec send_log_event(pid(), map()) :: :ok | {:error, term()}
   def send_log_event(client, event) do
     reference = Ecto.UUID.generate()
@@ -92,6 +96,7 @@ defmodule Robine.Adapters.Runner.RemoteClient do
         interval = welcome["heartbeat_interval_seconds"] || 20
         schedule_heartbeat(interval)
         replay_pending(state.pending_events)
+        replay_pending_deployments(state.pending_deployment_events)
         replay_pending_offers(state.pending_offers)
         notify(state, {:runner_connection, :ready, welcome})
         {:ok, %{state | joined?: true, heartbeat_seconds: interval}}
@@ -125,6 +130,45 @@ defmodule Robine.Adapters.Runner.RemoteClient do
           {:reply, text_frame(channel_message(reference, "job_accept", acceptance)), state}
         end
 
+      {:ok,
+       [
+         _join_ref,
+         _reference,
+         @topic,
+         "deployment_offer",
+         %{"deployment_id" => deployment_id} = offer
+       ]} ->
+        if deployment_id in state.active_deployment_ids do
+          notify(state, {
+            :runner_message,
+            "duplicate_deployment_offer",
+            %{"deployment_id" => deployment_id}
+          })
+
+          {:ok, state}
+        else
+          {reference, state} = next_reference(state)
+
+          acceptance = %{
+            "deployment_id" => deployment_id,
+            "idempotency_token" => offer["idempotency_token"],
+            "message_id" => Ecto.UUID.generate()
+          }
+
+          state = %{
+            state
+            | active_deployment_ids: [deployment_id | state.active_deployment_ids],
+              pending_offers:
+                Map.put(state.pending_offers, reference, %{
+                  type: :deployment,
+                  offer: offer,
+                  acceptance: acceptance
+                })
+          }
+
+          {:reply, text_frame(channel_message(reference, "deployment_accept", acceptance)), state}
+        end
+
       {:ok, [_join_ref, _reference, @topic, event, payload]} ->
         notify(state, {:runner_message, event, payload})
         {:ok, state}
@@ -150,6 +194,28 @@ defmodule Robine.Adapters.Runner.RemoteClient do
     {reference, state} = next_reference(state)
     notify(state, {:runner_event, :queued_for_reconnect, event["attempt_id"]})
     {:ok, %{state | pending_events: Map.put(state.pending_events, reference, event)}}
+  end
+
+  def handle_cast({:deployment_event, event}, %{joined?: true} = state) do
+    {reference, state} = next_reference(state)
+
+    state = %{
+      state
+      | pending_deployment_events: Map.put(state.pending_deployment_events, reference, event)
+    }
+
+    {:reply, text_frame(channel_message(reference, "deployment_event", event)), state}
+  end
+
+  def handle_cast({:deployment_event, event}, state) do
+    {reference, state} = next_reference(state)
+    notify(state, {:runner_event, :queued_for_reconnect, event["deployment_id"]})
+
+    {:ok,
+     %{
+       state
+       | pending_deployment_events: Map.put(state.pending_deployment_events, reference, event)
+     }}
   end
 
   def handle_cast({:log_event, event}, %{joined?: true} = state) do
@@ -181,11 +247,24 @@ defmodule Robine.Adapters.Runner.RemoteClient do
 
   def handle_info({:replay_attempt_event, _reference, _event}, state), do: {:ok, state}
 
+  def handle_info({:replay_deployment_event, reference, event}, %{joined?: true} = state) do
+    {:reply, text_frame(channel_message(reference, "deployment_event", event)), state}
+  end
+
+  def handle_info({:replay_deployment_event, _reference, _event}, state), do: {:ok, state}
+
   def handle_info({:replay_job_accept, reference, acceptance}, %{joined?: true} = state) do
     {:reply, text_frame(channel_message(reference, "job_accept", acceptance)), state}
   end
 
   def handle_info({:replay_job_accept, _reference, _acceptance}, state), do: {:ok, state}
+
+  def handle_info({:replay_deployment_accept, reference, acceptance}, %{joined?: true} = state) do
+    {:reply, text_frame(channel_message(reference, "deployment_accept", acceptance)), state}
+  end
+
+  def handle_info({:replay_deployment_accept, _reference, _acceptance}, state),
+    do: {:ok, state}
 
   @impl true
   def format_status(_reason, [_process_dictionary, state]) do
@@ -233,7 +312,9 @@ defmodule Robine.Adapters.Runner.RemoteClient do
          supported_protocol_versions: Keyword.get(options, :supported_protocol_versions, [1]),
          capabilities: Keyword.get(options, :capabilities, Capabilities.detect()),
          active_attempt_ids: Keyword.get(options, :active_attempt_ids, []),
+         active_deployment_ids: Keyword.get(options, :active_deployment_ids, []),
          pending_events: %{},
+         pending_deployment_events: %{},
          pending_offers: %{},
          owner: Keyword.get(options, :owner, self()),
          reconnect_attempt: 0,
@@ -274,7 +355,8 @@ defmodule Robine.Adapters.Runner.RemoteClient do
         "supported_protocol_versions" => state.supported_protocol_versions,
         "software_version" => state.software_version,
         "capabilities" => state.capabilities,
-        "active_attempt_ids" => state.active_attempt_ids
+        "active_attempt_ids" => state.active_attempt_ids,
+        "active_deployment_ids" => state.active_deployment_ids
       }
     ]
   end
@@ -297,9 +379,20 @@ defmodule Robine.Adapters.Runner.RemoteClient do
     end)
   end
 
+  defp replay_pending_deployments(pending) do
+    Enum.each(pending, fn {reference, event} ->
+      send(self(), {:replay_deployment_event, reference, event})
+    end)
+  end
+
   defp replay_pending_offers(pending) do
-    Enum.each(pending, fn {reference, %{acceptance: acceptance}} ->
-      send(self(), {:replay_job_accept, reference, acceptance})
+    Enum.each(pending, fn {reference, %{acceptance: acceptance} = pending_offer} ->
+      event =
+        if pending_offer[:type] == :deployment,
+          do: :replay_deployment_accept,
+          else: :replay_job_accept
+
+      send(self(), {event, reference, acceptance})
     end)
   end
 
@@ -318,28 +411,65 @@ defmodule Robine.Adapters.Runner.RemoteClient do
 
         %{state | pending_events: pending, active_attempt_ids: active}
     end
+    |> acknowledge_deployment_pending(reference)
   end
 
   defp acknowledge_pending(_reference, _reply, state), do: state
+
+  defp acknowledge_deployment_pending(state, reference) do
+    case Map.pop(state.pending_deployment_events, reference) do
+      {nil, pending} ->
+        %{state | pending_deployment_events: pending}
+
+      {event, pending} ->
+        active =
+          if event["status"] in ~w(succeeded failed cancelled verification_failed) do
+            List.delete(state.active_deployment_ids, event["deployment_id"])
+          else
+            state.active_deployment_ids
+          end
+
+        %{state | pending_deployment_events: pending, active_deployment_ids: active}
+    end
+  end
 
   defp acknowledge_offer(reference, reply, state) do
     case Map.pop(state.pending_offers, reference) do
       {nil, pending} ->
         %{state | pending_offers: pending}
 
-      {%{offer: offer}, pending} ->
-        if reply["status"] == "ok" do
-          notify(state, {:runner_message, "job_offer", offer})
-          %{state | pending_offers: pending}
-        else
-          notify(state, {:runner_error, {:job_offer_rejected, offer["attempt_id"]}})
+      {%{offer: offer} = pending_offer, pending} ->
+        acknowledge_typed_offer(pending_offer[:type] || :job, offer, pending, reply, state)
+    end
+  end
 
-          %{
-            state
-            | pending_offers: pending,
-              active_attempt_ids: List.delete(state.active_attempt_ids, offer["attempt_id"])
-          }
-        end
+  defp acknowledge_typed_offer(:deployment, offer, pending, reply, state) do
+    if reply["status"] == "ok" do
+      notify(state, {:runner_message, "deployment_offer", offer})
+      %{state | pending_offers: pending}
+    else
+      notify(state, {:runner_error, {:deployment_offer_rejected, offer["deployment_id"]}})
+
+      %{
+        state
+        | pending_offers: pending,
+          active_deployment_ids: List.delete(state.active_deployment_ids, offer["deployment_id"])
+      }
+    end
+  end
+
+  defp acknowledge_typed_offer(:job, offer, pending, reply, state) do
+    if reply["status"] == "ok" do
+      notify(state, {:runner_message, "job_offer", offer})
+      %{state | pending_offers: pending}
+    else
+      notify(state, {:runner_error, {:job_offer_rejected, offer["attempt_id"]}})
+
+      %{
+        state
+        | pending_offers: pending,
+          active_attempt_ids: List.delete(state.active_attempt_ids, offer["attempt_id"])
+      }
     end
   end
 

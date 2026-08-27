@@ -1,10 +1,11 @@
 defmodule Robine.Adapters.Runner.Capabilities do
   @moduledoc "Normalizes host facts and selects the remote runner execution mode."
 
-  @spec detect({atom(), atom()}, String.t()) :: map()
+  @spec detect({atom(), atom()}, String.t(), boolean()) :: map()
   def detect(
         os_type \\ :os.type(),
-        architecture \\ to_string(:erlang.system_info(:system_architecture))
+        architecture \\ to_string(:erlang.system_info(:system_architecture)),
+        deployments? \\ false
       ) do
     os = normalize_os(os_type)
     executor = if os == "macos", do: "native", else: "docker"
@@ -15,6 +16,7 @@ defmodule Robine.Adapters.Runner.Capabilities do
       "docker" => executor == "docker",
       "native" => executor == "native",
       "executor" => executor,
+      "deployments" => deployments?,
       "concurrency" => 1
     }
   end

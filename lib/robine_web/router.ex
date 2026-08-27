@@ -49,6 +49,7 @@ defmodule RobineWeb.Router do
       live "/repositories", RepositoryLive.Index, :index
       live "/repositories/:id", RepositoryLive.Show, :show
       live "/repositories/:id/releases", RepositoryLive.Releases, :index
+      live "/repositories/:id/deployments", RepositoryLive.Deployments, :index
       live "/build-information", BuildInfoLive.Show, :show
     end
 
@@ -83,12 +84,15 @@ defmodule RobineWeb.Router do
     put "/attempts/:attempt_id/cache", RunnerAttemptController, :save_cache
     get "/attempts/:attempt_id/artifacts", RunnerAttemptController, :download_artifact
     put "/attempts/:attempt_id/artifacts", RunnerAttemptController, :upload_artifact
+    get "/deployments/:deployment_id/artifact", RunnerDeploymentController, :artifact
+    get "/deployments/:deployment_id/secrets", RunnerDeploymentController, :secrets
   end
 
   scope "/health", RobineWeb do
     pipe_through :api
     get "/live", HealthController, :live
     get "/ready", HealthController, :ready
+    get "/version", HealthController, :version
   end
 
   scope "/", RobineWeb do

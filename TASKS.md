@@ -497,28 +497,28 @@ These items are intentionally unordered and must receive specifications before i
 
 - **Spec:** [DEP-001](docs/specs/deployments/dep-001-native-deployments.md)
 - **Depends on:** IAM-102, RUN-203, SCM-802, WEB-103
-- [ ] Add pure environment, service specification, artifact snapshot, deployment, and transition-policy modules with name, path, protection, digest, volume, and state invariants.
-- [ ] Persist environment configuration, immutable artifact and desired-state snapshots, approval, ordered phase events, audit correlation, and terminal outcomes with tenant isolation.
-- [ ] Expose administrator-authorized configuration and deployment operations through the `Robine.Deployments` facade.
-- [ ] Prove transition, authorization, self-approval, concurrency, and restart-safety behavior.
+- [x] Add pure environment, service specification, artifact snapshot, deployment, and transition-policy modules with name, path, protection, digest, volume, and state invariants.
+- [x] Persist environment configuration, immutable artifact and desired-state snapshots, approval, ordered idempotent phase events, audit correlation, and terminal outcomes behind tenant RLS policies.
+- [x] Expose administrator-authorized configuration and deployment operations through the `Robine.Deployments` facade.
+- [ ] Prove transition, authorization, self-approval, concurrency, and restart-safety behavior. Transition, runner ownership, idempotent replay, self-approval, and serialized queue coverage exist; control-plane/runner restart recovery remains.
 
 ### DEP-102 — Execute native Docker deployments safely
 
 - **Spec:** [DEP-001](docs/specs/deployments/dep-001-native-deployments.md)
 - **Depends on:** DEP-101
-- [ ] Resolve and pin the application artifact, source revision, persistent-service specs, and normalized desired-state digests before approval.
-- [ ] Add a deployment-capable runner offer and a locally allowlisted Docker convergence executor without arbitrary shell or Compose input.
-- [ ] Transfer only referenced secrets and the exact digest-verified artifact, reuse cursor-based redacted logs, and guarantee attempt cleanup without deleting persistent volumes.
-- [ ] Serialize deployments per environment and integrate ordered events, cancellation, lease recovery, remote observation, and capacity explanations.
-- [ ] Verify successful activation through bounded same-origin Req health and exact-version checks.
+- [x] Resolve and pin the application artifact, source revision, persistent-service specs, and normalized desired-state digests before approval.
+- [x] Add a deployment-capable runner offer and a locally root-allowlisted Docker convergence executor without arbitrary shell or Compose input.
+- [ ] Transfer only referenced secrets and the exact digest-verified artifact, reuse cursor-based redacted logs, and guarantee attempt cleanup without deleting persistent volumes. Secret/artifact transfer, safe temporary cleanup, and volume preservation exist; deployment log streaming remains.
+- [ ] Serialize deployments per environment and integrate ordered events, cancellation, lease recovery, remote observation, and capacity explanations. Queue serialization and ordered runner events exist; remote cancellation, lease recovery, observation, and diagnostics remain.
+- [x] Verify successful activation through bounded same-origin Req health and exact-version checks.
 - [ ] Require fresh backup evidence for PostgreSQL major upgrades and reject automatic downgrade or unsafe application rollback.
 
 ### DEP-103 — Deliver the deployment experience
 
 - **Spec:** [DEP-001](docs/specs/deployments/dep-001-native-deployments.md)
 - **Depends on:** DEP-102, OPS-101
-- [ ] Add accessible application/platform environment configuration and overview to repository administration.
-- [ ] Add deployment request, separate production approval, timeline, grouped live logs, cancellation, redeploy, and retry-verification journeys.
+- [x] Add accessible application/platform environment configuration and overview to repository administration.
+- [ ] Add deployment request, separate production approval, timeline, grouped live logs, cancellation, redeploy, and retry-verification journeys. Request, independent approval, status timeline, pre-effect cancellation, and retry verification exist; logs, explicit redeploy, rollback, and remote cancellation remain.
 - [ ] Emit bounded metrics, structured correlation events, audit events, and deployment readiness diagnostics.
 - [ ] Verify staging and protected-production journeys end to end with real PostgreSQL, S3-compatible storage, application, ingress, persistent volumes, and a deployment runner restart.
 

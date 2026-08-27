@@ -1,8 +1,7 @@
 defmodule RobineWeb.RunnerChannel do
   use RobineWeb, :channel
 
-  alias Robine.Runners
-  alias Robine.Pipelines
+  alias Robine.{Deployments, Pipelines, Runners}
   alias Robine.Runtime.Dependencies
 
   @impl true
@@ -80,6 +79,26 @@ defmodule RobineWeb.RunnerChannel do
     end
   end
 
+  def handle_in("deployment_accept", payload, socket) do
+    input = %{
+      deployment_id: payload["deployment_id"],
+      idempotency_token: payload["idempotency_token"],
+      message_id: payload["message_id"],
+      sequence: 1,
+      status: :preparing,
+      reason: nil
+    }
+
+    with true <- valid_identifier?(input.deployment_id),
+         true <- valid_identifier?(input.idempotency_token),
+         true <- valid_identifier?(input.message_id),
+         {:ok, deployment} <- Deployments.record_runner_event(input, context(socket)) do
+      {:reply, {:ok, deployment_acknowledgement(input, deployment)}, socket}
+    else
+      _invalid -> {:reply, {:error, %{code: "invalid_deployment_accept"}}, socket}
+    end
+  end
+
   @impl true
   def handle_in("attempt_event", payload, socket) do
     with {:ok, input} <- attempt_event_input(payload),
@@ -102,6 +121,23 @@ defmodule RobineWeb.RunnerChannel do
 
       {:error, _reason} ->
         {:reply, {:error, %{code: "invalid_attempt_event"}}, socket}
+    end
+  end
+
+  def handle_in("deployment_event", payload, socket) do
+    with {:ok, input} <- deployment_event_input(payload),
+         {:ok, deployment} <- Deployments.record_runner_event(input, context(socket)),
+         {:ok, deployment} <- verify_if_ready(deployment, socket) do
+      {:reply, {:ok, deployment_acknowledgement(input, deployment)}, socket}
+    else
+      {:error, :invalid_event_sequence} ->
+        {:reply, {:error, %{code: "invalid_event_sequence"}}, socket}
+
+      {:error, :invalid_deployment_transition} ->
+        {:reply, {:error, %{code: "invalid_deployment_transition"}}, socket}
+
+      {:error, _reason} ->
+        {:reply, {:error, %{code: "invalid_deployment_event"}}, socket}
     end
   end
 
@@ -139,6 +175,11 @@ defmodule RobineWeb.RunnerChannel do
   @impl true
   def handle_info({:job_offer, offer}, socket) do
     push(socket, "job_offer", offer)
+    {:noreply, socket}
+  end
+
+  def handle_info({:deployment_offer, offer}, socket) do
+    push(socket, "deployment_offer", offer)
     {:noreply, socket}
   end
 
@@ -216,6 +257,63 @@ defmodule RobineWeb.RunnerChannel do
        }}
     end
   end
+
+  defp deployment_event_input(payload) do
+    with true <- valid_identifier?(payload["deployment_id"]),
+         true <- valid_identifier?(payload["message_id"]),
+         true <- valid_identifier?(payload["idempotency_token"]),
+         true <- is_integer(payload["sequence"]) and payload["sequence"] > 0,
+         {:ok, status} <- deployment_status(payload["status"]),
+         {:ok, reason} <- deployment_reason(payload["reason"]) do
+      {:ok,
+       %{
+         deployment_id: payload["deployment_id"],
+         idempotency_token: payload["idempotency_token"],
+         message_id: payload["message_id"],
+         sequence: payload["sequence"],
+         status: status,
+         reason: reason
+       }}
+    else
+      _invalid -> {:error, :invalid_deployment_event}
+    end
+  end
+
+  defp deployment_status(status)
+       when status in ~w(converging_services migrating activating verifying failed cancelled),
+       do: {:ok, String.to_existing_atom(status)}
+
+  defp deployment_status(_status), do: {:error, :invalid_status}
+
+  defp deployment_reason(nil), do: {:ok, nil}
+
+  defp deployment_reason(reason) when is_binary(reason) and byte_size(reason) in 1..256,
+    do: {:ok, reason}
+
+  defp deployment_reason(_reason), do: {:error, :invalid_reason}
+
+  defp verify_if_ready(%{status: :verifying, id: deployment_id}, socket) do
+    system_context =
+      Dependencies.context(
+        %{id: "system:deployment-verifier", role: :administrator},
+        socket.assigns.correlation_id
+      )
+
+    Deployments.verify_deployment(%{deployment_id: deployment_id}, system_context)
+  end
+
+  defp verify_if_ready(deployment, _socket), do: {:ok, deployment}
+
+  defp deployment_acknowledgement(input, deployment) do
+    %{
+      message_id: input.message_id,
+      deployment_id: deployment.id,
+      acknowledged_sequence: deployment.event_sequence,
+      status: deployment.status
+    }
+  end
+
+  defp valid_identifier?(value), do: is_binary(value) and value != ""
 
   defp status("preparing"), do: {:ok, :preparing}
   defp status("running"), do: {:ok, :running}

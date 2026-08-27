@@ -24,6 +24,12 @@ defmodule Robine.Runners do
   @spec select_available(map(), ExecutionContext.t()) :: {:ok, map()} | {:error, term()}
   defdelegate select_available(input, context), to: UseCases.SelectAvailableRunner, as: :call
 
+  @spec select_deployment_runner(map(), ExecutionContext.t()) ::
+          {:ok, map()} | {:error, term()}
+  defdelegate select_deployment_runner(input, context),
+    to: UseCases.SelectDeploymentRunner,
+    as: :call
+
   @spec list_fleet(map(), ExecutionContext.t()) :: {:ok, [map()]} | {:error, term()}
   defdelegate list_fleet(input, context), to: UseCases.ListFleet, as: :call
 

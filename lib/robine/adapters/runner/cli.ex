@@ -4,6 +4,7 @@ defmodule Robine.Adapters.Runner.CLI do
   import Bitwise
 
   alias Robine.Adapters.Runner.RemoteClient
+  alias Robine.Adapters.Runner.DeploymentExecutor
   alias Robine.Adapters.Runner.RemoteExecutor
   alias Robine.Adapters.Runner.Capabilities
   alias Robine.Adapters.CLI.NativeRuntime
@@ -29,19 +30,40 @@ defmodule Robine.Adapters.Runner.CLI do
   def run(["enroll" | arguments]) do
     {options, positional, invalid} =
       OptionParser.parse(arguments,
-        strict: [server: :string, name: :string, config: :string, force: :boolean]
+        strict: [
+          server: :string,
+          name: :string,
+          config: :string,
+          force: :boolean,
+          deployments: :boolean,
+          deployment_root: :string
+        ]
       )
 
     token = System.get_env("ROBINE_RUNNER_ENROLLMENT_TOKEN")
     System.delete_env("ROBINE_RUNNER_ENROLLMENT_TOKEN")
 
     cond do
-      invalid != [] or positional != [] -> usage("invalid enroll arguments")
-      not is_binary(options[:server]) -> usage("--server is required")
-      not is_binary(options[:name]) -> usage("--name is required")
-      not is_binary(options[:config]) -> usage("--config is required")
-      not is_binary(token) or token == "" -> usage("ROBINE_RUNNER_ENROLLMENT_TOKEN is required")
-      true -> enroll(options, token)
+      invalid != [] or positional != [] ->
+        usage("invalid enroll arguments")
+
+      not is_binary(options[:server]) ->
+        usage("--server is required")
+
+      not is_binary(options[:name]) ->
+        usage("--name is required")
+
+      not is_binary(options[:config]) ->
+        usage("--config is required")
+
+      options[:deployments] == true and not is_binary(options[:deployment_root]) ->
+        usage("--deployment-root is required with --deployments")
+
+      not is_binary(token) or token == "" ->
+        usage("ROBINE_RUNNER_ENROLLMENT_TOKEN is required")
+
+      true ->
+        enroll(options, token)
     end
   end
 
@@ -61,7 +83,14 @@ defmodule Robine.Adapters.Runner.CLI do
     with {:ok, _socket_url} <- RemoteClient.socket_url(options[:server]),
          :ok <- available_path(options[:config], options[:force]),
          {:ok, response} <- enrollment_request(options, token),
-         {:ok, config} <- enrollment_config(response.body, options[:server], options[:name]),
+         {:ok, config} <-
+           enrollment_config(
+             response.body,
+             options[:server],
+             options[:name],
+             options[:deployments] || false,
+             options[:deployment_root]
+           ),
          :ok <- write_private_config(options[:config], config) do
       {:exit, 0,
        "Runner enrolled as #{config["runner_id"]}. Credential stored in #{Path.expand(options[:config])}."}
@@ -92,7 +121,13 @@ defmodule Robine.Adapters.Runner.CLI do
     end
   end
 
-  defp enrollment_config(%{"runner_id" => runner_id, "credential" => credential}, server, name)
+  defp enrollment_config(
+         %{"runner_id" => runner_id, "credential" => credential},
+         server,
+         name,
+         deployments?,
+         deployment_root
+       )
        when is_binary(runner_id) and is_binary(credential) do
     {:ok,
      %{
@@ -100,11 +135,17 @@ defmodule Robine.Adapters.Runner.CLI do
        "runner_id" => runner_id,
        "credential" => credential,
        "name" => name,
+       "deployments" => deployments?,
+       "deployment_roots" => deployment_roots(deployments?, deployment_root),
        "executor" => Capabilities.detect()["executor"]
      }}
   end
 
-  defp enrollment_config(_body, _server, _name), do: {:error, :invalid_server_response}
+  defp enrollment_config(_body, _server, _name, _deployments?, _deployment_root),
+    do: {:error, :invalid_server_response}
+
+  defp deployment_roots(true, root), do: [Path.expand(root)]
+  defp deployment_roots(false, _root), do: []
 
   defp available_path(path, true), do: ensure_parent(path)
 
@@ -144,19 +185,32 @@ defmodule Robine.Adapters.Runner.CLI do
 
   defp private_mode?(mode), do: (mode &&& 0o077) == 0
 
-  defp validate_config(%{
-         "server_url" => server_url,
-         "runner_id" => runner_id,
-         "credential" => credential
-       })
+  defp validate_config(
+         %{
+           "server_url" => server_url,
+           "runner_id" => runner_id,
+           "credential" => credential
+         } = config
+       )
        when is_binary(server_url) and is_binary(runner_id) and is_binary(credential) do
-    case RemoteClient.socket_url(server_url) do
-      {:ok, _url} -> :ok
-      {:error, reason} -> {:error, reason}
+    with :ok <- valid_deployment_config(config),
+         {:ok, _url} <- RemoteClient.socket_url(server_url) do
+      :ok
     end
   end
 
   defp validate_config(_config), do: {:error, :invalid_config}
+
+  defp valid_deployment_config(%{"deployments" => true, "deployment_roots" => roots})
+       when is_list(roots) and roots != [] do
+    if Enum.all?(roots, &(is_binary(&1) and Path.type(&1) == :absolute)),
+      do: :ok,
+      else: {:error, :invalid_deployment_roots}
+  end
+
+  defp valid_deployment_config(%{"deployments" => false}), do: :ok
+  defp valid_deployment_config(config) when not is_map_key(config, "deployments"), do: :ok
+  defp valid_deployment_config(_config), do: {:error, :invalid_deployment_config}
 
   defp start_foreground(config) do
     :ok = prepare_native_runtime!()
@@ -169,7 +223,12 @@ defmodule Robine.Adapters.Runner.CLI do
            credential: config["credential"],
            owner: self(),
            software_version: @version,
-           capabilities: Capabilities.detect()
+           capabilities:
+             Capabilities.detect(
+               :os.type(),
+               to_string(:erlang.system_info(:system_architecture)),
+               config["deployments"] == true
+             )
          ) do
       {:ok, client} ->
         monitor(client, config)
@@ -210,6 +269,10 @@ defmodule Robine.Adapters.Runner.CLI do
         executions = start_execution(offer, client, config, executions)
         monitor_loop(client, reference, config, executions)
 
+      {:runner_message, "deployment_offer", offer} ->
+        executions = start_deployment(offer, client, config, executions)
+        monitor_loop(client, reference, config, executions)
+
       {:runner_message, "cancel", %{"attempt_id" => attempt_id}} ->
         case Map.get(executions, attempt_id) do
           {pid, _monitor} -> send(pid, :cancel_requested)
@@ -227,6 +290,10 @@ defmodule Robine.Adapters.Runner.CLI do
 
       {:remote_execution_finished, attempt_id, pid, _result} ->
         executions = finish_execution(executions, attempt_id, pid)
+        monitor_loop(client, reference, config, executions)
+
+      {:deployment_execution_finished, deployment_id, pid, _result} ->
+        executions = finish_execution(executions, {:deployment, deployment_id}, pid)
         monitor_loop(client, reference, config, executions)
 
       {:DOWN, ^reference, :process, ^client, reason} ->
@@ -261,6 +328,27 @@ defmodule Robine.Adapters.Runner.CLI do
 
   defp start_execution(_offer, _client, _config, executions), do: executions
 
+  defp start_deployment(%{"deployment_id" => deployment_id} = offer, client, config, executions)
+       when is_binary(deployment_id) do
+    key = {:deployment, deployment_id}
+
+    if Map.has_key?(executions, key) do
+      executions
+    else
+      owner = self()
+
+      {pid, monitor} =
+        spawn_monitor(fn ->
+          result = DeploymentExecutor.run(offer, client, config)
+          send(owner, {:deployment_execution_finished, deployment_id, self(), result})
+        end)
+
+      Map.put(executions, key, {pid, monitor})
+    end
+  end
+
+  defp start_deployment(_offer, _client, _config, executions), do: executions
+
   defp finish_execution(executions, attempt_id, pid) do
     case Map.get(executions, attempt_id) do
       {^pid, monitor} ->
@@ -284,7 +372,7 @@ defmodule Robine.Adapters.Runner.CLI do
      "#{message}\n" <>
        "Usage:\n" <>
        "  robine-runner version\n" <>
-       "  ROBINE_RUNNER_ENROLLMENT_TOKEN=... robine-runner enroll --server URL --name NAME --config FILE\n" <>
+       "  ROBINE_RUNNER_ENROLLMENT_TOKEN=... robine-runner enroll --server URL --name NAME --config FILE [--deployments --deployment-root DIR]\n" <>
        "  robine-runner start --config FILE"}
   end
 

@@ -57,6 +57,7 @@ config :robine, Oban,
        {"* * * * *", Robine.Adapters.Background.ReconcileOutboxWorker},
        {"* * * * *", Robine.Adapters.Background.ReconcileAutoscalingWorker},
        {"* * * * *", Robine.Adapters.Background.ReconcileScheduledWorkflowsWorker},
+       {"* * * * *", Robine.Adapters.Background.RunNextDeploymentWorker},
        {"*/5 * * * *", Robine.Adapters.Background.ReconcileGitHubChecksWorker},
        {"*/5 * * * *", Robine.Adapters.Background.ReconcileRunnerResourcesWorker},
        {"17 * * * *", Robine.Adapters.Background.PruneRetentionWorker}

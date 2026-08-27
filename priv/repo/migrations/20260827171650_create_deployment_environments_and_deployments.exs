@@ -31,7 +31,8 @@ defmodule Robine.Repo.Migrations.CreateDeploymentEnvironmentsAndDeployments do
       add :id, :binary_id, primary_key: true
 
       add :environment_id,
-          references(:deployment_environments, type: :binary_id, on_delete: :restrict), null: false
+          references(:deployment_environments, type: :binary_id, on_delete: :restrict),
+          null: false
 
       add :repository_id,
           references(:github_repositories, type: :binary_id, on_delete: :delete_all), null: false
@@ -96,6 +97,5 @@ defmodule Robine.Repo.Migrations.CreateDeploymentEnvironmentsAndDeployments do
         "DROP POLICY IF EXISTS #{table}_tenant_isolation ON #{table}"
       )
     end
-
   end
 end

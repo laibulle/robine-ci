@@ -12,7 +12,8 @@ defmodule Robine.Deployments.Domain.Deployment do
     converging_services: [:migrating, :cancelled, :failed],
     migrating: [:activating, :failed],
     activating: [:verifying, :failed],
-    verifying: [:succeeded, :verification_failed, :failed]
+    verifying: [:succeeded, :verification_failed, :failed],
+    verification_failed: [:verifying]
   }
 
   @enforce_keys [
@@ -31,13 +32,29 @@ defmodule Robine.Deployments.Domain.Deployment do
     :updated_at
   ]
   defstruct @enforce_keys ++
-              [:approver_id, :approved_at, :started_at, :finished_at, :failure_reason]
+              [
+                :approver_id,
+                :approved_at,
+                :attempt_id,
+                :idempotency_token,
+                :runner_id,
+                :assigned_at,
+                :lease_expires_at,
+                :started_at,
+                :finished_at,
+                :failure_reason
+              ]
 
   @type t :: %__MODULE__{}
 
   @spec new(map(), Environment.t(), ArtifactSnapshot.t(), DateTime.t()) ::
           {:ok, t()} | {:error, term()}
-  def new(attributes, %Environment{} = environment, %ArtifactSnapshot{} = artifact, %DateTime{} = now) do
+  def new(
+        attributes,
+        %Environment{} = environment,
+        %ArtifactSnapshot{} = artifact,
+        %DateTime{} = now
+      ) do
     kind = Map.get(attributes, :kind, :application)
     requester_id = Map.get(attributes, :requester_id)
     id = Map.get(attributes, :id)
@@ -56,7 +73,10 @@ defmodule Robine.Deployments.Domain.Deployment do
         {:error, :rollback_forbidden}
 
       true ->
-        status = if environment.protection == :protected, do: :awaiting_approval, else: :queued
+        status =
+          if environment.protection == :protected or kind == :platform,
+            do: :awaiting_approval,
+            else: :queued
 
         {:ok,
          %__MODULE__{
@@ -78,7 +98,11 @@ defmodule Robine.Deployments.Domain.Deployment do
   end
 
   @spec approve(t(), String.t(), DateTime.t()) :: {:ok, t()} | {:error, term()}
-  def approve(%__MODULE__{status: :awaiting_approval, requester_id: requester} = deployment, actor, now)
+  def approve(
+        %__MODULE__{status: :awaiting_approval, requester_id: requester} = deployment,
+        actor,
+        now
+      )
       when is_binary(actor) and actor != requester do
     {:ok,
      %{
@@ -92,6 +116,37 @@ defmodule Robine.Deployments.Domain.Deployment do
 
   def approve(%__MODULE__{requester_id: actor}, actor, _now), do: {:error, :self_approval}
   def approve(%__MODULE__{}, _actor, _now), do: {:error, :invalid_deployment_transition}
+
+  @spec assign(t(), String.t(), String.t(), String.t(), DateTime.t(), DateTime.t()) ::
+          {:ok, t()} | {:error, term()}
+  def assign(
+        %__MODULE__{status: :queued, runner_id: nil} = deployment,
+        runner_id,
+        attempt_id,
+        idempotency_token,
+        %DateTime{} = assigned_at,
+        %DateTime{} = lease_expires_at
+      )
+      when is_binary(runner_id) and is_binary(attempt_id) and is_binary(idempotency_token) do
+    if runner_id != "" and attempt_id != "" and idempotency_token != "" and
+         DateTime.compare(lease_expires_at, assigned_at) == :gt do
+      {:ok,
+       %{
+         deployment
+         | runner_id: runner_id,
+           attempt_id: attempt_id,
+           idempotency_token: idempotency_token,
+           assigned_at: assigned_at,
+           lease_expires_at: lease_expires_at,
+           updated_at: assigned_at
+       }}
+    else
+      {:error, :invalid_deployment_assignment}
+    end
+  end
+
+  def assign(%__MODULE__{}, _runner, _attempt, _token, _assigned, _lease),
+    do: {:error, :deployment_not_assignable}
 
   @spec record_event(t(), non_neg_integer(), atom(), String.t() | nil, DateTime.t()) ::
           {:ok, t()} | {:error, term()}

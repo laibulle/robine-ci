@@ -42,7 +42,8 @@ defmodule Robine.Deployments.Domain.ServiceSpec do
          {:ok, command} <- command(value(attributes, :command, [])),
          {:ok, environment} <- environment(value(attributes, :environment, %{}), :plain),
          {:ok, secrets} <- environment(value(attributes, :secret_environment, %{}), :secret),
-         true <- MapSet.disjoint?(MapSet.new(Map.keys(environment)), MapSet.new(Map.keys(secrets))),
+         true <-
+           MapSet.disjoint?(MapSet.new(Map.keys(environment)), MapSet.new(Map.keys(secrets))),
          {:ok, volumes} <- volumes(value(attributes, :volumes, [])),
          {:ok, healthcheck} <- healthcheck(value(attributes, :healthcheck, %{})) do
       normalized = %{
@@ -213,5 +214,6 @@ defmodule Robine.Deployments.Domain.ServiceSpec do
   defp canonical(value) when is_atom(value), do: Atom.to_string(value)
   defp canonical(value), do: value
 
-  defp value(map, key, default \\ nil), do: Map.get(map, key, Map.get(map, Atom.to_string(key), default))
+  defp value(map, key, default \\ nil),
+    do: Map.get(map, key, Map.get(map, Atom.to_string(key), default))
 end

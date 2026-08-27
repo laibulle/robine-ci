@@ -16,18 +16,29 @@ defmodule Robine.Deployments.Domain.ArtifactSnapshot do
     snapshot = struct(__MODULE__, attributes)
 
     cond do
-      not present?(snapshot.artifact_id) -> {:error, {:invalid_artifact_snapshot, :artifact_id}}
-      not present?(snapshot.pipeline_id) -> {:error, {:invalid_artifact_snapshot, :pipeline_id}}
-      not valid?(snapshot.filename, @filename) -> {:error, {:invalid_artifact_snapshot, :filename}}
-      not valid?(snapshot.digest, @digest) -> {:error, {:invalid_artifact_snapshot, :digest}}
+      not present?(snapshot.artifact_id) ->
+        {:error, {:invalid_artifact_snapshot, :artifact_id}}
+
+      not present?(snapshot.pipeline_id) ->
+        {:error, {:invalid_artifact_snapshot, :pipeline_id}}
+
+      not valid?(snapshot.filename, @filename) ->
+        {:error, {:invalid_artifact_snapshot, :filename}}
+
+      not valid?(snapshot.digest, @digest) ->
+        {:error, {:invalid_artifact_snapshot, :digest}}
+
       not (is_integer(snapshot.size) and snapshot.size > 0) ->
         {:error, {:invalid_artifact_snapshot, :size}}
 
-      not valid?(snapshot.tag, @tag) -> {:error, {:invalid_artifact_snapshot, :tag}}
+      not valid?(snapshot.tag, @tag) ->
+        {:error, {:invalid_artifact_snapshot, :tag}}
+
       not valid?(snapshot.commit_sha, @commit) ->
         {:error, {:invalid_artifact_snapshot, :commit_sha}}
 
-      true -> {:ok, snapshot}
+      true ->
+        {:ok, snapshot}
     end
   end
 

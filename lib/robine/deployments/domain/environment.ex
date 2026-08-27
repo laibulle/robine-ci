@@ -104,8 +104,8 @@ defmodule Robine.Deployments.Domain.Environment do
   defp deployment_root(path) when is_binary(path) do
     if String.starts_with?(path, "/") and Path.expand(path) == path and path != "/" and
          byte_size(path) <= 512,
-      do: {:ok, path},
-      else: {:error, :deployment_root}
+       do: {:ok, path},
+       else: {:error, :deployment_root}
   end
 
   defp deployment_root(_path), do: {:error, :deployment_root}
@@ -156,7 +156,8 @@ defmodule Robine.Deployments.Domain.Environment do
   defp status_range(_value), do: {:error, :status}
 
   defp safe_version_path?(path) when is_binary(path) do
-    byte_size(path) in 1..128 and String.starts_with?(path, "/") and not String.contains?(path, "..")
+    byte_size(path) in 1..128 and String.starts_with?(path, "/") and
+      not String.contains?(path, "..")
   end
 
   defp safe_version_path?(_path), do: false
@@ -194,10 +195,22 @@ defmodule Robine.Deployments.Domain.Environment do
 
   defp digest(value) do
     value
-    |> :erlang.term_to_binary(deterministic: true)
+    |> canonical()
+    |> :erlang.term_to_binary()
     |> then(&:crypto.hash(:sha256, &1))
     |> Base.encode16(case: :lower)
   end
 
-  defp value(map, key, default \\ nil), do: Map.get(map, key, Map.get(map, Atom.to_string(key), default))
+  defp canonical(value) when is_map(value) do
+    value
+    |> Enum.map(fn {key, item} -> {to_string(key), canonical(item)} end)
+    |> Enum.sort()
+  end
+
+  defp canonical(value) when is_list(value), do: Enum.map(value, &canonical/1)
+  defp canonical(value) when is_atom(value), do: Atom.to_string(value)
+  defp canonical(value), do: value
+
+  defp value(map, key, default \\ nil),
+    do: Map.get(map, key, Map.get(map, Atom.to_string(key), default))
 end

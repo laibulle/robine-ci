@@ -1,10 +1,15 @@
 defmodule RobineWeb.HealthController do
   use RobineWeb, :controller
 
-  alias Robine.Operations
+  alias Robine.{BuildInfo, Operations}
   alias Robine.Runtime.Dependencies
 
   def live(conn, _params), do: json(conn, %{status: "ok"})
+
+  def version(conn, _params) do
+    build = BuildInfo.current(%{})
+    json(conn, %{version: "v#{build.version}"})
+  end
 
   def ready(conn, _params) do
     context =
