@@ -68,7 +68,7 @@ Create a dedicated standard macOS account such as `robine-runner`. It must not b
 mise use --global erlang@29.0.5 elixir@1.20.3-otp-29
 mise exec -- mix deps.get
 mise exec -- mix robine.runner_release --output dist/runner
-install -m 0755 dist/runner/robine-runner-0.2.0.escript "$HOME/bin/robine-runner"
+install -m 0755 dist/runner/robine-runner-0.3.0-alpha1.escript "$HOME/bin/robine-runner"
 mkdir -m 0700 -p "$HOME/.config/robine-runner"
 ROBINE_RUNNER_ENROLLMENT_TOKEN='replace-once' "$HOME/bin/robine-runner" enroll \
   --server https://ci.example.com \
