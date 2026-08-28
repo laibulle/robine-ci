@@ -1,4 +1,4 @@
-defmodule RobineWeb.ManualArtifactDownloadController do
+defmodule RobineWeb.ArtifactDownloadController do
   use RobineWeb, :controller
 
   alias Robine.Runtime.Dependencies
@@ -9,10 +9,10 @@ defmodule RobineWeb.ManualArtifactDownloadController do
          context <-
            Dependencies.context(
              actor,
-             conn.assigns[:request_id] || "manual-artifact-download"
+             conn.assigns[:request_id] || "artifact-download"
            ),
          {:ok, artifact} <-
-           Storage.download_manual_artifact(
+           Storage.download_artifact(
              %{repository_id: repository_id, artifact_id: artifact_id},
              context
            ) do

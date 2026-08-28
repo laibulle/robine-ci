@@ -185,6 +185,25 @@ defmodule Robine.Storage.StorageLifecycleTest do
 
     assert [listed_second.id, listed_first.id] == [second.id, first.id]
 
+    assert {:ok, ci_artifact} =
+             Storage.upload_artifact(
+               %{
+                 repository_id: repository_id,
+                 attempt_id: Ecto.UUID.generate(),
+                 name: "github-release-robine-linux-amd64",
+                 content: "ci-release"
+               },
+               context
+             )
+
+    assert {:ok, [listed_ci, repository_second, repository_first]} =
+             Storage.list_repository_artifacts(%{repository_id: repository_id}, viewer)
+
+    assert listed_ci.id == ci_artifact.id
+    assert listed_ci.source == :ci
+    assert is_binary(listed_ci.attempt_id)
+    assert [repository_second.id, repository_first.id] == [second.id, first.id]
+
     assert {:ok, %{content: ^content, content_type: "application/x-apple-diskimage"}} =
              Storage.download_manual_artifact(
                %{repository_id: repository_id, artifact_id: first.id},
@@ -215,6 +234,7 @@ defmodule Robine.Storage.StorageLifecycleTest do
 
     assert :ok = LocalBlobStore.delete(first.digest)
     assert :ok = LocalBlobStore.delete(second.digest)
+    assert :ok = LocalBlobStore.delete(ci_artifact.digest)
   end
 
   test "cache miss is successful and exact-key saves replace the prior complete entry" do

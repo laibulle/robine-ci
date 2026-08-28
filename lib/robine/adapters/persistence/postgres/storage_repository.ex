@@ -37,6 +37,16 @@ defmodule Robine.Adapters.Persistence.Postgres.StorageRepository do
   end
 
   @impl true
+  def list_repository_artifacts(repository_id) do
+    Repo.all(
+      from artifact in Artifact,
+        where: artifact.repository_id == ^repository_id,
+        order_by: [desc: artifact.created_at]
+    )
+    |> Enum.map(&artifact_domain/1)
+  end
+
+  @impl true
   def list_manual_artifacts(repository_id) do
     Repo.all(
       from artifact in Artifact,

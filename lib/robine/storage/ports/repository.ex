@@ -3,6 +3,7 @@ defmodule Robine.Storage.Ports.Repository do
   alias Robine.Storage.Domain.{Artifact, CacheEntry}
   @callback repository_exists?(String.t()) :: boolean()
   @callback insert_artifact(Artifact.t(), map()) :: :ok | {:error, term()}
+  @callback list_repository_artifacts(String.t()) :: [Artifact.t()]
   @callback list_manual_artifacts(String.t()) :: [Artifact.t()]
   @callback get_artifact(String.t(), String.t()) ::
               {:ok, Artifact.t()} | {:error, :not_found | term()}

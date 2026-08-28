@@ -20,6 +20,12 @@ defmodule Robine.Storage do
     to: UseCases.ListManualArtifacts,
     as: :call
 
+  @spec list_repository_artifacts(map(), ExecutionContext.t()) ::
+          {:ok, [ArtifactMetadata.t()]} | {:error, term()}
+  defdelegate list_repository_artifacts(input, context),
+    to: UseCases.ListRepositoryArtifacts,
+    as: :call
+
   @spec download_manual_artifact(map(), ExecutionContext.t()) ::
           {:ok, Download.t()} | {:error, term()}
   defdelegate download_manual_artifact(input, context),

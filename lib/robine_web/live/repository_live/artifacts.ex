@@ -12,7 +12,7 @@ defmodule RobineWeb.RepositoryLive.Artifacts do
            Repositories.list_repositories(%{}, socket.assigns.execution_context),
          %{provider: :github} = repository <- Enum.find(repositories, &(&1.id == id)),
          {:ok, artifacts} <-
-           Storage.list_manual_artifacts(
+           Storage.list_repository_artifacts(
              %{repository_id: id},
              socket.assigns.execution_context
            ) do
@@ -147,15 +147,29 @@ defmodule RobineWeb.RepositoryLive.Artifacts do
       else: "User #{String.slice(artifact.uploaded_by_id || "unknown", 0, 8)}"
   end
 
+  defp source_label(%{source: :ci}), do: "CI"
+  defp source_label(%{source: :manual}), do: "Manual"
+
+  defp provenance_label(%{source: :ci, attempt_id: attempt_id}) do
+    "Produced by CI attempt #{String.slice(attempt_id || "unknown", 0, 8)}"
+  end
+
+  defp provenance_label(%{source: :manual} = artifact, current_actor) do
+    "Uploaded by #{uploader_label(artifact, current_actor)}"
+  end
+
+  defp provenance_label(%{source: :ci} = artifact, _current_actor),
+    do: provenance_label(artifact)
+
   @impl true
   def render(assigns) do
     ~H"""
     <Layouts.app flash={@flash} current_actor={@current_actor} nav_section={:repositories}>
       <section class="space-y-8">
         <.page_header
-          eyebrow="Outside the pipeline"
+          eyebrow="Repository storage"
           title="Private artifacts"
-          description="Retain locally built, signed, or notarized binaries without creating a synthetic CI attempt."
+          description="Download retained CI outputs and keep locally built, signed, or notarized binaries beside them."
           breadcrumbs={[
             %{label: "Repositories", navigate: ~p"/repositories"},
             %{label: @repository.full_name, navigate: ~p"/repositories/#{@repository.id}"},
@@ -163,7 +177,7 @@ defmodule RobineWeb.RepositoryLive.Artifacts do
           ]}
         >
           <:meta>
-            <span id="manual-artifact-count" class="badge badge-outline badge-sm">
+            <span id="artifact-count" class="badge badge-outline badge-sm">
               {@artifact_count} {if @artifact_count == 1, do: "artifact", else: "artifacts"}
             </span>
           </:meta>
@@ -175,13 +189,13 @@ defmodule RobineWeb.RepositoryLive.Artifacts do
               <p class="text-[0.68rem] font-bold uppercase tracking-[0.16em] text-primary">
                 Digest verified
               </p>
-              <h2 id="artifact-list-title" class="mt-1 text-2xl font-bold">Upload history</h2>
+              <h2 id="artifact-list-title" class="mt-1 text-2xl font-bold">Retained artifacts</h2>
             </div>
 
-            <div id="manual-artifacts" phx-update="stream" class="mt-4 grid gap-3">
-              <div id="manual-artifacts-empty" class="hidden only:block">
-                <.ui_state kind={:empty} title="No manual artifact yet" class="p-10">
-                  <p>Upload a locally produced binary from the panel beside this list.</p>
+            <div id="repository-artifacts" phx-update="stream" class="mt-4 grid gap-3">
+              <div id="repository-artifacts-empty" class="hidden only:block">
+                <.ui_state kind={:empty} title="No retained artifact yet" class="p-10">
+                  <p>Run a workflow that uploads an artifact or add a local binary from this page.</p>
                 </.ui_state>
               </div>
 
@@ -193,7 +207,13 @@ defmodule RobineWeb.RepositoryLive.Artifacts do
                 <div class="flex flex-wrap items-start justify-between gap-4">
                   <div class="min-w-0">
                     <div class="flex flex-wrap items-center gap-2">
-                      <span class="badge badge-primary badge-sm">Manual</span>
+                      <span class={[
+                        "badge badge-sm",
+                        artifact.source == :manual && "badge-primary",
+                        artifact.source == :ci && "badge-secondary"
+                      ]}>
+                        {source_label(artifact)}
+                      </span>
                       <span class="text-xs text-base-content/50">
                         {byte_size_label(artifact.size)} · {artifact.content_type}
                       </span>
@@ -202,13 +222,13 @@ defmodule RobineWeb.RepositoryLive.Artifacts do
                       {artifact.name}
                     </h3>
                     <p class="mt-1 text-xs text-base-content/50">
-                      Uploaded by {uploader_label(artifact, @current_actor)} on {date_label(
-                        artifact.created_at
-                      )} · expires {date_label(artifact.expires_at)}
+                      {provenance_label(artifact, @current_actor)} on {date_label(artifact.created_at)} · expires {date_label(
+                        artifact.expires_at
+                      )}
                     </p>
                   </div>
                   <a
-                    id={"download-manual-artifact-#{artifact.id}"}
+                    id={"download-artifact-#{artifact.id}"}
                     href={~p"/repositories/#{@repository.id}/artifacts/#{artifact.id}/download"}
                     class="btn btn-primary btn-sm"
                     download

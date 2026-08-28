@@ -54,6 +54,7 @@ defmodule Robine.Storage.ArtifactUpload do
       Map.take(Map.from_struct(artifact), [
         :id,
         :source,
+        :attempt_id,
         :uploaded_by_id,
         :name,
         :content_type,

@@ -45,7 +45,7 @@ defmodule RobineWeb.Router do
     get "/pipelines/:id/jobs/:job_id/artifacts/:name", JobArtifactController, :download
 
     get "/repositories/:id/artifacts/:artifact_id/download",
-        ManualArtifactDownloadController,
+        ArtifactDownloadController,
         :download
 
     live_session :authenticated,

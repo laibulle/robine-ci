@@ -238,7 +238,7 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - [x] Persist explicit CI/manual artifact provenance without weakening attempt dependency rules.
 - [x] Add shared manual upload, listing, and private download operations to the Storage facade.
 - [x] Add a bounded authenticated raw-upload API with revocable local Bearer sessions.
-- [x] Add a repository artifact LiveView with upload progress, retention, metadata, and downloads.
+- [x] Add a unified repository artifact LiveView for CI and manual provenance, with upload progress, retention, metadata, and downloads.
 - [x] Verify authorization, limits, interruption cleanup, digest identity, retention, API, and UI behavior.
 
 ## Phase 5 — GitHub integration

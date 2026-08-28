@@ -51,14 +51,14 @@ A repository maintainer who builds and signs a release binary on trusted local h
 - **FR-4:** Existing runner uploads MUST continue to record `source=ci`, an attempt ID, and no manual uploader.
 - **FR-5:** Robine MUST calculate SHA-256 while streaming the content into the configured blob store and MUST return the resulting digest and size.
 - **FR-6:** A completed manual artifact MUST be immutable. Re-uploading a filename MUST create a distinct retained record and MUST NOT replace prior content.
-- **FR-7:** Authenticated viewers, maintainers, and administrators MUST be able to list and download unexpired manual artifacts for an authorized repository.
+- **FR-7:** Authenticated viewers, maintainers, and administrators MUST be able to list and download every unexpired CI or manual artifact for an authorized repository. The manual-artifact API listing MUST remain restricted to manual uploads.
 - **FR-8:** The API MUST accept a bounded raw request body and authenticate either a revocable Bearer session or an instance-global, permission-scoped `artifacts:write` token. A local session endpoint MUST issue the same seven-day session used by the web application without introducing a second password policy.
 - **FR-9:** Manual artifacts MUST remain private ordinary artifacts. Public publication requires a future explicit promotion workflow.
 
 ### UX requirements
 
 - **UX-1:** The repository artifact page MUST show an upload drop zone, filename, progress, retention choice, completion digest, and actionable validation errors.
-- **UX-2:** The artifact list MUST show filename, size, SHA-256, uploader, upload time, expiration, and a private download action.
+- **UX-2:** The repository artifact list MUST combine CI and manual artifacts, visibly distinguish their provenance, and show filename, size, SHA-256, creation time, expiration, and a private download action.
 - **UX-3:** Viewers MUST never see or activate upload controls.
 - **UX-4:** The page MUST explain that Robine stores the supplied bytes but does not perform or verify Apple signing or notarization.
 
@@ -71,7 +71,7 @@ A repository maintainer who builds and signs a release binary on trusted local h
 
 ## Proposed design
 
-The Storage artifact model gains explicit provenance fields. Attempt artifacts retain their existing attempt-scoped uniqueness and dependency semantics; manual artifacts have a nullable attempt ID plus a required uploader ID. Separate `upload_manual_artifact` and `list_manual_artifacts` use cases enforce the two provenance shapes while sharing the blob store, quota transaction, download path, and retention worker.
+The Storage artifact model gains explicit provenance fields. Attempt artifacts retain their existing attempt-scoped uniqueness and dependency semantics; manual artifacts have a nullable attempt ID plus a required uploader ID. Separate `upload_manual_artifact` and `list_manual_artifacts` use cases enforce the two provenance shapes while sharing the blob store, quota transaction, download path, and retention worker. A repository-level query returns both sources for the unified private artifact page without duplicating blobs or weakening attempt-scoped dependency access.
 
 `RepositoryLive.Artifacts` uses LiveView uploads, consumes the server-spooled temporary file as a lazy file stream, and calls `Robine.Storage`. The HTTP API accepts a raw body at `POST /api/v1/repositories/:repository_id/artifacts`, authenticates `Authorization: Bearer <credential>` as either a user session or the global permission-scoped token defined by [IAM-002](../identity/iam-002-scoped-api-tokens.md), spools the bounded body to a temporary file, and calls the same facade. `POST /api/v1/session` remains available for short-lived local user authentication.
 
@@ -96,11 +96,12 @@ Emit bounded upload request count, duration, byte count, source (`manual`), and 
 
 ## Acceptance criteria
 
-- [x] A maintainer uploads a DMG through LiveView and sees the server-calculated digest in the repository list.
+- [x] A maintainer uploads a DMG through LiveView and sees the server-calculated digest in the repository list alongside retained CI artifacts.
 - [x] A local API session uploads the same bytes through a raw request and receives matching ID, digest, size, expiration, and download URL.
 - [x] Viewer, anonymous, expired-session, unknown-repository, oversized, invalid-name, and quota-exceeded requests create no artifact.
 - [x] Manual metadata has no attempt ID; existing runner artifacts retain their attempt provenance and dependency behavior.
 - [x] Authorized download returns the exact original bytes with private cache headers and a safe filename.
+- [x] CI artifacts produced by `artifacts/upload` are visible and downloadable from the repository artifact page without a second upload.
 - [x] Local and S3 blob adapters require no manual-upload-specific branch.
 
 ## Open questions

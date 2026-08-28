@@ -5,7 +5,7 @@ defmodule RobineWeb.RepositoryArtifactLiveTest do
 
   alias Robine.Adapters.Persistence.Postgres.Schemas.{Artifact, User}
   alias Robine.Adapters.Storage.LocalBlobStore
-  alias Robine.{Repo, Repositories}
+  alias Robine.{Repo, Repositories, Storage}
   alias Robine.Runtime.Dependencies
 
   test "uploads, lists, and downloads a locally produced artifact", %{conn: conn} do
@@ -14,7 +14,7 @@ defmodule RobineWeb.RepositoryArtifactLiveTest do
 
     assert {:ok, view, _html} = live(conn, ~p"/repositories/#{repository.id}/artifacts")
     assert has_element?(view, "#manual-artifact-upload-panel")
-    assert has_element?(view, "#manual-artifacts-empty")
+    assert has_element?(view, "#repository-artifacts-empty")
 
     content = "notarized-dmg-content"
 
@@ -40,7 +40,7 @@ defmodule RobineWeb.RepositoryArtifactLiveTest do
 
     assert has_element?(view, "#artifacts-#{artifact.id}")
     assert has_element?(view, "#last-manual-upload", artifact.digest)
-    assert has_element?(view, "#manual-artifact-count", "1 artifact")
+    assert has_element?(view, "#artifact-count", "1 artifact")
 
     download =
       conn
@@ -51,6 +51,41 @@ defmodule RobineWeb.RepositoryArtifactLiveTest do
     assert get_resp_header(download, "x-content-sha256") == [artifact.digest]
     assert get_resp_header(download, "cache-control") == ["private, no-store"]
 
+    assert :ok = LocalBlobStore.delete(artifact.digest)
+  end
+
+  test "lists and downloads an artifact produced by a CI attempt", %{conn: conn} do
+    conn = bootstrap(conn)
+    repository = register_repository!()
+    user = Repo.one!(User)
+    context = Dependencies.context(%{id: user.id, role: :administrator}, "ci-artifact-live")
+    content = "tag-release-archive"
+
+    assert {:ok, artifact} =
+             Storage.upload_artifact(
+               %{
+                 repository_id: repository.id,
+                 attempt_id: Ecto.UUID.generate(),
+                 name: "github-release-robine-server-linux-amd64",
+                 content: content,
+                 retention_seconds: 86_400
+               },
+               context
+             )
+
+    assert {:ok, view, _html} = live(conn, ~p"/repositories/#{repository.id}/artifacts")
+    assert has_element?(view, "#artifacts-#{artifact.id}", artifact.name)
+    assert has_element?(view, "#artifacts-#{artifact.id} .badge", "CI")
+    assert has_element?(view, "#download-artifact-#{artifact.id}")
+    assert has_element?(view, "#artifact-count", "1 artifact")
+
+    download =
+      conn
+      |> recycle()
+      |> get(~p"/repositories/#{repository.id}/artifacts/#{artifact.id}/download")
+
+    assert response(download, 200) == content
+    assert get_resp_header(download, "x-content-sha256") == [artifact.digest]
     assert :ok = LocalBlobStore.delete(artifact.digest)
   end
 
