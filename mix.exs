@@ -4,7 +4,7 @@ defmodule Robine.MixProject do
   def project do
     [
       app: :robine,
-      version: "0.3.0-alpha5",
+      version: "0.3.0-alpha6",
       elixir: "~> 1.20",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
@@ -37,8 +37,10 @@ defmodule Robine.MixProject do
         "robine.cli_release_smoke": :test,
         "robine.runner_release_smoke": :test,
         "robine.macos_runner_release_smoke": :test,
+        "robine.go_runner_release_smoke": :test,
         "robine.server_release_smoke": :test,
         "robine.release": :cli,
+        "robine.go_runner_release": :cli,
         "robine.server_release": :prod,
         "robine.verify_checksums": :cli
       ]

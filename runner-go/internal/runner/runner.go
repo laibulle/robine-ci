@@ -7,8 +7,15 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/robine-ci/robine-runner/internal/config"
+)
+
+var (
+	errCancellationRequested = errors.New("cancellation requested")
+	errLeaseLost             = errors.New("attempt lease lost")
+	errRunnerShutdown        = errors.New("runner shutting down")
 )
 
 type application struct {
@@ -16,20 +23,23 @@ type application struct {
 	client    requester
 	transfers *transferClient
 
-	mu         sync.Mutex
-	executions map[string]context.CancelFunc
+	mu          sync.Mutex
+	executions  map[string]context.CancelCauseFunc
+	executionWG sync.WaitGroup
+	stopping    bool
 }
 
 func Run(ctx context.Context, cfg config.Config, version string) error {
 	app := &application{
 		config:     cfg,
 		transfers:  newTransferClient(cfg),
-		executions: make(map[string]context.CancelFunc),
+		executions: make(map[string]context.CancelCauseFunc),
 	}
 	channel := newChannelClient(cfg, version, app)
 	app.client = channel
 	err := channel.Run(ctx)
-	app.cancelAll()
+	app.stopExecutions()
+	app.waitForExecutions(10 * time.Second)
 	if errors.Is(err, context.Canceled) {
 		return nil
 	}
@@ -63,13 +73,13 @@ func (a *application) HandleEvent(ctx context.Context, event string, payload jso
 			a.cancel(input.AttemptID)
 		}
 	case "runner_revoked":
-		a.cancelAll()
+		a.cancelAll(errCancellationRequested)
 	case "lease_lost":
 		var input struct {
 			AttemptID string `json:"attempt_id"`
 		}
 		if json.Unmarshal(payload, &input) == nil {
-			a.cancel(input.AttemptID)
+			a.cancelWith(input.AttemptID, errLeaseLost)
 		}
 	}
 }
@@ -82,6 +92,10 @@ func (a *application) HandleHeartbeat(response map[string]any) {
 
 func (a *application) acceptOffer(ctx context.Context, offer Offer) {
 	a.mu.Lock()
+	if a.stopping {
+		a.mu.Unlock()
+		return
+	}
 	if _, exists := a.executions[offer.AttemptID]; exists || len(a.executions) >= 1 {
 		a.mu.Unlock()
 		if !exists {
@@ -89,12 +103,14 @@ func (a *application) acceptOffer(ctx context.Context, offer Offer) {
 		}
 		return
 	}
-	executionCtx, cancel := context.WithCancel(ctx)
+	executionCtx, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
 	a.executions[offer.AttemptID] = cancel
+	a.executionWG.Add(1)
 	a.mu.Unlock()
 
 	messageID, err := messageID()
 	if err != nil {
+		a.executionWG.Done()
 		a.finish(offer.AttemptID)
 		return
 	}
@@ -104,12 +120,14 @@ func (a *application) acceptOffer(ctx context.Context, offer Offer) {
 		"message_id":        messageID,
 	})
 	if err != nil {
+		a.executionWG.Done()
 		a.finish(offer.AttemptID)
 		log.Printf("job %s acceptance failed: %v", offer.AttemptID, err)
 		return
 	}
 
 	go func() {
+		defer a.executionWG.Done()
 		defer a.finish(offer.AttemptID)
 		executor := newExecutor(a.client, a.transfers)
 		if err := executor.Run(executionCtx, offer); err != nil && !errors.Is(err, context.Canceled) {
@@ -135,23 +153,52 @@ func (a *application) rejectOffer(ctx context.Context, offer Offer, reason strin
 }
 
 func (a *application) cancel(attemptID string) {
+	a.cancelWith(attemptID, errCancellationRequested)
+}
+
+func (a *application) cancelWith(attemptID string, cause error) {
 	a.mu.Lock()
 	cancel := a.executions[attemptID]
 	a.mu.Unlock()
 	if cancel != nil {
-		cancel()
+		cancel(cause)
 	}
 }
 
-func (a *application) cancelAll() {
+func (a *application) cancelAll(cause error) {
 	a.mu.Lock()
-	cancels := make([]context.CancelFunc, 0, len(a.executions))
+	cancels := make([]context.CancelCauseFunc, 0, len(a.executions))
 	for _, cancel := range a.executions {
 		cancels = append(cancels, cancel)
 	}
 	a.mu.Unlock()
 	for _, cancel := range cancels {
-		cancel()
+		cancel(cause)
+	}
+}
+
+func (a *application) stopExecutions() {
+	a.mu.Lock()
+	a.stopping = true
+	cancels := make([]context.CancelCauseFunc, 0, len(a.executions))
+	for _, cancel := range a.executions {
+		cancels = append(cancels, cancel)
+	}
+	a.mu.Unlock()
+	for _, cancel := range cancels {
+		cancel(errRunnerShutdown)
+	}
+}
+
+func (a *application) waitForExecutions(timeout time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		a.executionWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(timeout):
 	}
 }
 
@@ -161,7 +208,7 @@ func (a *application) finish(attemptID string) {
 	delete(a.executions, attemptID)
 	a.mu.Unlock()
 	if cancel != nil {
-		cancel()
+		cancel(context.Canceled)
 	}
 }
 

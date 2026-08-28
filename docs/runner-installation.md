@@ -62,13 +62,15 @@ The runner accepts durably acknowledged job offers, downloads attempt-scoped sou
 
 The native macOS runner is a self-contained Go executable. It is cross-compiled on Linux without `cgo`; the target Mac does not need Erlang/OTP, Elixir, Go, or mise. The Mac still needs Xcode, its command-line tools, accepted license agreements, and any project-specific Apple SDKs because workflow steps invoke the real Apple toolchain. Docker Desktop is not used by native jobs.
 
-Build both supported architectures from a Linux checkout with Go 1.27 or use the checksummed binaries retained by the tagged Robine release workflow:
+Build every release target from a Linux checkout with Go 1.27 or use the checksummed OS-specific payload retained by the tagged Robine release workflow:
 
 ```sh
-ROBINE_GO="$(command -v go)" mix robine.macos_runner_release --output dist/runner-macos
-cd dist/runner-macos
+ROBINE_GO="$(command -v go)" mix robine.go_runner_release --output dist/runner-go
+cd dist/runner-go/macos
 sha256sum --check RUNNER_SHA256SUMS
 ```
+
+The release build emits `arm64` and `amd64` binaries under `macos`, `linux`, and `windows`; Windows executable names use the `.exe` suffix. Native application builds remain release-supported on macOS while the Linux and Windows binaries provide early cross-platform runner packages for direct validation.
 
 Create a dedicated standard macOS account such as `robine-runner`. It must not be an administrator and must not own personal keychains, SSH keys, cloud credentials, or unrelated source trees. Log in as that account to build, install, and enroll:
 
@@ -93,15 +95,17 @@ jobs:
         run: swift test
       - name: Build the macOS app
         run: xcodebuild -scheme MyApp -configuration Release -derivedDataPath build
+      - name: Package the signed app
+        run: ditto -c -k --sequesterRsrc --keepParent build/Build/Products/Release/MyApp.app build/MyApp.zip
       - name: Retain the app in Robine CI
         uses: artifacts/upload
         with:
           name: MyApp-${{ runner.os }}-${{ runner.arch }}
-          paths: [build/Build/Products/Release/MyApp.app]
+          paths: [build/MyApp.zip]
           retention-days: 14
 ```
 
-The `image` field remains required by workflow schema v1 but is not used by native execution. Native execution is not a sandbox and is supported only for trusted repositories. Cache and artifact built-ins use the same attempt-scoped server transfers as Docker jobs. The initial native executor rejects service containers explicitly.
+The `image` field remains required by workflow schema v1 but is not used by native execution. Native execution is not a sandbox and is supported only for trusted repositories. Cache and artifact built-ins use the same attempt-scoped server transfers as Docker jobs. Safe Robine archives reject symbolic links, while application bundles containing frameworks commonly use them; package such bundles as a ZIP, DMG, or PKG before `artifacts/upload`. The initial native executor rejects service containers explicitly.
 
 Install `docs/launchd/com.robine.runner.plist` as the runner account at `~/Library/LaunchAgents/com.robine.runner.plist`, then load it:
 

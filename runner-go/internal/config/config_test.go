@@ -75,3 +75,27 @@ func TestParseCommandRejectsIncompleteInput(t *testing.T) {
 		}
 	}
 }
+
+func TestVersionStartAndInvalidConfig(t *testing.T) {
+	version, err := ParseCommand([]string{"--version"})
+	if err != nil || version.Kind != CommandVersion {
+		t.Fatalf("version command failed: %#v %v", version, err)
+	}
+	start, err := ParseCommand([]string{"start", "--config", "runner.json"})
+	if err != nil || start.Kind != CommandStart || !filepath.IsAbs(start.ConfigPath) {
+		t.Fatalf("start command failed: %#v %v", start, err)
+	}
+	if err := Validate(Config{}); err == nil {
+		t.Fatal("empty config was accepted")
+	}
+	path := filepath.Join(t.TempDir(), "invalid.json")
+	if err := os.WriteFile(path, []byte("not-json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("invalid JSON config was accepted")
+	}
+	if err := Write(filepath.Join(t.TempDir(), "runner.json"), Config{}, false); err == nil {
+		t.Fatal("invalid config was written")
+	}
+}

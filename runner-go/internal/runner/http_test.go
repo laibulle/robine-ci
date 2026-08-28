@@ -39,6 +39,7 @@ func TestEnrollAndAuthenticatedTransfers(t *testing.T) {
 				t.Errorf("unexpected upload body: %q", body)
 			}
 			response.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(response, `{"digest":"`+hex.EncodeToString(digest[:])+`"}`)
 		default:
 			http.NotFound(response, request)
 		}

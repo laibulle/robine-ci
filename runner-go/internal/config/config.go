@@ -170,9 +170,6 @@ func Write(path string, cfg Config, force bool) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close temporary config: %w", err)
 	}
-	if force {
-		_ = os.Remove(path)
-	}
 	if err := os.Rename(tmpName, path); err != nil {
 		return fmt.Errorf("install config: %w", err)
 	}

@@ -70,8 +70,9 @@ func TestExecutorBuildsMacAppAndUploadsArtifact(t *testing.T) {
 		case request.Method == http.MethodPut && request.URL.Path == "/attempt/artifacts":
 			uploadedQuery = request.URL.Query()
 			uploaded, _ = io.ReadAll(request.Body)
+			digest := sha256.Sum256(uploaded)
 			response.WriteHeader(http.StatusCreated)
-			_, _ = io.WriteString(response, `{}`)
+			_, _ = io.WriteString(response, `{"digest":"`+hex.EncodeToString(digest[:])+`"}`)
 		default:
 			http.NotFound(response, request)
 		}
@@ -191,11 +192,15 @@ func TestBuiltinsSaveRestoreAndDownload(t *testing.T) {
 		switch {
 		case request.Method == http.MethodPut && request.URL.Path == "/attempt/cache":
 			cacheBody, _ = io.ReadAll(request.Body)
+			digest := sha256.Sum256(cacheBody)
 			response.WriteHeader(http.StatusCreated)
+			_, _ = io.WriteString(response, `{"digest":"`+hex.EncodeToString(digest[:])+`"}`)
 		case request.Method == http.MethodGet && request.URL.Path == "/attempt/cache":
 			if len(cacheBody) == 0 {
 				response.WriteHeader(http.StatusNoContent)
 			} else {
+				digest := sha256.Sum256(cacheBody)
+				response.Header().Set("X-Content-Sha256", hex.EncodeToString(digest[:]))
 				_, _ = response.Write(cacheBody)
 			}
 		case request.Method == http.MethodGet && request.URL.Path == "/attempt/artifacts":

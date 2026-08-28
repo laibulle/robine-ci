@@ -49,7 +49,11 @@ func (e *executor) Run(ctx context.Context, offer Offer) error {
 		e.failPreparation(ctx, offer)
 		return fmt.Errorf("create attempt workspace: %w", err)
 	}
-	defer os.RemoveAll(root)
+	defer func() {
+		if root != "" {
+			_ = os.RemoveAll(root)
+		}
+	}()
 	if err := os.Chmod(root, 0o700); err != nil {
 		e.failPreparation(ctx, offer)
 		return fmt.Errorf("secure attempt workspace: %w", err)
@@ -91,6 +95,15 @@ func (e *executor) Run(ctx context.Context, offer Offer) error {
 	executionCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	outcome := e.runSteps(executionCtx, offer, workspace, secrets)
+	if err := os.RemoveAll(root); err != nil {
+		outcome = executionOutcome{status: "failed", reason: "system_failure"}
+	} else {
+		root = ""
+	}
+
+	if !terminalDeliveryAllowed(ctx) {
+		return nil
+	}
 
 	deliveryCtx, stopDelivery := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer stopDelivery()
@@ -101,6 +114,9 @@ func (e *executor) Run(ctx context.Context, offer Offer) error {
 }
 
 func (e *executor) failPreparation(ctx context.Context, offer Offer) {
+	if !terminalDeliveryAllowed(ctx) {
+		return
+	}
 	deliveryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
 	defer cancel()
 	_ = attemptEvent(deliveryCtx, e.channel, offer, 2, "failed", "system_failure")
@@ -194,8 +210,7 @@ func (e *executor) runCommand(ctx context.Context, offer Offer, workspace string
 	select {
 	case commandErr = <-done:
 	case <-ctx.Done():
-		terminateProcess(cmd)
-		commandErr = <-done
+		commandErr = terminateProcess(cmd, done)
 	}
 	writer.finish()
 	if writer.err() != nil && ctx.Err() == nil {
@@ -284,7 +299,7 @@ func (e *executor) executeBuiltin(ctx context.Context, offer Offer, workspace st
 		}
 		u, _ := url.Parse(endpoint)
 		u.RawQuery = query.Encode()
-		body, _, status, err := e.transfers.get(ctx, u.String(), "application/gzip")
+		body, headers, status, err := e.transfers.get(ctx, u.String(), "application/gzip")
 		if err != nil {
 			return err
 		}
@@ -293,6 +308,9 @@ func (e *executor) executeBuiltin(ctx context.Context, offer Offer, workspace st
 		}
 		if status != http.StatusOK {
 			return fmt.Errorf("download failed with HTTP %d", status)
+		}
+		if headers.Get("X-Content-Sha256") == "" {
+			return errors.New("download response is missing its digest")
 		}
 		target, err := workspacePath(workspace, destination)
 		if err != nil {
@@ -436,6 +454,11 @@ func contextOutcome(ctx context.Context) executionOutcome {
 		return executionOutcome{status: "failed", reason: "timeout"}
 	}
 	return executionOutcome{status: "cancelled", reason: "cancelled"}
+}
+
+func terminalDeliveryAllowed(ctx context.Context) bool {
+	cause := context.Cause(ctx)
+	return !errors.Is(cause, errRunnerShutdown) && !errors.Is(cause, errLeaseLost)
 }
 
 func stringList(value any) ([]string, error) {

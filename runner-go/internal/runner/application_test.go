@@ -3,6 +3,7 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -20,7 +21,7 @@ func TestApplicationAcceptsAndCompletesOffer(t *testing.T) {
 		config:     config.Config{RunnerID: "runner", Credential: "secret"},
 		client:     client,
 		transfers:  newTransferClient(config.Config{RunnerID: "runner", Credential: "secret"}),
-		executions: make(map[string]context.CancelFunc),
+		executions: make(map[string]context.CancelCauseFunc),
 	}
 	offer := testOffer(server.URL, []Step{{Name: "Build", Kind: "run", Value: "printf app", Condition: "success", With: map[string]any{}}})
 	payload, _ := json.Marshal(offer)
@@ -48,10 +49,10 @@ func TestApplicationAcceptsAndCompletesOffer(t *testing.T) {
 
 func TestApplicationCancellationBusyAndMalformedEvents(t *testing.T) {
 	client := &fakeRequester{}
-	app := &application{client: client, transfers: newTransferClient(config.Config{}), executions: make(map[string]context.CancelFunc)}
+	app := &application{client: client, transfers: newTransferClient(config.Config{}), executions: make(map[string]context.CancelCauseFunc)}
 	cancelled := make(chan struct{})
-	ctx, cancel := context.WithCancel(context.Background())
-	app.executions["active"] = func() { cancel(); close(cancelled) }
+	ctx, cancel := context.WithCancelCause(context.Background())
+	app.executions["active"] = func(cause error) { cancel(cause); close(cancelled) }
 	if ids := app.ActiveAttemptIDs(); len(ids) != 1 || ids[0] != "active" {
 		t.Fatalf("unexpected active IDs: %v", ids)
 	}
@@ -65,7 +66,7 @@ func TestApplicationCancellationBusyAndMalformedEvents(t *testing.T) {
 		t.Fatal("active context was not cancelled")
 	}
 
-	app.executions = map[string]context.CancelFunc{"active": func() {}}
+	app.executions = map[string]context.CancelCauseFunc{"active": func(_ error) {}}
 	busy := testOffer("http://localhost", []Step{{Name: "Build", Kind: "run", Value: "true"}})
 	busy.AttemptID, busy.Execution.AttemptID = "busy", "busy"
 	payload, _ := json.Marshal(busy)
@@ -93,5 +94,34 @@ func TestValidOffer(t *testing.T) {
 	offer.BuiltinsURL = ""
 	if validOffer(offer) {
 		t.Fatal("invalid offer accepted")
+	}
+}
+
+func TestApplicationStopsAndWaitsForExecutions(t *testing.T) {
+	ctx, cancel := context.WithCancelCause(context.Background())
+	app := &application{executions: map[string]context.CancelCauseFunc{"attempt": cancel}}
+	app.executionWG.Add(1)
+	done := make(chan struct{})
+	go func() {
+		defer app.executionWG.Done()
+		<-ctx.Done()
+		close(done)
+	}()
+
+	app.stopExecutions()
+	app.waitForExecutions(time.Second)
+	select {
+	case <-done:
+	default:
+		t.Fatal("execution was not stopped and joined")
+	}
+	if !errors.Is(context.Cause(ctx), errRunnerShutdown) {
+		t.Fatalf("unexpected shutdown cause: %v", context.Cause(ctx))
+	}
+	app.mu.Lock()
+	stopping := app.stopping
+	app.mu.Unlock()
+	if !stopping {
+		t.Fatal("application did not reject new work during shutdown")
 	}
 }

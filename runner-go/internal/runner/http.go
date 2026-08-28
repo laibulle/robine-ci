@@ -63,7 +63,7 @@ func Enroll(ctx context.Context, options config.EnrollOptions) (config.Config, e
 
 func newTransferClient(cfg config.Config) *transferClient {
 	return &transferClient{
-		client:     &http.Client{Timeout: 0},
+		client:     &http.Client{Timeout: 60 * time.Second},
 		runnerID:   cfg.RunnerID,
 		credential: cfg.Credential,
 	}
@@ -121,9 +121,22 @@ func (c *transferClient) put(ctx context.Context, endpoint string, query url.Val
 		return fmt.Errorf("upload transfer: %w", err)
 	}
 	defer response.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 64*1024))
+	responseBody, readErr := io.ReadAll(io.LimitReader(response.Body, 64*1024))
+	if readErr != nil {
+		return fmt.Errorf("read upload response: %w", readErr)
+	}
 	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusCreated {
 		return fmt.Errorf("upload failed with HTTP %d", response.StatusCode)
+	}
+	var metadata struct {
+		Digest string `json:"digest"`
+	}
+	if err := json.Unmarshal(responseBody, &metadata); err != nil || metadata.Digest == "" {
+		return errors.New("upload response is missing its digest")
+	}
+	digest := sha256.Sum256(body)
+	if !strings.EqualFold(metadata.Digest, hex.EncodeToString(digest[:])) {
+		return errors.New("upload response digest mismatch")
 	}
 	return nil
 }

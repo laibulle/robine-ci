@@ -13,16 +13,20 @@ func configureProcess(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 }
 
-func terminateProcess(cmd *exec.Cmd) {
+func terminateProcess(cmd *exec.Cmd, done <-chan error) error {
 	if cmd.Process == nil {
-		return
+		return <-done
 	}
 	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM)
-	time.AfterFunc(2*time.Second, func() {
-		if cmd.ProcessState == nil {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
-	})
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-timer.C:
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		return <-done
+	}
 }
 
 func exitCode(err error) int {

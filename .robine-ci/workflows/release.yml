@@ -26,6 +26,7 @@ jobs:
           echo "675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685  /tmp/go.tgz" | sha256sum -c -
           tar --no-same-owner -xzf /tmp/go.tgz -C /usr/local
           rm /tmp/go.tgz
+          ln -sf /usr/local/go/bin/go /usr/local/bin/go
           go version
           mix local.hex --force
           mix local.rebar --force
@@ -34,8 +35,8 @@ jobs:
         run: MIX_ENV=cli mix robine.release --output dist/cli
       - name: Build runner release
         run: MIX_ENV=cli mix robine.runner_release --output dist/runner
-      - name: Build self-contained macOS runner releases
-        run: MIX_ENV=cli mix robine.macos_runner_release --output dist/runner-macos
+      - name: Build self-contained Go runner releases
+        run: MIX_ENV=cli mix robine.go_runner_release --output dist/runner-go
       - name: Build server release
         run: |
           mkdir -p "$PWD/.robine-tmp"
@@ -62,5 +63,17 @@ jobs:
         uses: artifacts/upload
         with:
           name: github-release-robine-runner-macos-multiarch
-          paths: [dist/runner-macos]
+          paths: [dist/runner-go/macos]
+          retention-days: 30
+      - name: Upload Linux runner release binaries
+        uses: artifacts/upload
+        with:
+          name: github-release-robine-runner-linux-multiarch
+          paths: [dist/runner-go/linux]
+          retention-days: 30
+      - name: Upload Windows runner release binaries
+        uses: artifacts/upload
+        with:
+          name: github-release-robine-runner-windows-multiarch
+          paths: [dist/runner-go/windows]
           retention-days: 30

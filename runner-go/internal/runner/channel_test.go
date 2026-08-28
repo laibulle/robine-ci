@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -124,5 +125,39 @@ func TestChannelHelpers(t *testing.T) {
 	values := parseStringSlice([]any{"one", 2, "two", ""})
 	if strings.Join(values, ",") != "one,two" {
 		t.Fatalf("unexpected string list: %v", values)
+	}
+	facts := capabilities()
+	expectedOS := runtime.GOOS
+	if expectedOS == "darwin" {
+		expectedOS = "macos"
+	}
+	if facts["os"] != expectedOS || facts["architecture"] != runtime.GOARCH || facts["docker"] != false || facts["native"] != true {
+		t.Fatalf("unexpected capabilities: %v", facts)
+	}
+}
+
+func TestChannelJoinReportsProtocolRejection(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		conn, err := upgrader.Upgrade(response, request, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _, _ = conn.ReadMessage()
+		_ = conn.WriteJSON([]any{"1", "1", runnerTopic, "phx_reply", map[string]any{"status": "error", "response": map[string]any{"code": "incompatible_protocol"}}})
+	}))
+	defer server.Close()
+
+	socketURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, _, err := websocket.DefaultDialer.Dial(socketURL, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := newChannelClient(config.Config{RunnerID: "runner", Credential: "secret"}, "test", &channelTestHandler{})
+	err = client.join(context.Background(), conn)
+	_ = conn.Close()
+	if err == nil || !strings.Contains(err.Error(), "incompatible_protocol") {
+		t.Fatalf("unexpected join error: %v", err)
 	}
 }

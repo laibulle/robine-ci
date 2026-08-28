@@ -20,6 +20,7 @@ defmodule Mix.Tasks.Robine.MacosRunnerReleaseSmoke do
       for architecture <- ~w(arm64 amd64) do
         path = Path.join(output, "robine-runner-#{version}-darwin-#{architecture}")
         assert_mach_o!(path)
+        assert_go_metadata!(path, architecture)
       end
 
       Mix.shell().info("macOS Go runner release smoke passed")
@@ -37,6 +38,16 @@ defmodule Mix.Tasks.Robine.MacosRunnerReleaseSmoke do
       :ok
     else
       _failure -> Mix.raise("#{Path.basename(path)} is not a 64-bit Mach-O executable")
+    end
+  end
+
+  defp assert_go_metadata!(path, architecture) do
+    go = System.get_env("ROBINE_GO") || System.find_executable("go")
+    {metadata, status} = System.cmd(go, ["version", "-m", path], stderr_to_stdout: true)
+
+    unless status == 0 and metadata =~ "build\tCGO_ENABLED=0" and
+             metadata =~ "build\tGOOS=darwin" and metadata =~ "build\tGOARCH=#{architecture}" do
+      Mix.raise("#{Path.basename(path)} has unexpected Go build metadata: #{metadata}")
     end
   end
 end

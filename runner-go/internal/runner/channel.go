@@ -85,7 +85,7 @@ func (c *channelClient) runSession(ctx context.Context) error {
 	headers := http.Header{}
 	headers.Set("X-Robine-Runner-Id", c.config.RunnerID)
 	headers.Set("X-Robine-Runner-Credential", c.config.Credential)
-	dialer := websocket.Dialer{HandshakeTimeout: 30 * time.Second}
+	dialer := websocket.Dialer{HandshakeTimeout: 30 * time.Second, Proxy: http.ProxyFromEnvironment}
 	conn, response, err := dialer.DialContext(ctx, socketURL, headers)
 	if err != nil {
 		if response != nil {
@@ -150,11 +150,20 @@ func (c *channelClient) join(ctx context.Context, conn *websocket.Conn) error {
 		return fmt.Errorf("read channel join: %w", err)
 	}
 	frame, err := decodeFrame(payload)
-	if err != nil || frame.Event != "phx_reply" || frame.Reference != "1" {
+	if err != nil || frame.Event != "phx_reply" || frame.Reference != "1" || frame.Topic != runnerTopic {
 		return errors.New("invalid channel join response")
 	}
 	var reply channelReply
-	if err := json.Unmarshal(frame.Payload, &reply); err != nil || reply.Status != "ok" {
+	if err := json.Unmarshal(frame.Payload, &reply); err != nil {
+		return errors.New("invalid runner protocol negotiation response")
+	}
+	if reply.Status != "ok" {
+		if code, ok := reply.Response["code"].(string); ok && code != "" {
+			return fmt.Errorf("runner protocol negotiation rejected: %s", code)
+		}
+		return errors.New("runner protocol negotiation rejected")
+	}
+	if reply.Response["protocol_version"] != float64(1) {
 		return errors.New("runner protocol negotiation rejected")
 	}
 	return nil
@@ -337,11 +346,15 @@ func websocketURL(serverURL string) (string, error) {
 
 func capabilities() map[string]any {
 	architecture := runtime.GOARCH
+	operatingSystem := runtime.GOOS
+	if operatingSystem == "darwin" {
+		operatingSystem = "macos"
+	}
 	if architecture == "386" {
 		architecture = "x86"
 	}
 	return map[string]any{
-		"os":           "macos",
+		"os":           operatingSystem,
 		"architecture": architecture,
 		"docker":       false,
 		"native":       true,

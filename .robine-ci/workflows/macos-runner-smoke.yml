@@ -21,9 +21,11 @@ jobs:
           xcrun --sdk macosx --show-sdk-version
       - name: Build and ad-hoc sign fixture app
         run: ./runner-go/testdata/macos-app/build.sh build/RobineFixture.app
+      - name: Package fixture app
+        run: ditto -c -k --sequesterRsrc --keepParent build/RobineFixture.app build/RobineFixture.zip
       - name: Retain fixture app in Robine CI
         uses: artifacts/upload
         with:
           name: robine-fixture-${{ runner.os }}-${{ runner.arch }}
-          paths: [build/RobineFixture.app]
+          paths: [build/RobineFixture.zip]
           retention-days: 14

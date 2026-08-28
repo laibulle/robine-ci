@@ -52,6 +52,7 @@ jobs:
           echo "675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685  /tmp/go.tgz" | sha256sum -c -
           tar --no-same-owner -xzf /tmp/go.tgz -C /usr/local
           rm /tmp/go.tgz
+          ln -sf /usr/local/go/bin/go /usr/local/bin/go
           docker version
           go version
           mix local.hex --force
@@ -80,17 +81,20 @@ jobs:
           fi
 
           exit "${coverage_status}"
-      - name: Verify the macOS Go runner
+      - name: Verify the Go runner release targets
         run: |
           set -euo pipefail
           cd runner-go
-          go test -race ./...
-          go test -coverprofile=/tmp/robine-runner.cover ./...
+          CGO_ENABLED=0 go test ./...
+          CGO_ENABLED=0 go test -coverprofile=/tmp/robine-runner.cover ./...
           coverage_total=$(go tool cover -func=/tmp/robine-runner.cover | awk '/^total:/{gsub(/%/, "", $3); print $3}')
           awk -v total="${coverage_total}" 'BEGIN { if (total + 0 < 75) exit 1 }'
           printf 'ROBINE_GO_RUNNER_COVERAGE total=%s threshold=75\n' "${coverage_total}"
-          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -mod=readonly -trimpath -o /tmp/robine-runner-darwin-arm64 ./cmd/robine-runner
-          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -mod=readonly -trimpath -o /tmp/robine-runner-darwin-amd64 ./cmd/robine-runner
+          cd ..
+          MIX_ENV=cli mix robine.go_runner_release --output /tmp/robine-runner-release
+          runner_binary=$(find /tmp/robine-runner-release/linux -type f -name '*-linux-amd64' -print -quit)
+          test -n "${runner_binary}"
+          ROBINE_GO_RUNNER_TEST_BINARY="${runner_binary}" mix test test/robine/adapters/runner/go_runner_protocol_smoke_test.exs
       - name: Upload coverage report
         if: always
         uses: artifacts/upload
