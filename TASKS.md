@@ -176,6 +176,7 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - [x] Support an attempt-scoped, allowlisted Docker-in-Docker service without exposing the runner host Docker socket.
 - [x] Enforce global and repository concurrency and disk-pressure admission.
 - [x] Give development self-hosted jobs a 16 GiB memory ceiling while retaining the 4 GiB production default.
+- [x] Allocate a private 1 GiB `/tmp` tmpfs to every job and service container.
 - [x] Surface disk-pressure admission separately from runner-label placement and use environment-appropriate development/test thresholds.
 - [x] Reconcile labeled orphan containers and volumes after restart.
 - [x] Scope Docker ownership and orphan reconciliation by instance so colocated dev, test, and production runtimes cannot delete one another's resources.

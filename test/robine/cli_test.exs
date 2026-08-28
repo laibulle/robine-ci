@@ -99,7 +99,7 @@ defmodule Robine.CLITest do
   end
 
   test "reports its version without external access", %{directory: directory} do
-    assert {0, "robine 0.3.0-alpha8"} = CLI.run(["version"], directory)
+    assert {0, "robine 0.3.0-alpha9"} = CLI.run(["version"], directory)
   end
 
   test "returns stable usage and prerequisite exit classes", %{directory: directory} do

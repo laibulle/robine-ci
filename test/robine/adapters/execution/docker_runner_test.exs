@@ -21,6 +21,10 @@ defmodule Robine.Adapters.Execution.DockerRunnerTest do
            ]
   end
 
+  test "allocates one GiB of temporary storage to job and service containers" do
+    assert DockerRunner.tmpfs_args() == ["--tmpfs", "/tmp:rw,noexec,nosuid,size=1g"]
+  end
+
   test "renders the retained Docker state with an actionable OOM diagnostic" do
     assert DockerRunner.container_state_diagnostic(%{
              "Status" => "exited",

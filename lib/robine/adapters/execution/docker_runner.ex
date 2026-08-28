@@ -12,6 +12,7 @@ defmodule Robine.Adapters.Execution.DockerRunner do
   @attempt_label "io.robine.attempt"
   @instance_label "io.robine.instance"
   @service_label "io.robine.service"
+  @tmpfs_args ["--tmpfs", "/tmp:rw,noexec,nosuid,size=1g"]
 
   def run(%Specification{} = specification) do
     run(specification, fn _event -> :ok end, fn -> false end)
@@ -460,8 +461,7 @@ defmodule Robine.Adapters.Execution.DockerRunner do
         network,
         "--network-alias",
         service.id,
-        "--tmpfs",
-        "/tmp:rw,noexec,nosuid,size=256m"
+        tmpfs_args()
       ]
       |> List.flatten()
       |> Kernel.++(
@@ -641,8 +641,7 @@ defmodule Robine.Adapters.Execution.DockerRunner do
         network || "bridge",
         "--mount",
         "type=volume,source=#{volume},target=#{specification.workspace}",
-        "--tmpfs",
-        "/tmp:rw,noexec,nosuid,size=256m"
+        tmpfs_args()
       ]
       |> List.flatten()
       |> Kernel.++(
@@ -688,6 +687,10 @@ defmodule Robine.Adapters.Execution.DockerRunner do
       Integer.to_string(pids_limit)
     ]
   end
+
+  @doc false
+  @spec tmpfs_args() :: [String.t()]
+  def tmpfs_args, do: @tmpfs_args
 
   defp cpu_limit(cpu_millis) do
     whole = div(cpu_millis, 1_000)
