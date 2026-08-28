@@ -18,6 +18,18 @@ defmodule Robine.Identities do
   @spec resolve_session(map(), ExecutionContext.t()) :: {:ok, map()} | {:error, term()}
   defdelegate resolve_session(input, context), to: UseCases.ResolveSession, as: :call
 
+  @spec create_api_token(map(), ExecutionContext.t()) :: {:ok, map()} | {:error, term()}
+  defdelegate create_api_token(input, context), to: UseCases.CreateApiToken, as: :call
+
+  @spec list_api_tokens(map(), ExecutionContext.t()) :: {:ok, [map()]} | {:error, term()}
+  defdelegate list_api_tokens(input, context), to: UseCases.ListApiTokens, as: :call
+
+  @spec revoke_api_token(map(), ExecutionContext.t()) :: :ok | {:error, term()}
+  defdelegate revoke_api_token(input, context), to: UseCases.RevokeApiToken, as: :call
+
+  @spec resolve_api_token(map(), ExecutionContext.t()) :: {:ok, map()} | {:error, term()}
+  defdelegate resolve_api_token(input, context), to: UseCases.ResolveApiToken, as: :call
+
   @spec change_user_role(map(), ExecutionContext.t()) :: {:ok, map()} | {:error, term()}
   defdelegate change_user_role(input, context), to: UseCases.ChangeUserRole, as: :call
 

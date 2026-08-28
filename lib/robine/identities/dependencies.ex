@@ -6,6 +6,7 @@ defmodule Robine.Identities.Dependencies do
     :repository,
     :passwords,
     :oidc,
+    :token_generator,
     :clock,
     :id_generator,
     :bootstrap_token_hash,
@@ -16,6 +17,7 @@ defmodule Robine.Identities.Dependencies do
     :passwords,
     :oidc,
     :oidc_config,
+    :token_generator,
     :clock,
     :id_generator,
     :bootstrap_token_hash,
@@ -27,6 +29,7 @@ defmodule Robine.Identities.Dependencies do
           passwords: module(),
           oidc: module(),
           oidc_config: keyword() | nil,
+          token_generator: module(),
           clock: module(),
           id_generator: module(),
           bootstrap_token_hash: binary(),
@@ -37,7 +40,8 @@ defmodule Robine.Identities.Dependencies do
     for {implementation, behaviour} <- [
           {dependencies.repository, Ports.Repository},
           {dependencies.passwords, Ports.Passwords},
-          {dependencies.oidc, Ports.OIDC}
+          {dependencies.oidc, Ports.OIDC},
+          {dependencies.token_generator, Ports.TokenGenerator}
         ] do
       Code.ensure_loaded!(implementation)
 

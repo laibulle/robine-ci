@@ -12,11 +12,11 @@ defmodule Robine.Storage.UseCases.UploadManualArtifact do
 
   @spec call(map(), ExecutionContext.t()) :: {:ok, ArtifactMetadata.t()} | {:error, term()}
   def call(input, %ExecutionContext{
-        actor: %{id: actor_id, role: role},
+        actor: %{id: actor_id} = actor,
         dependencies: %{storage: %Dependencies{} = deps}
-      })
-      when role in [:administrator, :maintainer] do
-    with {:ok, values} <- validate(input, actor_id),
+      }) do
+    with :ok <- authorize(actor, Map.get(input, :repository_id)),
+         {:ok, values} <- validate(input, actor_id),
          true <- deps.repository.repository_exists?(values.repository_id) do
       ArtifactUpload.store(values, deps)
     else
@@ -26,6 +26,24 @@ defmodule Robine.Storage.UseCases.UploadManualArtifact do
   end
 
   def call(_input, %ExecutionContext{}), do: {:error, :forbidden}
+
+  defp authorize(%{role: role}, _repository_id)
+       when role in [:administrator, :maintainer],
+       do: :ok
+
+  defp authorize(
+         %{
+           role: :artifact_uploader,
+           repository_id: repository_id,
+           permissions: permissions
+         },
+         repository_id
+       )
+       when is_list(permissions) do
+    if "artifacts:write" in permissions, do: :ok, else: {:error, :forbidden}
+  end
+
+  defp authorize(_actor, _repository_id), do: {:error, :forbidden}
 
   defp validate(input, actor_id) do
     values = %{

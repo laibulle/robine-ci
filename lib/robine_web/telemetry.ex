@@ -200,6 +200,12 @@ defmodule RobineWeb.Telemetry do
       counter("robine.identity.session.revocation.count", tags: [:outcome]),
       counter("robine.identity.rate_limit.count", tags: [:method]),
       counter("robine.identity.authorization.reject.count", tags: [:role, :surface]),
+      counter("robine.identity.api_token.lifecycle.count",
+        tags: [:action, :permission, :outcome]
+      ),
+      counter("robine.identity.api_token.authentication.count",
+        tags: [:permission, :outcome]
+      ),
 
       # Web experience
       counter("robine.web.liveview.connection.count", tags: [:outcome]),

@@ -4,6 +4,8 @@ defmodule Robine.Adapters.Persistence.Postgres.IdentityRepository do
   import Ecto.Query
 
   alias Robine.Adapters.Persistence.Postgres.Schemas.{
+    ApiToken,
+    GitHubRepository,
     LocalCredential,
     OIDCIdentity,
     Session,
@@ -11,6 +13,7 @@ defmodule Robine.Adapters.Persistence.Postgres.IdentityRepository do
   }
 
   alias Robine.Identities.Domain.User, as: DomainUser
+  alias Robine.Identities.Domain.ApiToken, as: DomainApiToken
   alias Robine.Repo
 
   @impl true
@@ -147,6 +150,105 @@ defmodule Robine.Adapters.Persistence.Postgres.IdentityRepository do
     {:ok, Enum.map(users, &domain_user/1)}
   end
 
+  @impl true
+  def create_api_token(attributes) do
+    Repo.transaction(fn ->
+      trusted_repository? =
+        Repo.exists?(
+          from repository in GitHubRepository,
+            where: repository.id == ^attributes.repository_id and repository.trusted == true
+        )
+
+      active_user? =
+        Repo.exists?(
+          from user in User,
+            where:
+              user.id == ^attributes.user_id and user.disabled == false and
+                user.role in [:administrator, :maintainer]
+        )
+
+      cond do
+        not trusted_repository? ->
+          Repo.rollback(:repository_not_found)
+
+        not active_user? ->
+          Repo.rollback(:user_not_found)
+
+        true ->
+          %ApiToken{}
+          |> ApiToken.changeset(attributes)
+          |> Repo.insert()
+          |> case do
+            {:ok, _token} -> :ok
+            {:error, changeset} -> Repo.rollback({:api_token_persistence, changeset})
+          end
+      end
+    end)
+    |> case do
+      {:ok, :ok} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @impl true
+  def list_api_tokens(repository_id) do
+    tokens =
+      Repo.all(
+        from token in ApiToken,
+          where: token.repository_id == ^repository_id,
+          order_by: [desc: token.inserted_at]
+      )
+
+    {:ok, Enum.map(tokens, &domain_api_token/1)}
+  end
+
+  @impl true
+  def revoke_api_token(repository_id, token_id, revoked_at) do
+    case Repo.get_by(ApiToken, id: token_id, repository_id: repository_id) do
+      nil ->
+        {:error, :not_found}
+
+      %{revoked_at: %DateTime{}} ->
+        :ok
+
+      token ->
+        token
+        |> Ecto.Changeset.change(revoked_at: revoked_at)
+        |> Repo.update()
+        |> normalize(:api_token_persistence)
+    end
+  end
+
+  @impl true
+  def resolve_api_token(token_digest, now) do
+    query =
+      from token in ApiToken,
+        join: user in User,
+        on: user.id == token.user_id,
+        where:
+          token.token_digest == ^token_digest and is_nil(token.revoked_at) and
+            token.expires_at > ^now and user.disabled == false and
+            user.role in [:administrator, :maintainer],
+        select: {token, user}
+
+    case Repo.one(query) do
+      nil ->
+        {:error, :not_found}
+
+      {token, user} ->
+        _ = token |> Ecto.Changeset.change(last_used_at: now) |> Repo.update()
+
+        {:ok,
+         %{
+           id: user.id,
+           role: :artifact_uploader,
+           token_id: token.id,
+           repository_id: token.repository_id,
+           permissions: token.permissions
+         }}
+    end
+  end
+
   defp oidc_user(identity) do
     query =
       from oidc in OIDCIdentity,
@@ -189,6 +291,21 @@ defmodule Robine.Adapters.Persistence.Postgres.IdentityRepository do
       role: user.role,
       disabled: user.disabled,
       inserted_at: user.inserted_at
+    }
+  end
+
+  defp domain_api_token(token) do
+    %DomainApiToken{
+      id: token.id,
+      user_id: token.user_id,
+      repository_id: token.repository_id,
+      name: token.name,
+      token_prefix: token.token_prefix,
+      permissions: token.permissions,
+      expires_at: token.expires_at,
+      last_used_at: token.last_used_at,
+      revoked_at: token.revoked_at,
+      inserted_at: token.inserted_at
     }
   end
 end

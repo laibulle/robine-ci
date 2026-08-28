@@ -225,6 +225,7 @@ defmodule Robine.Runtime.Dependencies do
       passwords: Robine.Adapters.Security.Argon2Passwords,
       oidc: Application.fetch_env!(:robine, :oidc_adapter),
       oidc_config: Application.fetch_env!(:robine, :oidc_config),
+      token_generator: Robine.Adapters.Security.ApiTokenGenerator,
       clock: Robine.Adapters.System.Clock,
       id_generator: Robine.Adapters.System.IdGenerator,
       bootstrap_token_hash: Application.fetch_env!(:robine, :bootstrap_token_hash),

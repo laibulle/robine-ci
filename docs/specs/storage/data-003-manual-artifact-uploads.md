@@ -52,7 +52,7 @@ A repository maintainer who builds and signs a release binary on trusted local h
 - **FR-5:** Robine MUST calculate SHA-256 while streaming the content into the configured blob store and MUST return the resulting digest and size.
 - **FR-6:** A completed manual artifact MUST be immutable. Re-uploading a filename MUST create a distinct retained record and MUST NOT replace prior content.
 - **FR-7:** Authenticated viewers, maintainers, and administrators MUST be able to list and download unexpired manual artifacts for an authorized repository.
-- **FR-8:** The API MUST accept a bounded raw request body and authenticate a revocable Bearer session. A local session endpoint MUST issue the same seven-day session used by the web application without introducing a second password policy.
+- **FR-8:** The API MUST accept a bounded raw request body and authenticate either a revocable Bearer session or a repository-scoped `artifacts:write` token. A local session endpoint MUST issue the same seven-day session used by the web application without introducing a second password policy.
 - **FR-9:** Manual artifacts MUST remain private ordinary artifacts. Public publication requires a future explicit promotion workflow.
 
 ### UX requirements
@@ -73,7 +73,7 @@ A repository maintainer who builds and signs a release binary on trusted local h
 
 The Storage artifact model gains explicit provenance fields. Attempt artifacts retain their existing attempt-scoped uniqueness and dependency semantics; manual artifacts have a nullable attempt ID plus a required uploader ID. Separate `upload_manual_artifact` and `list_manual_artifacts` use cases enforce the two provenance shapes while sharing the blob store, quota transaction, download path, and retention worker.
 
-`RepositoryLive.Artifacts` uses LiveView uploads, consumes the server-spooled temporary file as a lazy file stream, and calls `Robine.Storage`. The HTTP API accepts a raw body at `POST /api/v1/repositories/:repository_id/artifacts`, authenticates `Authorization: Bearer <session>`, spools the bounded body to a temporary file, and calls the same facade. `POST /api/v1/session` exposes local authentication for non-browser automation; OIDC-specific API tokens remain future work.
+`RepositoryLive.Artifacts` uses LiveView uploads, consumes the server-spooled temporary file as a lazy file stream, and calls `Robine.Storage`. The HTTP API accepts a raw body at `POST /api/v1/repositories/:repository_id/artifacts`, authenticates `Authorization: Bearer <credential>` as either a user session or the scoped token defined by [IAM-002](../identity/iam-002-scoped-api-tokens.md), spools the bounded body to a temporary file, and calls the same facade. `POST /api/v1/session` remains available for short-lived local user authentication.
 
 ## Failure modes and recovery
 
@@ -109,7 +109,7 @@ None blocking.
 
 ## Out of scope / future work
 
-- Personal long-lived API tokens and OIDC device authorization.
+- General-purpose personal access tokens and OIDC device authorization.
 - Resumable uploads and direct-to-object-store presigned transfers.
 - Explicit promotion of a manual artifact into a public or source-control-provider release.
 - Signature, notarization-ticket, SBOM, or provenance attestation verification.

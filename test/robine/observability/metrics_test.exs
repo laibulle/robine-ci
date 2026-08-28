@@ -52,6 +52,8 @@ defmodule Robine.Observability.MetricsTest do
     robine.identity.session.revocation.count
     robine.identity.rate_limit.count
     robine.identity.authorization.reject.count
+    robine.identity.api_token.lifecycle.count
+    robine.identity.api_token.authentication.count
     robine.web.liveview.connection.count
     robine.web.page.duration
     robine.web.log_segment.duration

@@ -16,7 +16,7 @@ defmodule RobineWeb.Plugs.FetchApiActor do
              %{id: "api:anonymous", role: :viewer},
              conn.assigns[:request_id] || "api"
            ),
-         {:ok, actor} <- Identities.resolve_session(%{token: token}, context) do
+         {:ok, actor} <- resolve_actor(token, context) do
       conn
       |> assign(:current_actor, actor)
       |> assign(
@@ -39,4 +39,9 @@ defmodule RobineWeb.Plugs.FetchApiActor do
       _invalid -> {:error, :missing_bearer}
     end
   end
+
+  defp resolve_actor("rbn_art_" <> _suffix = token, context),
+    do: Identities.resolve_api_token(%{token: token}, context)
+
+  defp resolve_actor(token, context), do: Identities.resolve_session(%{token: token}, context)
 end

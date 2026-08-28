@@ -167,6 +167,14 @@ defmodule RobineWeb.RepositoryLive.Artifacts do
               {@artifact_count} {if @artifact_count == 1, do: "artifact", else: "artifacts"}
             </span>
           </:meta>
+          <:actions>
+            <.link
+              :if={@current_actor.role in [:administrator, :maintainer]}
+              navigate={~p"/repositories/#{@repository.id}/artifact-tokens"}
+              id="manage-artifact-upload-tokens"
+              class="btn btn-outline btn-sm"
+            >Manage API tokens</.link>
+          </:actions>
         </.page_header>
 
         <div class="grid gap-6 xl:grid-cols-[minmax(0,1fr)_24rem]">
