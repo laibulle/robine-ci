@@ -489,6 +489,18 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - [x] Verify a TLS-connected pipeline on target Mac hardware.
 - [x] Document and verify launchd installation, upgrades, troubleshooting, and removal.
 
+### RUN-302 — Replace the macOS runner runtime with Go
+
+- **Spec:** [RUN-003](docs/specs/runners/run-003-macos-native-runner.md)
+- **Depends on:** RUN-301
+- [ ] Owner: Codex — self-contained Go runner implemented and verified end to end on Apple Silicon macOS.
+- [x] Implement protocol-v1 enrollment, Phoenix Channel reconnect/reconciliation, heartbeat, cancellation, and ordered acknowledgements in pure Go.
+- [x] Execute native steps in isolated workspaces with bounded redacted logs, conditions, timeout, process-group cancellation, and cleanup.
+- [x] Safely transfer source, secrets, caches, and artifact archives through the existing attempt-scoped API.
+- [x] Cross-compile and checksum Darwin `arm64` and `amd64` releases from Linux with `CGO_ENABLED=0`.
+- [ ] Build a macOS `.app` fixture and prove that its declared artifact is retained and downloadable from Robine CI.
+- [x] Update launchd and operator documentation for the self-contained executable.
+
 These items are intentionally unordered and must receive specifications before implementation:
 
 - [x] S3-compatible artifact and cache storage — DATA-002 shipped with MinIO and remote-runner evidence.

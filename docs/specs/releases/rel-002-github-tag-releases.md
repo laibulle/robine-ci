@@ -5,7 +5,7 @@
 - **State:** Shipped
 - **Owner:** Robine maintainers
 - **Target:** Post-MVP
-- **Last updated:** 2026-08-09
+- **Last updated:** 2026-08-28
 
 ## Summary
 
@@ -49,6 +49,7 @@ A Robine maintainer publishing a versioned GitHub release.
 - **FR-6:** Artifact names MAY use the allowlisted `${{ runner.os }}` and `${{ runner.arch }}` variables, resolved by the executing runner before publication.
 - **FR-7:** A retained artifact MAY place a project-specific asset prefix between `github-release-` and the final OS/architecture pair; absence MUST preserve the historical `robine` prefix.
 - **FR-8:** The GitHub asset filename MUST omit the version already represented by its immutable release tag.
+- **FR-9:** Robine's release workflow MUST retain the self-contained Darwin `arm64` and `amd64` runner binaries and their checksum manifest as a distinct macOS multi-architecture release payload.
 
 ### UX requirements
 
@@ -63,7 +64,7 @@ A Robine maintainer publishing a versioned GitHub release.
 
 ## Proposed design
 
-The authenticated push normalizer distinguishes `refs/tags/*` from branches, resolves annotated tags to `head_commit.id`, and stores the tag in immutable pipeline inputs. A dedicated Ubuntu 26.04 workflow packages the production OTP server, CLI, and standalone runner independently, then uploads them as `github-release-robine-server-${{ runner.os }}-${{ runner.arch }}`, `github-release-robine-cli-${{ runner.os }}-${{ runner.arch }}`, and `github-release-robine-runner-${{ runner.os }}-${{ runner.arch }}`. Other projects MAY use a name such as `github-release-robine_nas-${{ runner.os }}-${{ runner.arch }}` to select their GitHub asset prefix. The executing runner resolves these two allowlisted variables to normalized values such as `linux` and `amd64`; unresolved or arbitrary expressions are rejected. Terminal projection publishes the release before checks so already-retained payloads remain recoverable even when a legacy tag pipeline used an object SHA. It downloads every digest-verified retained release artifact through the Storage facade and calls a provider capability using the GitHub App installation token once per asset. GitHub release creation requests generated notes; asset publication attaches each immutable archive with its project prefix, OS, and architecture in its name. The immutable GitHub release tag remains the sole version identifier. Existing matching releases and assets are treated as success.
+The authenticated push normalizer distinguishes `refs/tags/*` from branches, resolves annotated tags to `head_commit.id`, and stores the tag in immutable pipeline inputs. A dedicated Ubuntu 26.04 workflow packages the production OTP server, CLI, legacy standalone runner, and self-contained macOS Go runner independently. The macOS payload contains checksummed Darwin `arm64` and `amd64` Mach-O executables cross-compiled with `CGO_ENABLED=0`. Other projects MAY use a name such as `github-release-robine_nas-${{ runner.os }}-${{ runner.arch }}` to select their GitHub asset prefix. The executing runner resolves these two allowlisted variables to normalized values such as `linux` and `amd64`; unresolved or arbitrary expressions are rejected. Terminal projection publishes the release before checks so already-retained payloads remain recoverable even when a legacy tag pipeline used an object SHA. It downloads every digest-verified retained release artifact through the Storage facade and calls a provider capability using the GitHub App installation token once per asset. GitHub release creation requests generated notes; asset publication attaches each immutable archive with its project prefix, OS, and architecture in its name. The immutable GitHub release tag remains the sole version identifier. Existing matching releases and assets are treated as success.
 
 ## Failure modes and recovery
 
@@ -90,7 +91,7 @@ Pipeline logs retain package generation and upload output. GitHub API telemetry 
 - [x] A real annotated tag creates a GitHub Release and attached payload after Contents write is approved.
 - [x] Release artifact templates resolve OS and architecture while rejecting arbitrary variables.
 - [x] Project-specific release artifacts retain their own GitHub asset prefix.
-- [x] Server, CLI, and runner distributions publish as three distinct stable, versionless assets.
+- [ ] Server, CLI, legacy runner, and self-contained macOS runner distributions publish as four distinct stable, versionless assets.
 
 ## Open questions
 

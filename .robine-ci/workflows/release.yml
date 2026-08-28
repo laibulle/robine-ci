@@ -22,6 +22,11 @@ jobs:
           APT_OPTIONS="-o APT::Sandbox::User=root -o Dir::Cache=/tmp/robine-apt/cache -o Dir::State=/tmp/robine-apt/state -o Dir::State::status=/var/lib/dpkg/status -o Dir::Log=/tmp/robine-apt/log"
           apt-get $APT_OPTIONS update
           apt-get $APT_OPTIONS install --yes --no-install-recommends build-essential ca-certificates git
+          curl -fsSL https://go.dev/dl/go1.27.0.linux-amd64.tar.gz -o /tmp/go.tgz
+          echo "675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685  /tmp/go.tgz" | sha256sum -c -
+          tar --no-same-owner -xzf /tmp/go.tgz -C /usr/local
+          rm /tmp/go.tgz
+          go version
           mix local.hex --force
           mix local.rebar --force
           mix deps.get
@@ -29,6 +34,8 @@ jobs:
         run: MIX_ENV=cli mix robine.release --output dist/cli
       - name: Build runner release
         run: MIX_ENV=cli mix robine.runner_release --output dist/runner
+      - name: Build self-contained macOS runner releases
+        run: MIX_ENV=cli mix robine.macos_runner_release --output dist/runner-macos
       - name: Build server release
         run: |
           mkdir -p "$PWD/.robine-tmp"
@@ -50,4 +57,10 @@ jobs:
         with:
           name: github-release-robine-runner-${{ runner.os }}-${{ runner.arch }}
           paths: [dist/runner]
+          retention-days: 30
+      - name: Upload macOS runner release binaries
+        uses: artifacts/upload
+        with:
+          name: github-release-robine-runner-macos-multiarch
+          paths: [dist/runner-macos]
           retention-days: 30

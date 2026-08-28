@@ -2,10 +2,10 @@
 
 ## Status
 
-- **State:** Shipped
+- **State:** Implementing
 - **Owner:** Execution
 - **Target:** Post-MVP
-- **Last updated:** 2026-08-13
+- **Last updated:** 2026-08-28
 
 ## Summary
 
@@ -37,7 +37,7 @@ A self-hosted operator with a dedicated Mac who needs CI evidence from macOS or 
 
 ### Use cases
 
-1. Build the runner artifact on the target Mac and enroll it with a single-use token.
+1. Cross-compile the self-contained runner artifact on Linux and enroll it with a single-use token on the target Mac.
 2. Start the runner as a dedicated, unprivileged launchd service.
 3. Run a trusted workflow job declaring `runs-on: [macos]` or `runs-on: [macos, arm64]`.
 4. Cancel a running job and remove its attempt workspace.
@@ -55,6 +55,10 @@ A self-hosted operator with a dedicated Mac who needs CI evidence from macOS or 
 - **FR-7:** Output MUST be bounded and secrets MUST be redacted across arbitrary output chunk boundaries before protocol delivery or result retention.
 - **FR-8:** Native jobs containing service containers MUST fail preparation explicitly until that capability is implemented.
 - **FR-9:** Cache and artifact built-ins MUST use the same authenticated attempt-scoped transfer callbacks, bounded safe archives, and workspace path policy as Docker jobs.
+- **FR-10:** The macOS runner MUST be a self-contained Go executable that cross-compiles on Linux for Darwin `arm64` and `amd64` with `CGO_ENABLED=0`.
+- **FR-11:** A workflow MUST be able to invoke Xcode, Swift, `xcodebuild`, `codesign`, or any other tool available to the dedicated runner account without the runner embedding Apple frameworks.
+- **FR-12:** `artifacts/upload` MUST create a safe gzip-compressed TAR archive from declared workspace-relative paths and publish it through the existing authenticated attempt endpoint before reporting the step successful.
+- **FR-13:** A temporary disconnect MUST backpressure delivery, reconnect with bounded jitter, reconcile active attempts, and preserve durable attempt message IDs and sequences.
 
 ### UX requirements
 
@@ -65,13 +69,14 @@ A self-hosted operator with a dedicated Mac who needs CI evidence from macOS or 
 
 - **OR-1:** Production use MUST dedicate a non-administrator local account and machine to trusted CI workloads.
 - **OR-2:** The runner MUST make only outbound TLS connections to the Robine control plane.
-- **OR-3:** Operators MUST install target-native Erlang/OTP and Elixir versions because native Exile runtime files are not portable across OS or architecture.
+- **OR-3:** The runner MUST NOT require Erlang/OTP, Elixir, `cgo`, or a macOS SDK to build its executable; Xcode remains a runtime prerequisite for Apple-platform jobs.
+- **OR-4:** Released binaries MUST contain no dynamic dependency on third-party package managers. Go module dependencies MUST be pinned and verified by `go.sum`.
 
 ## Proposed design
 
-The existing standalone runner detects Darwin at startup and selects `NativeRunner`; Linux remains on `DockerRunner`. The protocol advertises normalized system capabilities, while `runs-on` continues to use the all-labels-match rule. Since jobs without `runs-on` require `docker`, they never land on the native Mac accidentally.
+The macOS runner lives in `runner-go/` and implements protocol v1 directly. It enrolls through the existing HTTP endpoint, authenticates the Phoenix WebSocket upgrade with runner headers, joins `runner:v1`, heartbeats, accepts offers only after a durable acknowledgement, and uses attempt-scoped HTTP endpoints for source, secrets, caches, and artifacts. The protocol advertises normalized system capabilities, while `runs-on` continues to use the all-labels-match rule. Since jobs without `runs-on` require `docker`, they never land on the native Mac accidentally.
 
-The native adapter creates an attempt-namespaced directory under the operating-system temporary directory, validates and copies the source tree, and launches each command through Exile with an explicit working directory and environment. It streams bounded output through the existing stateful secret redactor, polls durable cancellation, terminates the process on cancellation or timeout, and removes the workspace in an `after` block.
+The native executor creates an attempt-namespaced directory under the operating-system temporary directory, safely extracts the source archive, and launches each command in its own process group with an explicit working directory and environment. It streams bounded output through a stateful secret redactor, terminates the process group on cancellation or timeout, publishes declared artifacts before the terminal attempt event, and always removes the workspace. The executable orchestrates Apple command-line tools with `os/exec`; application code may use C, Swift, Objective-C, or Apple frameworks without introducing `cgo` into the runner.
 
 ## Failure modes and recovery
 
@@ -92,13 +97,14 @@ The existing runner connection, heartbeat, attempt, log, cancellation, and runne
 
 ## Acceptance criteria
 
-- [x] Darwin and Apple Silicon facts normalize to `macos` and `arm64`, and select native execution.
-- [x] Native capacity can be scheduled without satisfying the default `docker` label.
-- [x] Sequential steps share a fresh workspace and output is redacted across chunk boundaries.
-- [x] Command failure, conditional skip, cancellation, and cleanup are covered by automated tests.
-- [x] Cache and artifact archives publish and restore through the shared transfer contract.
-- [x] A target Mac builds the runner artifact, connects through TLS, and completes a real `runs-on: [macos]` pipeline.
-- [x] launchd installation, upgrade, troubleshooting, and removal are documented and verified on macOS.
+- [x] Linux produces executable Darwin `arm64` and `amd64` binaries with `CGO_ENABLED=0`.
+- [x] Darwin and Apple Silicon facts normalize to `macos` and `arm64`, and native capacity cannot satisfy the default `docker` label.
+- [x] Sequential steps share a fresh workspace and output is redacted across arbitrary chunk boundaries.
+- [x] Command failure, conditional execution, timeout, cancellation, process-group termination, reconnect, and cleanup are covered by automated tests.
+- [ ] A macOS fixture build produces an `.app` bundle and `artifacts/upload` makes its archive visible in Robine CI.
+- [x] Cache and artifact archives publish and restore through the shared transfer contract with digest and path validation.
+- [ ] A target Mac connects through TLS and completes a real `runs-on: [macos]` pipeline.
+- [ ] launchd installation, upgrade, troubleshooting, and removal use the self-contained Go binary and are verified on macOS.
 
 ## Open questions
 

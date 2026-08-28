@@ -48,7 +48,12 @@ jobs:
           echo "ea90cfd12e1eeb12aa1c971741adb8bd4ed88e2a574eaac13f5029a1dbc6300d  /tmp/docker.tgz" | sha256sum -c -
           tar --no-same-owner -xzf /tmp/docker.tgz -C /usr/local/bin --strip-components=1 docker/docker
           rm /tmp/docker.tgz
+          curl -fsSL https://go.dev/dl/go1.27.0.linux-amd64.tar.gz -o /tmp/go.tgz
+          echo "675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685  /tmp/go.tgz" | sha256sum -c -
+          tar --no-same-owner -xzf /tmp/go.tgz -C /usr/local
+          rm /tmp/go.tgz
           docker version
+          go version
           mix local.hex --force
           mix local.rebar --force
       - name: Restore Mix cache
@@ -75,6 +80,17 @@ jobs:
           fi
 
           exit "${coverage_status}"
+      - name: Verify the macOS Go runner
+        run: |
+          set -euo pipefail
+          cd runner-go
+          go test -race ./...
+          go test -coverprofile=/tmp/robine-runner.cover ./...
+          coverage_total=$(go tool cover -func=/tmp/robine-runner.cover | awk '/^total:/{gsub(/%/, "", $3); print $3}')
+          awk -v total="${coverage_total}" 'BEGIN { if (total + 0 < 75) exit 1 }'
+          printf 'ROBINE_GO_RUNNER_COVERAGE total=%s threshold=75\n' "${coverage_total}"
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -mod=readonly -trimpath -o /tmp/robine-runner-darwin-arm64 ./cmd/robine-runner
+          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -mod=readonly -trimpath -o /tmp/robine-runner-darwin-amd64 ./cmd/robine-runner
       - name: Upload coverage report
         if: always
         uses: artifacts/upload

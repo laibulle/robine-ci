@@ -35,11 +35,12 @@ defmodule Robine.ReleaseConfigurationTest do
     refute runner_config =~ "SECRET_KEY_BASE"
   end
 
-  test "the macOS launch agent invokes the escript through its pinned runtime" do
+  test "the macOS launch agent invokes the self-contained runner directly" do
     launchd = File.read!("docs/launchd/com.robine.runner.plist")
 
-    assert launchd =~ "__ROBINE_RUNNER_HOME__/.local/bin/mise"
-    assert launchd =~ "<string>exec</string>"
-    assert launchd =~ "<string>--</string>"
+    assert launchd =~ "__ROBINE_RUNNER_HOME__/bin/robine-runner"
+    assert launchd =~ "<string>start</string>"
+    refute launchd =~ "mise"
+    refute launchd =~ ".escript"
   end
 end

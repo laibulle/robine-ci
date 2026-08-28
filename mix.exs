@@ -36,6 +36,7 @@ defmodule Robine.MixProject do
         verify: :test,
         "robine.cli_release_smoke": :test,
         "robine.runner_release_smoke": :test,
+        "robine.macos_runner_release_smoke": :test,
         "robine.server_release_smoke": :test,
         "robine.release": :cli,
         "robine.server_release": :prod,

@@ -1,0 +1,29 @@
+version: 1
+name: macOS Runner Smoke
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  build-app:
+    runs-on: [macos, arm64]
+    image: native
+    shell: /bin/bash
+    timeout: 10m
+    steps:
+      - name: Checkout
+        uses: checkout
+      - name: Inspect Apple toolchain
+        run: |
+          set -euo pipefail
+          sw_vers
+          xcodebuild -version
+          xcrun --sdk macosx --show-sdk-version
+      - name: Build and ad-hoc sign fixture app
+        run: ./runner-go/testdata/macos-app/build.sh build/RobineFixture.app
+      - name: Retain fixture app in Robine CI
+        uses: artifacts/upload
+        with:
+          name: robine-fixture-${{ runner.os }}-${{ runner.arch }}
+          paths: [build/RobineFixture.app]
+          retention-days: 14
