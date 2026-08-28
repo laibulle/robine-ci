@@ -5,7 +5,6 @@ defmodule Robine.Adapters.Persistence.Postgres.IdentityRepository do
 
   alias Robine.Adapters.Persistence.Postgres.Schemas.{
     ApiToken,
-    GitHubRepository,
     LocalCredential,
     OIDCIdentity,
     Session,
@@ -153,35 +152,24 @@ defmodule Robine.Adapters.Persistence.Postgres.IdentityRepository do
   @impl true
   def create_api_token(attributes) do
     Repo.transaction(fn ->
-      trusted_repository? =
-        Repo.exists?(
-          from repository in GitHubRepository,
-            where: repository.id == ^attributes.repository_id and repository.trusted == true
-        )
-
       active_user? =
         Repo.exists?(
           from user in User,
             where:
               user.id == ^attributes.user_id and user.disabled == false and
-                user.role in [:administrator, :maintainer]
+                user.role == :administrator
         )
 
-      cond do
-        not trusted_repository? ->
-          Repo.rollback(:repository_not_found)
-
-        not active_user? ->
-          Repo.rollback(:user_not_found)
-
-        true ->
-          %ApiToken{}
-          |> ApiToken.changeset(attributes)
-          |> Repo.insert()
-          |> case do
-            {:ok, _token} -> :ok
-            {:error, changeset} -> Repo.rollback({:api_token_persistence, changeset})
-          end
+      if active_user? do
+        %ApiToken{}
+        |> ApiToken.changeset(attributes)
+        |> Repo.insert()
+        |> case do
+          {:ok, _token} -> :ok
+          {:error, changeset} -> Repo.rollback({:api_token_persistence, changeset})
+        end
+      else
+        Repo.rollback(:user_not_found)
       end
     end)
     |> case do
@@ -191,11 +179,10 @@ defmodule Robine.Adapters.Persistence.Postgres.IdentityRepository do
   end
 
   @impl true
-  def list_api_tokens(repository_id) do
+  def list_api_tokens do
     tokens =
       Repo.all(
         from token in ApiToken,
-          where: token.repository_id == ^repository_id,
           order_by: [desc: token.inserted_at]
       )
 
@@ -203,8 +190,8 @@ defmodule Robine.Adapters.Persistence.Postgres.IdentityRepository do
   end
 
   @impl true
-  def revoke_api_token(repository_id, token_id, revoked_at) do
-    case Repo.get_by(ApiToken, id: token_id, repository_id: repository_id) do
+  def revoke_api_token(token_id, revoked_at) do
+    case Repo.get(ApiToken, token_id) do
       nil ->
         {:error, :not_found}
 
@@ -228,7 +215,7 @@ defmodule Robine.Adapters.Persistence.Postgres.IdentityRepository do
         where:
           token.token_digest == ^token_digest and is_nil(token.revoked_at) and
             token.expires_at > ^now and user.disabled == false and
-            user.role in [:administrator, :maintainer],
+            user.role == :administrator,
         select: {token, user}
 
     case Repo.one(query) do
@@ -243,7 +230,6 @@ defmodule Robine.Adapters.Persistence.Postgres.IdentityRepository do
            id: user.id,
            role: :artifact_uploader,
            token_id: token.id,
-           repository_id: token.repository_id,
            permissions: token.permissions
          }}
     end
@@ -298,7 +284,6 @@ defmodule Robine.Adapters.Persistence.Postgres.IdentityRepository do
     %DomainApiToken{
       id: token.id,
       user_id: token.user_id,
-      repository_id: token.repository_id,
       name: token.name,
       token_prefix: token.token_prefix,
       permissions: token.permissions,

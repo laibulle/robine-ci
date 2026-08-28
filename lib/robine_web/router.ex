@@ -68,7 +68,6 @@ defmodule RobineWeb.Router do
         {RobineWeb.UserAuth, :require_maintainer}
       ] do
       live "/repositories/:id/secrets", RepositoryLive.Secrets, :index
-      live "/repositories/:id/artifact-tokens", RepositoryLive.ArtifactTokens, :index
     end
 
     live_session :administrator,
@@ -77,6 +76,7 @@ defmodule RobineWeb.Router do
         {RobineWeb.UserAuth, :require_administrator}
       ] do
       live "/admin", AdminLive.Index, :index
+      live "/admin/api-tokens", AdminLive.ApiTokens, :index
     end
   end
 

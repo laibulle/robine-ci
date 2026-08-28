@@ -1,5 +1,5 @@
 defmodule Robine.Identities.UseCases.CreateApiToken do
-  @moduledoc "Issues one opaque repository-scoped API token and returns its plaintext once."
+  @moduledoc "Issues one opaque, instance-global API token and returns its plaintext once."
 
   alias Robine.ExecutionContext
   alias Robine.Identities.Dependencies
@@ -13,7 +13,7 @@ defmodule Robine.Identities.UseCases.CreateApiToken do
         actor: %{id: user_id, role: role},
         dependencies: %{identities: %Dependencies{} = deps}
       })
-      when role in [:administrator, :maintainer] do
+      when role == :administrator do
     with {:ok, values} <- validate(input, user_id),
          token <- deps.token_generator.generate("rbn_art"),
          now <- DateTime.truncate(deps.clock.now(), :microsecond),
@@ -35,16 +35,12 @@ defmodule Robine.Identities.UseCases.CreateApiToken do
 
   defp validate(input, user_id) do
     name = input |> Map.get(:name) |> normalize_name()
-    repository_id = Map.get(input, :repository_id)
     permissions = Map.get(input, :permissions)
     expires_in_days = Map.get(input, :expires_in_days)
 
     cond do
       not valid_uuid?(user_id) ->
         {:error, {:invalid_api_token, :user_id}}
-
-      not valid_uuid?(repository_id) ->
-        {:error, {:invalid_api_token, :repository_id}}
 
       not (is_binary(name) and Regex.match?(@name, name)) ->
         {:error, {:invalid_api_token, :name}}
@@ -59,7 +55,6 @@ defmodule Robine.Identities.UseCases.CreateApiToken do
         {:ok,
          %{
            user_id: user_id,
-           repository_id: repository_id,
            name: name,
            permissions: permissions,
            expires_in_days: expires_in_days
@@ -71,7 +66,6 @@ defmodule Robine.Identities.UseCases.CreateApiToken do
     %ApiToken{
       id: deps.id_generator.generate(),
       user_id: values.user_id,
-      repository_id: values.repository_id,
       name: values.name,
       token_prefix: String.slice(token, 0, 16) <> "…",
       permissions: values.permissions,
@@ -90,7 +84,7 @@ defmodule Robine.Identities.UseCases.CreateApiToken do
   defp normalize_name(_name), do: nil
   defp valid_uuid?(value), do: is_binary(value) and Regex.match?(@uuid, value)
   defp outcome({:invalid_api_token, _field}), do: :invalid
-  defp outcome(reason) when reason in [:repository_not_found, :user_not_found], do: :not_found
+  defp outcome(:user_not_found), do: :not_found
   defp outcome(_reason), do: :error
 
   defp emit(action, outcome) do

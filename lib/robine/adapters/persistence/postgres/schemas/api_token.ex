@@ -6,7 +6,6 @@ defmodule Robine.Adapters.Persistence.Postgres.Schemas.ApiToken do
 
   schema "api_tokens" do
     field :user_id, :binary_id
-    field :repository_id, :binary_id
     field :name, :string
     field :token_prefix, :string
     field :token_digest, :binary
@@ -22,7 +21,6 @@ defmodule Robine.Adapters.Persistence.Postgres.Schemas.ApiToken do
     |> cast(attributes, [
       :id,
       :user_id,
-      :repository_id,
       :name,
       :token_prefix,
       :token_digest,
@@ -35,7 +33,6 @@ defmodule Robine.Adapters.Persistence.Postgres.Schemas.ApiToken do
     |> validate_required([
       :id,
       :user_id,
-      :repository_id,
       :name,
       :token_prefix,
       :token_digest,

@@ -311,12 +311,6 @@ defmodule RobineWeb.RepositoryLive.Show do
               navigate={~p"/repositories/#{@repository.id}/secrets"}
               class="btn btn-outline btn-sm"
             >Manage secrets</.link>
-            <.link
-              :if={@current_actor.role in [:administrator, :maintainer]}
-              navigate={~p"/repositories/#{@repository.id}/artifact-tokens"}
-              id="repository-artifact-tokens"
-              class="btn btn-outline btn-sm"
-            >API tokens</.link>
           </:actions>
         </.page_header>
         <nav

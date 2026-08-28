@@ -1,5 +1,5 @@
 defmodule Robine.Identities.UseCases.RevokeApiToken do
-  @moduledoc "Revokes one repository-scoped API token immediately and idempotently."
+  @moduledoc "Revokes one instance-global API token immediately and idempotently."
 
   alias Robine.ExecutionContext
   alias Robine.Identities.Dependencies
@@ -7,15 +7,13 @@ defmodule Robine.Identities.UseCases.RevokeApiToken do
   @uuid ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/i
 
   @spec call(map(), ExecutionContext.t()) :: :ok | {:error, term()}
-  def call(%{repository_id: repository_id, token_id: token_id}, %ExecutionContext{
-        actor: %{role: role},
+  def call(%{token_id: token_id}, %ExecutionContext{
+        actor: %{role: :administrator},
         dependencies: %{identities: %Dependencies{} = deps}
-      })
-      when role in [:administrator, :maintainer] do
+      }) do
     result =
-      if valid_uuid?(repository_id) and valid_uuid?(token_id) do
+      if valid_uuid?(token_id) do
         deps.repository.revoke_api_token(
-          repository_id,
           token_id,
           DateTime.truncate(deps.clock.now(), :microsecond)
         )

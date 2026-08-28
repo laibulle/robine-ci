@@ -21,8 +21,7 @@ defmodule RobineWeb.ManualArtifactController do
   end
 
   def upload(conn, %{"repository_id" => repository_id, "name" => name} = params) do
-    with :ok <- credential_allows_repository(conn.assigns.current_actor, repository_id),
-         {:ok, retention_days} <- positive_integer(Map.get(params, "retention_days", "30")),
+    with {:ok, retention_days} <- positive_integer(Map.get(params, "retention_days", "30")),
          {:ok, content_type} <- content_type(conn),
          {:ok, path, conn} <- spool_body(conn) do
       try do
@@ -134,17 +133,6 @@ defmodule RobineWeb.ManualArtifactController do
       _invalid -> {:error, {:invalid_artifact, :content_type}}
     end
   end
-
-  defp credential_allows_repository(
-         %{role: :artifact_uploader, repository_id: repository_id},
-         repository_id
-       ),
-       do: :ok
-
-  defp credential_allows_repository(%{role: :artifact_uploader}, _repository_id),
-    do: {:error, :forbidden}
-
-  defp credential_allows_repository(_actor, _repository_id), do: :ok
 
   defp positive_integer(value) when is_integer(value) and value > 0, do: {:ok, value}
 

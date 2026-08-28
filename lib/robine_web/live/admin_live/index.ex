@@ -323,7 +323,15 @@ defmodule RobineWeb.AdminLive.Index do
           eyebrow="The engine room"
           title="Administration"
           description="Keep the machinery healthy, the boundaries explicit, and your instance unmistakably yours."
-        />
+        >
+          <:actions>
+            <.link
+              navigate={~p"/admin/api-tokens"}
+              id="admin-api-tokens"
+              class="btn btn-outline btn-sm"
+            >API tokens</.link>
+          </:actions>
+        </.page_header>
         <nav
           id="admin-section-navigation"
           class="grid gap-1 rounded-2xl border border-base-300/70 bg-base-100/75 p-1.5 sm:grid-cols-5"

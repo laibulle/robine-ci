@@ -1,18 +1,16 @@
-defmodule RobineWeb.RepositoryArtifactTokenLiveTest do
+defmodule RobineWeb.AdminApiTokenLiveTest do
   use RobineWeb.ConnCase, async: false
 
   import Phoenix.LiveViewTest
 
   alias Robine.Adapters.Persistence.Postgres.Schemas.{ApiToken, User}
-  alias Robine.{Repo, Repositories}
-  alias Robine.Runtime.Dependencies
+  alias Robine.Repo
 
-  test "creates, reveals once, lists, and revokes a scoped upload token", %{conn: conn} do
+  test "creates, reveals once, lists, and revokes a global upload token", %{conn: conn} do
     conn = bootstrap(conn)
-    repository = register_repository!()
 
     assert {:ok, view, _html} =
-             live(conn, ~p"/repositories/#{repository.id}/artifact-tokens")
+             live(conn, ~p"/admin/api-tokens")
 
     assert has_element?(view, "#api-token-form")
     assert has_element?(view, "#api-tokens-empty")
@@ -44,13 +42,12 @@ defmodule RobineWeb.RepositoryArtifactTokenLiveTest do
 
   test "keeps the token-management route unavailable to viewers", %{conn: conn} do
     conn = bootstrap(conn)
-    repository = register_repository!()
 
     user = Repo.one!(User)
     user |> Ecto.Changeset.change(role: :viewer) |> Repo.update!()
 
     assert {:error, {:redirect, %{to: "/pipelines"}}} =
-             live(conn, ~p"/repositories/#{repository.id}/artifact-tokens")
+             live(conn, ~p"/admin/api-tokens")
   end
 
   defp bootstrap(conn) do
@@ -59,22 +56,5 @@ defmodule RobineWeb.RepositoryArtifactTokenLiveTest do
       "email" => "admin@example.com",
       "password" => "a secure password"
     })
-  end
-
-  defp register_repository! do
-    context = Dependencies.context(%{id: "admin", role: :administrator}, "artifact-token-live")
-    provider_id = System.unique_integer([:positive])
-
-    assert {:ok, repository} =
-             Repositories.register_github_repository(
-               %{
-                 provider_id: provider_id,
-                 installation_id: provider_id,
-                 full_name: "acme/artifact-token-live-#{provider_id}"
-               },
-               context
-             )
-
-    repository
   end
 end

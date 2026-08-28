@@ -1,12 +1,11 @@
 defmodule Robine.Identities.Domain.ApiToken do
-  @moduledoc "A revocable opaque credential scoped to one repository and permission set."
+  @moduledoc "A revocable opaque credential global to the instance and scoped by permission."
 
   @permission "artifacts:write"
 
   @enforce_keys [
     :id,
     :user_id,
-    :repository_id,
     :name,
     :token_prefix,
     :permissions,
@@ -16,7 +15,6 @@ defmodule Robine.Identities.Domain.ApiToken do
   defstruct [
     :id,
     :user_id,
-    :repository_id,
     :name,
     :token_prefix,
     :permissions,
@@ -29,7 +27,6 @@ defmodule Robine.Identities.Domain.ApiToken do
   @type t :: %__MODULE__{
           id: String.t(),
           user_id: String.t(),
-          repository_id: String.t(),
           name: String.t(),
           token_prefix: String.t(),
           permissions: [String.t()],

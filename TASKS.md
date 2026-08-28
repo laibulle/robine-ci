@@ -325,15 +325,15 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - [x] Add provider preflight test and exact redirect URI guidance.
 - [x] Test provider outage and break-glass recovery, including failed authorization and callback, no partial identity/session, and local administrator access during the incident.
 
-### IAM-103 — Add scoped artifact-upload tokens
+### IAM-103 — Add global permission-scoped artifact-upload tokens
 
 - **Spec:** [IAM-002](docs/specs/identity/iam-002-scoped-api-tokens.md)
 - **Depends on:** IAM-101, DATA-103
-- [x] Persist opaque repository tokens as digests with bounded permissions and expiration.
+- [x] Persist opaque instance-global tokens as digests with bounded permissions and expiration.
 - [x] Add authorized create, list, revoke, and resolve operations to the Identities facade.
 - [x] Authenticate `artifacts:write` Bearer tokens without widening session or repository access.
-- [x] Add a repository token-management LiveView with one-time secret reveal.
-- [x] Verify repository isolation, revocation, expiry, disabled owners, and session compatibility.
+- [x] Add an administrator-only global token-management LiveView with one-time secret reveal.
+- [x] Verify multi-repository uploads, permission isolation, revocation, expiry, disabled owners, and session compatibility.
 
 ### WEB-101 — Implement setup and administration
 

@@ -11,7 +11,7 @@ defmodule Robine.Identities.Ports.Repository do
   @callback find_or_provision_oidc_user(map(), map()) :: {:ok, map()} | {:error, term()}
   @callback list_users() :: {:ok, [map()]} | {:error, term()}
   @callback create_api_token(map()) :: :ok | {:error, term()}
-  @callback list_api_tokens(binary()) :: {:ok, [Robine.Identities.Domain.ApiToken.t()]}
-  @callback revoke_api_token(binary(), binary(), DateTime.t()) :: :ok | {:error, term()}
+  @callback list_api_tokens() :: {:ok, [Robine.Identities.Domain.ApiToken.t()]}
+  @callback revoke_api_token(binary(), DateTime.t()) :: :ok | {:error, term()}
   @callback resolve_api_token(binary(), DateTime.t()) :: {:ok, map()} | {:error, :not_found}
 end

@@ -1,24 +1,17 @@
-defmodule RobineWeb.RepositoryLive.ArtifactTokens do
+defmodule RobineWeb.AdminLive.ApiTokens do
   use RobineWeb, :live_view
 
-  alias Robine.{Identities, Repositories}
+  alias Robine.Identities
 
   @default_expiration_days 90
 
   @impl true
-  def mount(%{"id" => id}, _session, socket) do
-    with {:ok, repositories} <-
-           Repositories.list_repositories(%{}, socket.assigns.execution_context),
-         %{provider: :github} = repository <- Enum.find(repositories, &(&1.id == id)),
-         {:ok, tokens} <-
-           Identities.list_api_tokens(
-             %{repository_id: id},
-             socket.assigns.execution_context
-           ) do
+  def mount(_params, _session, socket) do
+    with {:ok, tokens} <-
+           Identities.list_api_tokens(%{}, socket.assigns.execution_context) do
       {:ok,
        socket
        |> assign(
-         repository: repository,
          token_count: length(tokens),
          token_form: token_form(),
          form_error: nil,
@@ -29,8 +22,8 @@ defmodule RobineWeb.RepositoryLive.ArtifactTokens do
       _reason ->
         {:ok,
          socket
-         |> put_flash(:error, "Repository API tokens could not be loaded.")
-         |> push_navigate(to: ~p"/repositories")}
+         |> put_flash(:error, "API tokens could not be loaded.")
+         |> push_navigate(to: ~p"/admin")}
     end
   end
 
@@ -48,7 +41,6 @@ defmodule RobineWeb.RepositoryLive.ArtifactTokens do
          {:ok, result} <-
            Identities.create_api_token(
              %{
-               repository_id: socket.assigns.repository.id,
                name: Map.get(params, "name"),
                permissions: ["artifacts:write"],
                expires_in_days: days
@@ -82,15 +74,12 @@ defmodule RobineWeb.RepositoryLive.ArtifactTokens do
 
   def handle_event("revoke-token", %{"id" => token_id}, socket) do
     case Identities.revoke_api_token(
-           %{repository_id: socket.assigns.repository.id, token_id: token_id},
+           %{token_id: token_id},
            socket.assigns.execution_context
          ) do
       :ok ->
         {:ok, tokens} =
-          Identities.list_api_tokens(
-            %{repository_id: socket.assigns.repository.id},
-            socket.assigns.execution_context
-          )
+          Identities.list_api_tokens(%{}, socket.assigns.execution_context)
 
         {:noreply,
          socket
@@ -145,15 +134,14 @@ defmodule RobineWeb.RepositoryLive.ArtifactTokens do
     assigns = assign(assigns, :now, DateTime.utc_now())
 
     ~H"""
-    <Layouts.app flash={@flash} current_actor={@current_actor} nav_section={:repositories}>
+    <Layouts.app flash={@flash} current_actor={@current_actor} nav_section={:admin}>
       <section class="space-y-8">
         <.page_header
-          eyebrow="Scoped automation"
+          eyebrow="Global automation"
           title="Artifact upload tokens"
-          description="Issue a write-only credential for one repository without sharing a password or web session."
+          description="Issue a write-only credential for artifact uploads across every trusted repository."
           breadcrumbs={[
-            %{label: "Repositories", navigate: ~p"/repositories"},
-            %{label: @repository.full_name, navigate: ~p"/repositories/#{@repository.id}"},
+            %{label: "Administration", navigate: ~p"/admin"},
             %{label: "API tokens"}
           ]}
         >
@@ -162,12 +150,6 @@ defmodule RobineWeb.RepositoryLive.ArtifactTokens do
               {@token_count} {if @token_count == 1, do: "token", else: "tokens"}
             </span>
           </:meta>
-          <:actions>
-            <.link
-              navigate={~p"/repositories/#{@repository.id}/artifacts"}
-              class="btn btn-outline btn-sm"
-            >Artifacts</.link>
-          </:actions>
         </.page_header>
 
         <section
@@ -214,7 +196,7 @@ defmodule RobineWeb.RepositoryLive.ArtifactTokens do
           <section aria-labelledby="token-list-title">
             <div class="border-b border-base-300/70 pb-4">
               <p class="text-[0.68rem] font-bold uppercase tracking-[0.16em] text-primary">
-                Repository scoped
+                Instance global
               </p>
               <h2 id="token-list-title" class="mt-1 text-2xl font-bold">Credentials</h2>
             </div>
@@ -280,7 +262,9 @@ defmodule RobineWeb.RepositoryLive.ArtifactTokens do
             <section class="surface-panel overflow-hidden rounded-2xl">
               <div class="border-b border-base-300/70 bg-base-200/60 p-5">
                 <h2 class="font-bold">Create an upload token</h2>
-                <p class="mt-1 text-xs text-base-content/50">One repository · one permission</p>
+                <p class="mt-1 text-xs text-base-content/50">
+                  Every trusted repository · one permission
+                </p>
               </div>
               <.form
                 for={@token_form}
@@ -310,7 +294,7 @@ defmodule RobineWeb.RepositoryLive.ArtifactTokens do
                 <div class="rounded-xl border border-primary/20 bg-primary/5 p-4 text-sm">
                   <p class="font-bold">artifacts:write</p>
                   <p class="mt-1 text-xs text-base-content/60">
-                    Can upload manual artifacts only to {@repository.full_name}.
+                    Can upload manual artifacts to any trusted repository in this Robine instance.
                   </p>
                 </div>
                 <p :if={@form_error} id="api-token-form-error" class="text-sm text-error" role="alert">

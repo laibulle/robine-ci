@@ -34,10 +34,9 @@ defmodule Robine.Storage.UseCases.UploadManualArtifact do
   defp authorize(
          %{
            role: :artifact_uploader,
-           repository_id: repository_id,
            permissions: permissions
          },
-         repository_id
+         _repository_id
        )
        when is_list(permissions) do
     if "artifacts:write" in permissions, do: :ok, else: {:error, :forbidden}

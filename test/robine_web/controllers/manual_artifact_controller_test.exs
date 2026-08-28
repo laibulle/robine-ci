@@ -193,7 +193,7 @@ defmodule RobineWeb.ManualArtifactControllerTest do
     assert :ok = LocalBlobStore.delete(quota_digest)
   end
 
-  test "scopes an artifacts:write token to upload only for its exact repository", %{conn: conn} do
+  test "uses a global artifacts:write token to upload to every trusted repository", %{conn: conn} do
     conn = bootstrap(conn)
     repository = register_repository!()
     other_repository = register_repository!()
@@ -203,7 +203,6 @@ defmodule RobineWeb.ManualArtifactControllerTest do
     assert {:ok, %{token: token, credential: credential}} =
              Identities.create_api_token(
                %{
-                 repository_id: repository.id,
                  name: "DMG upload",
                  permissions: ["artifacts:write"],
                  expires_in_days: 30
@@ -212,7 +211,6 @@ defmodule RobineWeb.ManualArtifactControllerTest do
              )
 
     assert String.starts_with?(token, "rbn_art_")
-    assert credential.repository_id == repository.id
     assert credential.permissions == ["artifacts:write"]
 
     persisted = Repo.get!(ApiToken, credential.id)
@@ -258,22 +256,35 @@ defmodule RobineWeb.ManualArtifactControllerTest do
 
     assert %{"error" => "forbidden"} = json_response(download_attempt, 403)
 
-    wrong_repository =
+    other_upload =
       conn
       |> recycle()
       |> put_req_header("authorization", "Bearer #{token}")
       |> put_req_header("content-type", "application/octet-stream")
       |> post(
         "/api/v1/repositories/#{other_repository.id}/artifacts?name=wrong.dmg",
-        "forbidden"
+        "second-upload"
       )
 
-    assert %{"error" => "forbidden"} = json_response(wrong_repository, 403)
-    assert Repo.aggregate(Artifact, :count) == 1
+    assert %{"digest" => second_digest} = json_response(other_upload, 201)
+    assert Repo.aggregate(Artifact, :count) == 2
+
+    missing_repository =
+      conn
+      |> recycle()
+      |> put_req_header("authorization", "Bearer #{token}")
+      |> put_req_header("content-type", "application/octet-stream")
+      |> post(
+        "/api/v1/repositories/#{Ecto.UUID.generate()}/artifacts?name=missing.dmg",
+        "not-stored"
+      )
+
+    assert %{"error" => "not_found"} = json_response(missing_repository, 404)
+    assert Repo.aggregate(Artifact, :count) == 2
 
     assert :ok =
              Identities.revoke_api_token(
-               %{repository_id: repository.id, token_id: credential.id},
+               %{token_id: credential.id},
                context
              )
 
@@ -285,11 +296,12 @@ defmodule RobineWeb.ManualArtifactControllerTest do
       |> post("/api/v1/repositories/#{repository.id}/artifacts?name=revoked.dmg", "bytes")
 
     assert %{"error" => "unauthorized"} = json_response(revoked, 401)
-    assert Repo.aggregate(Artifact, :count) == 1
+    assert Repo.aggregate(Artifact, :count) == 2
     assert :ok = LocalBlobStore.delete(digest)
+    assert :ok = LocalBlobStore.delete(second_digest)
   end
 
-  test "rejects expired, malformed, unknown, disabled-owner, and viewer-created tokens", %{
+  test "rejects expired, malformed, unknown, disabled-owner, and non-admin token management", %{
     conn: conn
   } do
     conn = bootstrap(conn)
@@ -300,7 +312,6 @@ defmodule RobineWeb.ManualArtifactControllerTest do
     assert {:ok, %{token: expired_token, credential: expired_credential}} =
              Identities.create_api_token(
                %{
-                 repository_id: repository.id,
                  name: "Expiring token",
                  permissions: ["artifacts:write"],
                  expires_in_days: 1
@@ -322,7 +333,6 @@ defmodule RobineWeb.ManualArtifactControllerTest do
     assert {:ok, %{token: disabled_token}} =
              Identities.create_api_token(
                %{
-                 repository_id: repository.id,
                  name: "Disabled owner",
                  permissions: ["artifacts:write"],
                  expires_in_days: 30
@@ -334,27 +344,47 @@ defmodule RobineWeb.ManualArtifactControllerTest do
     assert_unauthorized_token(conn, repository.id, disabled_token)
     assert Repo.aggregate(Artifact, :count) == 0
 
-    viewer = %{context | actor: %{id: user.id, role: :viewer}}
+    user =
+      user.id
+      |> then(&Repo.get!(User, &1))
+      |> Ecto.Changeset.change(disabled: false)
+      |> Repo.update!()
 
-    assert {:error, :forbidden} =
+    assert {:ok, %{token: demoted_owner_token}} =
              Identities.create_api_token(
                %{
-                 repository_id: repository.id,
-                 name: "Forged viewer token",
+                 name: "Demoted owner",
                  permissions: ["artifacts:write"],
                  expires_in_days: 30
                },
-               viewer
+               context
              )
 
-    assert {:error, :forbidden} =
-             Identities.list_api_tokens(%{repository_id: repository.id}, viewer)
+    user |> Ecto.Changeset.change(role: :maintainer) |> Repo.update!()
+    assert_unauthorized_token(conn, repository.id, demoted_owner_token)
+    assert Repo.aggregate(Artifact, :count) == 0
 
-    assert {:error, :forbidden} =
-             Identities.revoke_api_token(
-               %{repository_id: repository.id, token_id: expired_credential.id},
-               viewer
-             )
+    for role <- [:maintainer, :viewer] do
+      unauthorized = %{context | actor: %{id: user.id, role: role}}
+
+      assert {:error, :forbidden} =
+               Identities.create_api_token(
+                 %{
+                   name: "Forged #{role} token",
+                   permissions: ["artifacts:write"],
+                   expires_in_days: 30
+                 },
+                 unauthorized
+               )
+
+      assert {:error, :forbidden} = Identities.list_api_tokens(%{}, unauthorized)
+
+      assert {:error, :forbidden} =
+               Identities.revoke_api_token(
+                 %{token_id: expired_credential.id},
+                 unauthorized
+               )
+    end
   end
 
   defp bootstrap(conn) do
