@@ -4,7 +4,7 @@ defmodule Robine.MixProject do
   def project do
     [
       app: :robine,
-      version: "0.3.0-alpha7",
+      version: "0.3.0-alpha8",
       elixir: "~> 1.20",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
