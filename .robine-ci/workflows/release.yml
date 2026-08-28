@@ -7,7 +7,7 @@ on:
 
 jobs:
   package:
-    image: hexpm/elixir@sha256:1d7b070659ac993d5778b605bf767bc2477faedaea26f09bfa945d5e91d5fa14
+    image: elixir@sha256:7ee41a9a8a8427dbd40c9133ee5b9047f585b58db4968fd675fbcd9498e3b22e
     shell: /bin/bash
     timeout: 20m
     env:
@@ -16,12 +16,8 @@ jobs:
     steps:
       - name: Checkout tagged revision
         uses: checkout
-      - name: Install build tooling
+      - name: Install Go and Mix tooling
         run: |
-          mkdir -p /tmp/robine-apt/cache/archives/partial /tmp/robine-apt/state/lists/partial /tmp/robine-apt/log
-          APT_OPTIONS="-o APT::Sandbox::User=root -o Dir::Cache=/tmp/robine-apt/cache -o Dir::State=/tmp/robine-apt/state -o Dir::State::status=/var/lib/dpkg/status -o Dir::Log=/tmp/robine-apt/log"
-          apt-get $APT_OPTIONS update
-          apt-get $APT_OPTIONS install --yes --no-install-recommends build-essential ca-certificates git
           curl -fsSL https://go.dev/dl/go1.27.0.linux-amd64.tar.gz -o /tmp/go.tgz
           echo "675c26c449cbb18fc24b74650de1eabbae6e16f64326fd85a283fb3b58280685  /tmp/go.tgz" | sha256sum -c -
           tar --no-same-owner -xzf /tmp/go.tgz -C /usr/local
