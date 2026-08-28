@@ -25,7 +25,13 @@ defmodule Robine.Storage.UseCases.RestoreCache do
       with {:ok, content} <- deps.blob_store.get(cache.blob_id, cache.digest),
            :ok <- deps.repository.touch_cache(cache.id, deps.clock.now()) do
         {:ok,
-         %Download{name: cache.key, digest: cache.digest, size: cache.size, content: content}}
+         %Download{
+           name: cache.key,
+           content_type: "application/gzip",
+           digest: cache.digest,
+           size: cache.size,
+           content: content
+         }}
       end
     else
       {:ok, :miss}

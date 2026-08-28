@@ -26,6 +26,10 @@ defmodule RobineWeb.Router do
     plug :accepts, ["json", "gz"]
   end
 
+  pipeline :authenticated_api do
+    plug RobineWeb.Plugs.FetchApiActor
+  end
+
   scope "/", RobineWeb do
     pipe_through :browser
 
@@ -40,6 +44,10 @@ defmodule RobineWeb.Router do
     get "/pipelines/:id/jobs/:job_id/logs", JobLogController, :download
     get "/pipelines/:id/jobs/:job_id/artifacts/:name", JobArtifactController, :download
 
+    get "/repositories/:id/artifacts/:artifact_id/download",
+        ManualArtifactDownloadController,
+        :download
+
     live_session :authenticated,
       on_mount: [{RobineWeb.UserAuth, :require_authenticated}] do
       live "/pipelines", PipelineLive.Index, :index
@@ -49,6 +57,7 @@ defmodule RobineWeb.Router do
       live "/repositories", RepositoryLive.Index, :index
       live "/repositories/:id", RepositoryLive.Show, :show
       live "/repositories/:id/releases", RepositoryLive.Releases, :index
+      live "/repositories/:id/artifacts", RepositoryLive.Artifacts, :index
       live "/repositories/:id/deployments", RepositoryLive.Deployments, :index
       live "/build-information", BuildInfoLive.Show, :show
     end
@@ -73,6 +82,18 @@ defmodule RobineWeb.Router do
   scope "/api/github", RobineWeb do
     pipe_through :api
     post "/webhooks", GitHubWebhookController, :create
+  end
+
+  scope "/api/v1", RobineWeb do
+    pipe_through :api
+    post "/session", ApiSessionController, :create
+  end
+
+  scope "/api/v1", RobineWeb do
+    pipe_through [:api, :authenticated_api]
+    get "/repositories/:repository_id/artifacts", ManualArtifactController, :index
+    post "/repositories/:repository_id/artifacts", ManualArtifactController, :upload
+    get "/repositories/:repository_id/artifacts/:artifact_id", ManualArtifactController, :download
   end
 
   scope "/api/v1/runners", RobineWeb do

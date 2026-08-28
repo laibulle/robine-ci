@@ -4,7 +4,13 @@ defmodule Robine.Storage.StorageLifecycleTest do
   alias Robine.{Pipelines, Storage}
   alias Robine.Runtime.Dependencies
   alias Robine.Adapters.Storage.LocalBlobStore
-  alias Robine.Adapters.Persistence.Postgres.Schemas.StorageGcCandidate
+
+  alias Robine.Adapters.Persistence.Postgres.Schemas.{
+    Artifact,
+    GitHubRepository,
+    StorageGcCandidate
+  }
+
   alias Robine.Repo
 
   test "atomically enforces repository and instance logical quotas" do
@@ -86,6 +92,12 @@ defmodule Robine.Storage.StorageLifecycleTest do
     assert download.digest == artifact.digest
 
     assert {:error, :not_found} =
+             Storage.download_manual_artifact(
+               %{repository_id: repository_id, artifact_id: artifact.id},
+               viewer
+             )
+
+    assert {:error, :not_found} =
              Storage.download_artifact(
                %{repository_id: Ecto.UUID.generate(), artifact_id: artifact.id},
                viewer
@@ -125,6 +137,84 @@ defmodule Robine.Storage.StorageLifecycleTest do
              )
 
     assert :ok = LocalBlobStore.delete(artifact.digest)
+  end
+
+  test "retains manual artifact provenance without inventing a CI attempt" do
+    repository_id = trusted_repository!()
+    uploader_id = Ecto.UUID.generate()
+    context = Dependencies.context(%{id: uploader_id, role: :maintainer}, "manual-artifact")
+    content = "signed-notarized-dmg"
+
+    assert {:ok, first} =
+             Storage.upload_manual_artifact(
+               %{
+                 repository_id: repository_id,
+                 name: "Robine.dmg",
+                 content_type: "application/x-apple-diskimage",
+                 content_stream: Stream.map([content], & &1),
+                 retention_seconds: 86_400
+               },
+               context
+             )
+
+    assert first.source == :manual
+    assert first.uploaded_by_id == uploader_id
+    assert first.content_type == "application/x-apple-diskimage"
+    assert first.digest == :crypto.hash(:sha256, content) |> Base.encode16(case: :lower)
+
+    persisted = Repo.get!(Artifact, first.id)
+    assert persisted.attempt_id == nil
+    assert persisted.source == :manual
+    assert persisted.uploaded_by_id == uploader_id
+
+    assert {:ok, second} =
+             Storage.upload_manual_artifact(
+               %{
+                 repository_id: repository_id,
+                 name: "Robine.dmg",
+                 content_type: "application/x-apple-diskimage",
+                 content: content <> "-second"
+               },
+               context
+             )
+
+    viewer = %{context | actor: %{id: "viewer", role: :viewer}}
+
+    assert {:ok, [listed_second, listed_first]} =
+             Storage.list_manual_artifacts(%{repository_id: repository_id}, viewer)
+
+    assert [listed_second.id, listed_first.id] == [second.id, first.id]
+
+    assert {:ok, %{content: ^content, content_type: "application/x-apple-diskimage"}} =
+             Storage.download_manual_artifact(
+               %{repository_id: repository_id, artifact_id: first.id},
+               viewer
+             )
+
+    assert {:error, :forbidden} =
+             Storage.upload_manual_artifact(
+               %{
+                 repository_id: repository_id,
+                 name: "forged.dmg",
+                 content_type: "application/octet-stream",
+                 content: "forged"
+               },
+               viewer
+             )
+
+    assert {:error, :repository_not_found} =
+             Storage.upload_manual_artifact(
+               %{
+                 repository_id: Ecto.UUID.generate(),
+                 name: "missing.dmg",
+                 content_type: "application/octet-stream",
+                 content: "missing"
+               },
+               context
+             )
+
+    assert :ok = LocalBlobStore.delete(first.digest)
+    assert :ok = LocalBlobStore.delete(second.digest)
   end
 
   test "cache miss is successful and exact-key saves replace the prior complete entry" do
@@ -180,6 +270,28 @@ defmodule Robine.Storage.StorageLifecycleTest do
                %{repository_id: Ecto.UUID.generate(), key: "", content: "content"},
                context
              )
+  end
+
+  defp trusted_repository! do
+    id = Ecto.UUID.generate()
+    provider_id = System.unique_integer([:positive])
+
+    %GitHubRepository{}
+    |> GitHubRepository.changeset(%{
+      id: id,
+      provider: :github,
+      provider_instance: "default",
+      provider_id: provider_id,
+      installation_id: provider_id,
+      owner: "acme",
+      name: "manual-artifacts",
+      full_name: "acme/manual-artifacts-#{provider_id}",
+      trusted: true,
+      inserted_at: DateTime.utc_now()
+    })
+    |> Repo.insert!()
+
+    id
   end
 
   test "downloads only retained artifacts from a declared successful dependency" do

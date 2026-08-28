@@ -292,6 +292,11 @@ defmodule RobineWeb.RepositoryLive.Show do
           <:actions>
             <a href="#run-workflow" class="btn btn-primary btn-sm">Run workflow</a>
             <.link
+              navigate={~p"/repositories/#{@repository.id}/artifacts"}
+              id="repository-artifacts"
+              class="btn btn-outline btn-sm"
+            >Artifacts</.link>
+            <.link
               navigate={~p"/repositories/#{@repository.id}/releases"}
               id="repository-releases"
               class="btn btn-outline btn-sm"

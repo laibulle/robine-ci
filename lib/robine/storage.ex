@@ -7,6 +7,25 @@ defmodule Robine.Storage do
   @spec upload_artifact(map(), ExecutionContext.t()) ::
           {:ok, ArtifactMetadata.t()} | {:error, term()}
   defdelegate upload_artifact(input, context), to: UseCases.UploadArtifact, as: :call
+
+  @spec upload_manual_artifact(map(), ExecutionContext.t()) ::
+          {:ok, ArtifactMetadata.t()} | {:error, term()}
+  defdelegate upload_manual_artifact(input, context),
+    to: UseCases.UploadManualArtifact,
+    as: :call
+
+  @spec list_manual_artifacts(map(), ExecutionContext.t()) ::
+          {:ok, [ArtifactMetadata.t()]} | {:error, term()}
+  defdelegate list_manual_artifacts(input, context),
+    to: UseCases.ListManualArtifacts,
+    as: :call
+
+  @spec download_manual_artifact(map(), ExecutionContext.t()) ::
+          {:ok, Download.t()} | {:error, term()}
+  defdelegate download_manual_artifact(input, context),
+    to: UseCases.DownloadManualArtifact,
+    as: :call
+
   @spec download_artifact(map(), ExecutionContext.t()) :: {:ok, Download.t()} | {:error, term()}
   defdelegate download_artifact(input, context), to: UseCases.DownloadArtifact, as: :call
 

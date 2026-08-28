@@ -215,6 +215,12 @@ defmodule RobineWeb.Telemetry do
       counter("robine.web.action.failure.count", tags: [:action]),
 
       # Complete storage and secret catalogue
+      counter("robine.storage.artifact.upload.count", tags: [:source, :outcome]),
+      distribution("robine.storage.artifact.upload.duration",
+        tags: [:source, :outcome],
+        unit: {:native, :millisecond}
+      ),
+      sum("robine.storage.artifact.upload.bytes", tags: [:source, :outcome]),
       counter("robine.storage.cache.request.count", tags: [:outcome]),
       distribution("robine.storage.request.duration",
         tags: [:operation, :outcome],

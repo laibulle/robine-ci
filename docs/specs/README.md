@@ -43,6 +43,7 @@ New specifications MUST start from [TEMPLATE.md](TEMPLATE.md). A feature is not 
 | Runners | [RUN-002 runner fleet and scheduling](runners/run-002-runner-fleet-and-scheduling.md) | Labels, capacity matching, lifecycle administration, and autoscaling boundary |
 | Runners | [RUN-003 macOS native runner](runners/run-003-macos-native-runner.md) | Dedicated Darwin host execution for trusted Apple-platform CI |
 | Storage | [DATA-002 S3-compatible blob storage](storage/data-002-s3-compatible-storage.md) | Provider-neutral object storage, multipart transfer, and reconciliation |
+| Storage | [DATA-003 manual artifact uploads](storage/data-003-manual-artifact-uploads.md) | Authenticated UI and API uploads for locally produced immutable binaries |
 | Execution | [EXEC-002 service containers](execution/exec-002-service-containers.md) | Attempt-scoped Docker services, readiness, secrets, and cleanup |
 | Workflows | [WF-002 conditional execution](workflows/wf-002-conditional-execution.md) | Fixed success, failure, and always job/step conditions |
 | Workflows | [WF-003 job matrices](workflows/wf-003-job-matrices.md) | Bounded static Cartesian job expansion and local reproduction |

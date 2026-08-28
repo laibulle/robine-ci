@@ -7,11 +7,20 @@ defmodule Robine.Adapters.Persistence.Postgres.StorageRepository do
     Artifact,
     Attempt,
     CacheEntry,
+    GitHubRepository,
     Job,
     StorageGcCandidate
   }
 
   alias Robine.Repo
+
+  @impl true
+  def repository_exists?(repository_id) do
+    Repo.exists?(
+      from repository in GitHubRepository,
+        where: repository.id == ^repository_id and repository.trusted == true
+    )
+  end
 
   @impl true
   def insert_artifact(artifact, quotas) do
@@ -25,6 +34,16 @@ defmodule Robine.Adapters.Persistence.Postgres.StorageRepository do
         {:error, changeset} -> Repo.rollback({:artifact_persistence, changeset})
       end
     end)
+  end
+
+  @impl true
+  def list_manual_artifacts(repository_id) do
+    Repo.all(
+      from artifact in Artifact,
+        where: artifact.repository_id == ^repository_id and artifact.source == :manual,
+        order_by: [desc: artifact.created_at]
+    )
+    |> Enum.map(&artifact_domain/1)
   end
 
   defp quota_transaction(repository_id, added_bytes, replaced_bytes, quotas, operation) do

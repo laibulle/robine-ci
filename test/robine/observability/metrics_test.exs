@@ -56,6 +56,9 @@ defmodule Robine.Observability.MetricsTest do
     robine.web.page.duration
     robine.web.log_segment.duration
     robine.storage.blob.write.bytes
+    robine.storage.artifact.upload.count
+    robine.storage.artifact.upload.duration
+    robine.storage.artifact.upload.bytes
     robine.storage.cache.request.count
     robine.storage.quota_denial.count
     robine.secrets.decryption_failure.count

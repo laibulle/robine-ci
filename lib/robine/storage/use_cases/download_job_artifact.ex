@@ -17,6 +17,7 @@ defmodule Robine.Storage.UseCases.DownloadJobArtifact do
       {:ok,
        %Download{
          name: artifact.name,
+         content_type: artifact.content_type,
          digest: artifact.digest,
          size: artifact.size,
          content: content

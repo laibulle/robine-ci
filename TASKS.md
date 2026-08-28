@@ -231,6 +231,16 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - [x] Implement retry against retained dependency artifacts.
 - [x] Refuse retries with precise rerun scope when required artifacts expired.
 
+### DATA-103 — Upload locally produced artifacts
+
+- **Spec:** [DATA-003](docs/specs/storage/data-003-manual-artifact-uploads.md)
+- **Depends on:** DATA-101, DATA-102, IAM-001
+- [x] Persist explicit CI/manual artifact provenance without weakening attempt dependency rules.
+- [x] Add shared manual upload, listing, and private download operations to the Storage facade.
+- [x] Add a bounded authenticated raw-upload API with revocable local Bearer sessions.
+- [x] Add a repository artifact LiveView with upload progress, retention, metadata, and downloads.
+- [x] Verify authorization, limits, interruption cleanup, digest identity, retention, API, and UI behavior.
+
 ## Phase 5 — GitHub integration
 
 ### GH-101 — Implement GitHub App setup and credentials

@@ -29,6 +29,7 @@ defmodule Robine.Storage.UseCases.DownloadJobArtifactsByPrefix do
            {:ok, content} <- deps.blob_store.get(artifact.blob_id, artifact.digest) do
         download = %Download{
           name: artifact.name,
+          content_type: artifact.content_type,
           digest: artifact.digest,
           size: artifact.size,
           content: content
