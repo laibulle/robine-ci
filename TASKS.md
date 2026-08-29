@@ -510,7 +510,7 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 
 - **Spec:** [RUN-004](docs/specs/runners/run-004-bundled-go-docker-runner.md)
 - **Depends on:** RUN-302
-- [x] Implement Docker execution, services, limits, cancellation, built-ins, and reconciliation in `rbe`.
+- [x] Implement Docker execution, services, limits, cancellation, built-ins, reconciliation, and host-UID-independent writable workspaces in `rbe`.
 - [x] Package the matching Linux runner in the server release and start it as a separate production service.
 - [x] Automatically exchange a private single-use bootstrap file for the bundled runner credential.
 - [x] Remove the production local-Elixir fallback and Docker socket from Phoenix.

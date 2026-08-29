@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"archive/tar"
 	"context"
 	"encoding/json"
 	"errors"
@@ -325,8 +326,7 @@ func (e *executor) copyDockerSource(ctx context.Context, offer Offer, container,
 	if err := extractArchive(body, source, true); err != nil {
 		return err
 	}
-	_, err = dockerCommand(ctx, nil, "cp", source+"/.", container+":/workspace")
-	return err
+	return dockerCopyTree(ctx, source, container, "/workspace")
 }
 
 func (e *executor) runDockerSteps(ctx context.Context, offer Offer, resources dockerResources, services []dockerService, secrets map[string]string, root string) executionOutcome {
@@ -470,7 +470,7 @@ func (e *executor) runDockerBuiltin(ctx context.Context, offer Offer, container,
 	case "artifacts/download", "cache/restore":
 		err = e.executeBuiltin(ctx, offer, workspace, step)
 		if err == nil {
-			_, err = dockerCommand(ctx, nil, "cp", workspace+"/.", container+":/workspace")
+			err = dockerCopyTree(ctx, workspace, container, "/workspace")
 		}
 	default:
 		err = errors.New("unsupported builtin")
@@ -561,6 +561,85 @@ func dockerCommand(ctx context.Context, stdin io.Reader, args ...string) (string
 		exitCode = exitError.ExitCode()
 	}
 	return "", &dockerCommandError{ExitCode: exitCode, Output: string(output)}
+}
+
+func dockerCopyTree(ctx context.Context, source, container, destination string) error {
+	reader, writer := io.Pipe()
+	archiveResult := make(chan error, 1)
+
+	go func() {
+		err := writeDockerCopyArchive(writer, source)
+		_ = writer.CloseWithError(err)
+		archiveResult <- err
+	}()
+
+	_, copyErr := dockerCommand(ctx, reader, "cp", "-", container+":"+destination)
+	_ = reader.Close()
+	archiveErr := <-archiveResult
+	if archiveErr != nil {
+		return archiveErr
+	}
+	return copyErr
+}
+
+func writeDockerCopyArchive(destination io.Writer, source string) error {
+	writer := tar.NewWriter(destination)
+
+	err := filepath.WalkDir(source, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if path == source {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() && !info.Mode().IsRegular() {
+			return fmt.Errorf("Docker copy source contains unsupported entry %q", path)
+		}
+		header, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			return err
+		}
+		header.Name, err = filepath.Rel(source, path)
+		if err != nil {
+			return err
+		}
+		header.Name = filepath.ToSlash(header.Name)
+		if info.IsDir() {
+			header.Name += "/"
+		}
+		header.Uid, header.Gid = 0, 0
+		header.Uname, header.Gname = "", ""
+		header.ModTime = time.Unix(0, 0)
+		header.AccessTime = time.Time{}
+		header.ChangeTime = time.Time{}
+		if err := writer.WriteHeader(header); err != nil {
+			return err
+		}
+		if info.Mode().IsRegular() {
+			file, err := os.Open(path)
+			if err != nil {
+				return err
+			}
+			_, copyErr := io.Copy(writer, file)
+			closeErr := file.Close()
+			if copyErr != nil {
+				return copyErr
+			}
+			if closeErr != nil {
+				return closeErr
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		_ = writer.Close()
+		return err
+	}
+	return writer.Close()
 }
 
 func decodeDockerServices(raw map[string]json.RawMessage, secrets map[string]string) ([]dockerService, error) {

@@ -44,6 +44,21 @@ jobs:
         uses: checkout
       - name: Prepare Mix tooling
         run: |
+          rm -f /etc/apt/apt.conf.d/docker-clean
+          mkdir -p /tmp/robine-apt/cache/archives/partial /tmp/robine-apt/state/lists/partial /tmp/robine-apt/log
+          APT_OPTIONS=(
+            -o APT::Sandbox::User=root
+            -o Dir::Cache=/tmp/robine-apt/cache
+            -o Dir::State=/tmp/robine-apt/state
+            -o Dir::State::status=/var/lib/dpkg/status
+            -o Dir::Log=/tmp/robine-apt/log
+            -o Dir::Log::Terminal=/dev/null
+            -o Dpkg::Use-Pty=0
+          )
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get "${APT_OPTIONS[@]}" update
+          apt-get "${APT_OPTIONS[@]}" install --yes --no-install-recommends build-essential ca-certificates curl git
+          rm -rf /tmp/robine-apt
           curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-28.5.2.tgz -o /tmp/docker.tgz
           echo "ea90cfd12e1eeb12aa1c971741adb8bd4ed88e2a574eaac13f5029a1dbc6300d  /tmp/docker.tgz" | sha256sum -c -
           tar --no-same-owner -xzf /tmp/docker.tgz -C /usr/local/bin --strip-components=1 docker/docker

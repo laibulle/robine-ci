@@ -48,7 +48,7 @@ A self-hosting operator who installs one Robine server and expects it to provide
 
 - **FR-1:** The bundled runner MUST be the released Linux `rbe` binary and MUST connect through protocol v1 as a persisted runner identity.
 - **FR-2:** The Go runner MUST advertise `docker: true`, `native: false`, `executor: docker`, `deployments: false`, and bounded concurrency only after Docker readiness succeeds.
-- **FR-3:** Docker execution MUST provide fresh attempt containers, workspaces, networks, service containers, readiness probes, resource ceilings, private `/tmp`, conditions, redacted ordered logs, timeouts, cancellation, built-ins, and idempotent cleanup.
+- **FR-3:** Docker execution MUST provide fresh attempt containers, ownership-normalized writable workspaces independent of the runner host UID, networks, service containers, readiness probes, resource ceilings, private `/tmp`, conditions, redacted ordered logs, timeouts, cancellation, built-ins, and idempotent cleanup.
 - **FR-4:** The bundled identity MUST enroll automatically from a single-use token exchanged through a mode-`0600` shared bootstrap file. Tokens and credentials MUST NOT appear in process arguments, Compose configuration, logs, or Git.
 - **FR-5:** The server scheduler MUST dispatch server-hosted work through the normal runner selection and offer path. Production MUST NOT fall back to the Elixir local executor when bundled mode is enabled.
 - **FR-6:** Operators MUST be able to disable bundled capacity explicitly. Existing remote runners MUST continue to use the same scheduling contract.
@@ -103,6 +103,7 @@ Expose bundled bootstrap state, runner connectivity, Docker readiness, active at
 
 - [x] A clean production install automatically enrolls one bundled Go runner and shows protocol-v1 Docker capacity.
 - [x] A Docker job with PostgreSQL and Redis services, secrets, cache restore/save, and artifact upload/download succeeds through the Go runner.
+- [x] A non-root runner can copy source into a capability-dropped job container and the job can create generated workspace paths.
 - [x] Cancellation, timeout, runner restart, and server restart retain one terminal attempt and leave no owned Docker resources.
 - [x] The Phoenix production service has no Docker socket while the runner has only its state, release binary, and Docker socket mounts.
 - [x] With bundled mode enabled and the runner offline, a compatible job remains queued and never executes in the BEAM.

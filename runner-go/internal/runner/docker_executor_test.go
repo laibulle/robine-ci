@@ -1,10 +1,13 @@
 package runner
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -220,6 +223,91 @@ func TestDockerErrorSanitization(t *testing.T) {
 	}
 	if !dockerMissing(&dockerCommandError{ExitCode: 1, Output: "No such container"}) {
 		t.Fatal("missing Docker resource was not recognized")
+	}
+}
+
+func TestWriteDockerCopyArchiveNormalizesOwnership(t *testing.T) {
+	source := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(source, "priv", "static"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "priv", "static", "app.css"), []byte("body {}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var archive bytes.Buffer
+	if err := writeDockerCopyArchive(&archive, source); err != nil {
+		t.Fatal(err)
+	}
+
+	reader := tar.NewReader(bytes.NewReader(archive.Bytes()))
+	entries := 0
+	for {
+		header, err := reader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		entries++
+		if header.Uid != 0 || header.Gid != 0 || header.Uname != "" || header.Gname != "" {
+			t.Fatalf("archive entry %q retained host ownership: %d:%d %q:%q", header.Name, header.Uid, header.Gid, header.Uname, header.Gname)
+		}
+	}
+	if entries != 3 {
+		t.Fatalf("unexpected archive entry count: %d", entries)
+	}
+}
+
+func TestDockerCopyTreeAllowsCapabilityDroppedJobToWrite(t *testing.T) {
+	ctx := context.Background()
+	if err := dockerReady(ctx); err != nil {
+		t.Skip("Docker Engine is unavailable")
+	}
+	if err := acquireDockerImage(ctx, dockerReadinessImage); err != nil {
+		t.Fatal(err)
+	}
+
+	suffix := strings.ToLower(safeID(t.Name())) + "-" + strconvTimestamp()
+	container := "rbe-" + suffix
+	volume := container + "-workspace"
+	if _, err := dockerCommand(ctx, nil, "volume", "create", volume); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = dockerCommand(context.Background(), nil, "rm", "--force", container)
+		_, _ = dockerCommand(context.Background(), nil, "volume", "rm", "--force", volume)
+	})
+	if _, err := dockerCommand(ctx, nil,
+		"create", "--name", container,
+		"--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+		"--mount", "type=volume,source="+volume+",target=/workspace",
+		"--workdir", "/workspace",
+		dockerReadinessImage, "sh", "-c", "while :; do sleep 3600; done",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dockerCommand(ctx, nil, "start", container); err != nil {
+		t.Fatal(err)
+	}
+
+	source := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(source, "priv", "static"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "priv", "static", "app.css"), []byte("body {}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := dockerCopyTree(ctx, source, container, "/workspace"); err != nil {
+		t.Fatal(err)
+	}
+
+	output, err := dockerCommand(ctx, nil, "exec", container, "sh", "-c",
+		"test \"$(stat -c '%u:%g' /workspace/priv/static)\" = '0:0' && mkdir -p /workspace/priv/static/assets && printf ok > /workspace/priv/static/assets/write-test",
+	)
+	if err != nil {
+		t.Fatalf("capability-dropped job could not write copied source: %s: %v", output, err)
 	}
 }
 
