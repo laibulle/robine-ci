@@ -8,7 +8,8 @@ defmodule Robine.Repositories.Ports.SourceControl do
   @callback branch_head(Robine.Repositories.Domain.Repository.t(), String.t()) ::
               {:ok, %{branch: String.t(), sha: String.t()}} | {:error, term()}
   @callback source_files(Robine.Repositories.Domain.Repository.t(), String.t()) ::
-              {:ok, [{String.t(), binary()}]} | {:error, term()}
+              {:ok, [%{path: String.t(), content: binary(), mode: 0o644 | 0o755}]}
+              | {:error, term()}
   @callback upsert_check(Robine.Repositories.Domain.Repository.t(), map()) ::
               {:ok, integer()} | {:error, term()}
   @callback installation_permissions(Robine.Repositories.Domain.Repository.t()) ::

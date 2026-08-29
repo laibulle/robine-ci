@@ -189,7 +189,7 @@ defmodule Robine.Adapters.SourceControl.ProviderClientsTest do
 
     responses([{:ok, %{status: 200, body: archive}}])
 
-    assert {:ok, [{"README.md", "exact source"}]} =
+    assert {:ok, [%{path: "README.md", content: "exact source", mode: 0o644}]} =
              GitLabClient.source_files(repository(:gitlab), sha)
 
     assert_receive {:provider_request, gitlab_request}
@@ -199,7 +199,7 @@ defmodule Robine.Adapters.SourceControl.ProviderClientsTest do
 
     responses([{:ok, %{status: 200, body: archive}}])
 
-    assert {:ok, [{"README.md", "exact source"}]} =
+    assert {:ok, [%{path: "README.md", content: "exact source", mode: 0o644}]} =
              ForgejoClient.source_files(repository(:forgejo), sha)
 
     assert_receive {:provider_request, forgejo_request}

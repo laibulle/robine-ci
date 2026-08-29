@@ -34,7 +34,10 @@ func TestCreateAndExtractArchive(t *testing.T) {
 }
 
 func TestExtractSourceStripsRootAndRejectsUnsafeEntries(t *testing.T) {
-	safe := tarGzip(t, map[string]string{"source/project/file.txt": "ok"}, "")
+	safe := tarGzip(t, []tarFile{
+		{name: "source/project/file.txt", content: "ok", mode: 0o644},
+		{name: "source/scripts/build.sh", content: "#!/bin/sh\n", mode: 0o755},
+	}, "")
 	destination := t.TempDir()
 	if err := extractArchive(safe, destination, true); err != nil {
 		t.Fatal(err)
@@ -42,9 +45,12 @@ func TestExtractSourceStripsRootAndRejectsUnsafeEntries(t *testing.T) {
 	if body, err := os.ReadFile(filepath.Join(destination, "project", "file.txt")); err != nil || string(body) != "ok" {
 		t.Fatalf("source not extracted: %q %v", body, err)
 	}
+	if info, err := os.Stat(filepath.Join(destination, "scripts", "build.sh")); err != nil || info.Mode().Perm() != 0o755 {
+		t.Fatalf("source executable mode not preserved: %v %v", info, err)
+	}
 
 	for _, name := range []string{"../escape", "/absolute", "other/file"} {
-		body := tarGzip(t, map[string]string{name: "bad"}, "")
+		body := tarGzip(t, []tarFile{{name: name, content: "bad", mode: 0o644}}, "")
 		if err := extractArchive(body, t.TempDir(), true); err == nil {
 			t.Fatalf("unsafe source entry accepted: %s", name)
 		}
@@ -76,16 +82,22 @@ func TestCreateArchiveRejectsEscapesAndSymlinks(t *testing.T) {
 	}
 }
 
-func tarGzip(t *testing.T, files map[string]string, symlink string) []byte {
+type tarFile struct {
+	name    string
+	content string
+	mode    int64
+}
+
+func tarGzip(t *testing.T, files []tarFile, symlink string) []byte {
 	t.Helper()
 	var output bytes.Buffer
 	gz := gzip.NewWriter(&output)
 	tw := tar.NewWriter(gz)
-	for name, content := range files {
-		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(content)), Typeflag: tar.TypeReg}); err != nil {
+	for _, file := range files {
+		if err := tw.WriteHeader(&tar.Header{Name: file.name, Mode: file.mode, Size: int64(len(file.content)), Typeflag: tar.TypeReg}); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := io.WriteString(tw, content); err != nil {
+		if _, err := io.WriteString(tw, file.content); err != nil {
 			t.Fatal(err)
 		}
 	}

@@ -77,7 +77,8 @@ defmodule Robine.Repositories.GitHubDeliveryTest do
     end
 
     @impl true
-    def source_files(_repository, _sha), do: {:ok, [{"README.md", "source"}]}
+    def source_files(_repository, _sha),
+      do: {:ok, [%{path: "README.md", content: "source", mode: 0o644}]}
 
     @impl true
     def default_branch_head(repository) do
@@ -971,7 +972,11 @@ defmodule Robine.Repositories.GitHubDeliveryTest do
     sha = String.duplicate("8", 40)
 
     assert {:ok,
-            %{repository_id: repository_id, commit_sha: ^sha, files: [{"README.md", "source"}]}} =
+            %{
+              repository_id: repository_id,
+              commit_sha: ^sha,
+              files: [%{path: "README.md", content: "source", mode: 0o644}]
+            }} =
              Repositories.fetch_source(
                %{repository_id: repository.id, commit_sha: sha},
                context

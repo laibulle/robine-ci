@@ -89,6 +89,8 @@ defmodule RobineWeb.AdminLiveTest do
     assert enrollment_html =~ "ROBINE_RUNNER_ENROLLMENT_TOKEN="
     assert enrollment_html =~ "rbe_"
     assert enrollment_html =~ ".local/bin/rbe"
+    assert enrollment_html =~ "launchctl bootstrap"
+    assert enrollment_html =~ "com.robine.runner"
     assert enrollment_html =~ "--name"
     assert enrollment_html =~ "RUNNER_NAME"
 

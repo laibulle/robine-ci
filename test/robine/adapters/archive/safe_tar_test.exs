@@ -18,7 +18,24 @@ defmodule Robine.Adapters.Archive.SafeTarTest do
 
     assert {:ok, archive} = SafeTar.create_source(files)
     assert {:ok, extracted} = SafeTar.extract_source(archive)
-    assert Map.new(extracted) == files
+    assert Map.new(extracted, &{&1.path, &1.content}) == files
+    assert Enum.all?(extracted, &(&1.mode == 0o644))
+  end
+
+  test "preserves only the executable source-file permission" do
+    files = [
+      %{path: "scripts/build.sh", content: "#!/bin/sh\n", mode: 0o100755},
+      %{path: "README.md", content: "hello", mode: 0o100664}
+    ]
+
+    assert {:ok, archive} = SafeTar.create_source(files)
+    assert {:ok, extracted} = SafeTar.extract_source(archive)
+
+    assert %{mode: 0o755, content: "#!/bin/sh\n"} =
+             Enum.find(extracted, &(&1.path == "scripts/build.sh"))
+
+    assert %{mode: 0o644, content: "hello"} =
+             Enum.find(extracted, &(&1.path == "README.md"))
   end
 
   test "allows large repository archives within the bounded default" do

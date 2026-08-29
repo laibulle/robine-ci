@@ -88,8 +88,10 @@ curl --proto '=https' --tlsv1.2 -fsSL https://ci.example.com/install/rbe.sh
 
 The installer resolves the latest GitHub Release, selects `arm64` or `amd64`, verifies the archive
 against the SHA-256 digest returned by the GitHub Releases API, and atomically installs the executable
-as `~/.local/bin/rbe`. Set `RBE_INSTALL_DIR` to another absolute user-writable directory when needed.
-It never invokes `sudo`, a package manager, an encoded URL, or `eval`.
+as `~/.local/bin/rbe`. It also creates `~/Library/LaunchAgents/com.robine.runner.plist`, the private
+configuration directory, and the log directory. It does not start launchd before enrollment creates
+the credential file. Set `RBE_INSTALL_DIR` and `RBE_CONFIG_PATH` to other absolute user-writable paths
+when needed. It never invokes `sudo`, a package manager, an encoded URL, or `eval`.
 
 Enroll the installed runner:
 
@@ -99,6 +101,8 @@ ROBINE_RUNNER_ENROLLMENT_TOKEN='replace-once' "$HOME/.local/bin/rbe" enroll \
   --server https://ci.example.com \
   --name mac-mini-arm64 \
   --config "$HOME/.config/robine-runner/config.json"
+launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.robine.runner.plist"
+launchctl kickstart -k "gui/$(id -u)/com.robine.runner"
 ```
 
 On Darwin the runner automatically announces `macos`, normalized `arm64` or `amd64`, and `native`; it does not announce `docker`. A native job must opt in explicitly:
@@ -125,15 +129,12 @@ jobs:
 
 The `image` field remains required by workflow schema v1 but is not used by native execution. Native execution is not a sandbox and is supported only for trusted repositories. Cache and artifact built-ins use the same attempt-scoped server transfers as Docker jobs. Safe Robine archives reject symbolic links, while application bundles containing frameworks commonly use them; package such bundles as a ZIP, DMG, or PKG before `artifacts/upload`. The initial native executor rejects service containers explicitly.
 
-Install `docs/launchd/com.robine.runner.plist` as the runner account at `~/Library/LaunchAgents/com.robine.runner.plist`, then load it:
+The installer generates the launch agent with the resolved executable, home, configuration, and log paths. After enrollment, inspect the service:
 
 ```sh
-mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs/RobineRunner"
-launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.robine.runner.plist"
-launchctl kickstart -k "gui/$(id -u)/com.robine.runner"
 launchctl print "gui/$(id -u)/com.robine.runner"
 ```
 
-Before installation, replace `__ROBINE_RUNNER_HOME__` in the plist with the absolute home directory of the dedicated account. Logs are retained under `~/Library/Logs/RobineRunner/`; the credential remains in the mode-`0600` config file and never belongs in the plist.
+`docs/launchd/com.robine.runner.plist` remains the auditable template. Logs are retained under `~/Library/Logs/RobineRunner/`; the credential remains in the mode-`0600` config file and never belongs in the plist.
 
 For upgrades, run the installer again, then kickstart the service. To remove the service, run `launchctl bootout "gui/$(id -u)/com.robine.runner"`, remove the plist and `~/.local/bin/rbe`, revoke the runner in Robine, and only then remove its private config and logs.

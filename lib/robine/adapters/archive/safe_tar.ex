@@ -17,22 +17,26 @@ defmodule Robine.Adapters.Archive.SafeTar do
   def max_archive_bytes, do: @max_archive_bytes
 
   @impl true
-  def create_source(files, options \\ []) when is_map(files) do
+  def create_source(files, options \\ [])
+
+  def create_source(files, options) when is_map(files) do
+    entries =
+      Enum.map(files, fn {path, content} -> %{path: path, content: content, mode: 0o644} end)
+
+    create_source(entries, options)
+  end
+
+  def create_source(files, options) when is_list(files) do
     options = Keyword.merge(@defaults, options)
     temporary = Path.join(System.tmp_dir!(), "robine-source-#{Ecto.UUID.generate()}.tar.gz")
 
-    entries =
-      Enum.map(files, fn {path, content} ->
-        {String.to_charlist("source/" <> path), content}
-      end)
-
     try do
-      with true <- map_size(files) <= options[:max_files],
-           true <- Enum.all?(files, fn {path, content} -> safe_input_file?(path, content) end),
+      with {:ok, entries} <- normalize_source_files(files),
+           true <- length(entries) <= options[:max_files],
            true <-
-             Enum.reduce(files, 0, fn {_path, content}, total -> total + byte_size(content) end) <=
+             Enum.reduce(entries, 0, fn entry, total -> total + byte_size(entry.content) end) <=
                options[:max_expanded_bytes],
-           :ok <- :erl_tar.create(String.to_charlist(temporary), entries, [:compressed]),
+           :ok <- write_source_archive(temporary, entries),
            {:ok, body} <- File.read(temporary),
            :ok <- compressed_size(body, options) do
         {:ok, body}
@@ -55,7 +59,7 @@ defmodule Robine.Adapters.Archive.SafeTar do
          :ok <- validate_table(table, byte_size(body), options),
          {:ok, entries} <-
            timed(fn -> :erl_tar.extract({:binary, body}, [:compressed, :memory]) end, options),
-         {:ok, files} <- normalize(entries, options) do
+         {:ok, files} <- normalize(entries, table, options) do
       {:ok, files}
     end
   end
@@ -150,7 +154,16 @@ defmodule Robine.Adapters.Archive.SafeTar do
   defp ratio_safe?(_expanded, 0, _ratio), do: false
   defp ratio_safe?(expanded, compressed, ratio), do: expanded <= compressed * ratio
 
-  defp normalize(entries, options) do
+  defp normalize(entries, table, options) do
+    modes =
+      Map.new(table, fn
+        {path, :regular, _size, _mtime, mode, _uid, _gid} ->
+          {to_string(path), source_mode(mode)}
+
+        {path, _type, _size, _mtime, _mode, _uid, _gid} ->
+          {to_string(path), 0o644}
+      end)
+
     Enum.reduce_while(entries, {:ok, [], 0}, fn
       {~c"pax_global_header", content}, {:ok, files, total}
       when is_binary(content) and byte_size(content) <= 65_536 ->
@@ -165,7 +178,8 @@ defmodule Robine.Adapters.Archive.SafeTar do
              expanded = total + byte_size(content),
              true <- length(files) + 1 <= options[:max_files],
              true <- expanded <= options[:max_expanded_bytes] do
-          {:cont, {:ok, [{relative, content} | files], expanded}}
+          file = %{path: relative, content: content, mode: Map.get(modes, to_string(path), 0o644)}
+          {:cont, {:ok, [file | files], expanded}}
         else
           false -> {:halt, {:error, :source_archive_limits_exceeded}}
           error -> {:halt, error}
@@ -214,6 +228,34 @@ defmodule Robine.Adapters.Archive.SafeTar do
     end
   end
 
+  defp normalize_source_files(files) do
+    Enum.reduce_while(files, {:ok, []}, fn file, {:ok, entries} ->
+      case normalize_source_file(file) do
+        {:ok, entry} -> {:cont, {:ok, [entry | entries]}}
+        :error -> {:halt, {:error, :invalid_source_file}}
+      end
+    end)
+    |> case do
+      {:ok, entries} -> {:ok, Enum.reverse(entries)}
+      error -> error
+    end
+  end
+
+  defp normalize_source_file(%{path: path, content: content, mode: mode})
+       when is_integer(mode) do
+    if safe_input_file?(path, content),
+      do: {:ok, %{path: path, content: content, mode: source_mode(mode)}},
+      else: :error
+  end
+
+  defp normalize_source_file({path, content, mode}) when is_integer(mode),
+    do: normalize_source_file(%{path: path, content: content, mode: mode})
+
+  defp normalize_source_file({path, content}),
+    do: normalize_source_file(%{path: path, content: content, mode: 0o644})
+
+  defp normalize_source_file(_file), do: :error
+
   defp safe_input_file?(path, content) when is_binary(path) and is_binary(content) do
     parts = Path.split(path)
 
@@ -222,6 +264,43 @@ defmodule Robine.Adapters.Archive.SafeTar do
   end
 
   defp safe_input_file?(_path, _content), do: false
+
+  defp source_mode(mode) when is_integer(mode) and mode >= 0 do
+    if Bitwise.band(mode, 0o111) == 0, do: 0o644, else: 0o755
+  end
+
+  defp source_mode(_mode), do: 0o644
+
+  defp write_source_archive(path, entries) do
+    case :erl_tar.open(String.to_charlist(path), [:write, :compressed]) do
+      {:ok, archive} ->
+        result =
+          Enum.reduce_while(entries, :ok, fn entry, :ok ->
+            options = [{:mode, entry.mode}, {:mtime, 0}, {:uid, 0}, {:gid, 0}]
+
+            case :erl_tar.add(
+                   archive,
+                   entry.content,
+                   String.to_charlist("source/" <> entry.path),
+                   options
+                 ) do
+              :ok -> {:cont, :ok}
+              {:error, reason} -> {:halt, {:error, reason}}
+            end
+          end)
+
+        close_result = :erl_tar.close(archive)
+
+        case {result, close_result} do
+          {:ok, :ok} -> :ok
+          {{:error, reason}, _close} -> {:error, reason}
+          {:ok, {:error, reason}} -> {:error, reason}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
 
   defp safe_workspace_path?(path) do
     path != "." and Path.type(path) == :relative and ".." not in Path.split(path) and

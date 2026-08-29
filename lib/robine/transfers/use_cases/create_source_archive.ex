@@ -8,7 +8,7 @@ defmodule Robine.Transfers.UseCases.CreateSourceArchive do
         actor: %{role: :administrator},
         dependencies: %{transfers: %Dependencies{} = deps}
       })
-      when is_map(files) do
+      when is_list(files) do
     deps.archive.create_source(files)
   end
 

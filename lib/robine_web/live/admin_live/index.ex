@@ -550,9 +550,9 @@ defmodule RobineWeb.AdminLive.Index do
               <div class="min-w-0 flex-1">
                 <h2 class="text-lg font-semibold">Install rbe on macOS</h2>
                 <p class="mt-1 text-sm leading-6 text-base-content/60">
-                  Paste this command into Terminal. Robine selects Apple Silicon or Intel, verifies the GitHub Release SHA-256, and installs
+                  Paste this command into Terminal. Robine selects Apple Silicon or Intel, verifies the GitHub Release SHA-256, installs
                   <code>rbe</code>
-                  without Homebrew or sudo.
+                  and prepares its launchd service without Homebrew or sudo.
                 </p>
                 <pre
                   id="runner-macos-install-command"
@@ -590,7 +590,7 @@ defmodule RobineWeb.AdminLive.Index do
                 @runner_enrollment.expires_at
               )}.
             </p>
-            <pre class="mt-3 overflow-x-auto whitespace-pre-wrap break-all rounded-xl bg-base-300 p-3 text-xs"><code>mkdir -p "$HOME/.config/robine-runner" &amp;&amp; ROBINE_RUNNER_ENROLLMENT_TOKEN='{@runner_enrollment.token}' "$HOME/.local/bin/rbe" enroll --server '{Application.fetch_env!(:robine, :public_url)}' --name 'RUNNER_NAME' --config "$HOME/.config/robine-runner/config.json"</code></pre>
+            <pre class="mt-3 overflow-x-auto whitespace-pre-wrap break-all rounded-xl bg-base-300 p-3 text-xs"><code>ROBINE_RUNNER_ENROLLMENT_TOKEN='{@runner_enrollment.token}' "$HOME/.local/bin/rbe" enroll --server '{Application.fetch_env!(:robine, :public_url)}' --name 'RUNNER_NAME' --config "$HOME/.config/robine-runner/config.json" &amp;&amp; launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.robine.runner.plist" &amp;&amp; launchctl kickstart -k "gui/$(id -u)/com.robine.runner"</code></pre>
           </div>
         </section>
         <section

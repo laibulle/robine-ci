@@ -498,8 +498,9 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - [x] Implement protocol-v1 enrollment, Phoenix Channel reconnect/reconciliation, heartbeat, cancellation, and ordered acknowledgements in pure Go.
 - [x] Execute native steps in isolated workspaces with bounded redacted logs, conditions, timeout, process-group cancellation, and cleanup.
 - [x] Safely transfer source, secrets, caches, and artifact archives through the existing attempt-scoped API.
+- [x] Preserve executable source-file modes and accept provider file lists through remote checkout so native workflows do not need an independent Git clone.
 - [x] Cross-compile and checksum Darwin, Linux, and Windows `arm64` and `amd64` releases from Linux with `CGO_ENABLED=0`.
-- [x] Serve a transparent package-manager-free macOS installer from Robine, display its copyable instance-specific command on the runner page, verify the latest GitHub Release digest, and install `rbe` atomically.
+- [x] Serve a transparent package-manager-free macOS installer from Robine, display its copyable instance-specific command on the runner page, verify the latest GitHub Release digest, install `rbe` atomically, and prepare its launchd service.
 - [ ] Build a macOS `.app` fixture and prove that its declared artifact is retained and downloadable from Robine CI.
 - [x] Update launchd and operator documentation for the self-contained executable.
 

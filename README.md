@@ -142,7 +142,8 @@ $HOME/.local/bin/rbe version
 Every Robine instance serves the installer at `/install/rbe.sh`; Administration → Runners displays
 the exact command for its configured public URL. The installer selects the current architecture and
 verifies the release asset against the SHA-256 digest published by GitHub before atomically replacing
-`~/.local/bin/rbe`. See [remote runner installation](docs/runner-installation.md) for details.
+`~/.local/bin/rbe` and preparing its unprivileged launchd service. See
+[remote runner installation](docs/runner-installation.md) for details.
 
 Set `ROBINE_METRICS_TOKEN` to enable the token-protected Prometheus endpoint at `/metrics`; leave it unset to return 404. Initial alerts and diagnosis procedures are in [the monitoring runbook](docs/operations/monitoring-and-troubleshooting.md).
 

@@ -184,17 +184,22 @@ defmodule Robine.Adapters.Runner.RemoteExecutor do
   end
 
   defp write_source_files(directory, files) do
-    Enum.reduce_while(files, :ok, fn {relative, content}, :ok ->
+    Enum.reduce_while(files, :ok, fn file, :ok ->
+      {relative, content, mode} = source_file(file)
       destination = Path.join(directory, relative)
 
       with :ok <- File.mkdir_p(Path.dirname(destination)),
-           :ok <- File.write(destination, content, [:binary, :exclusive]) do
+           :ok <- File.write(destination, content, [:binary, :exclusive]),
+           :ok <- File.chmod(destination, mode) do
         {:cont, :ok}
       else
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
   end
+
+  defp source_file(%{path: path, content: content, mode: mode}), do: {path, content, mode}
+  defp source_file({path, content}), do: {path, content, 0o644}
 
   defp send_log(client, attempt_id, event) do
     payload =

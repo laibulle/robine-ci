@@ -57,7 +57,11 @@ defmodule Robine.Adapters.SourceControl.ForgejoIntegrationTest do
     assert workflow =~ "name: Forgejo integration"
 
     assert {:ok, source_files} = ForgejoClient.source_files(repository, sha)
-    assert {".robine-ci/workflows/ci.yml", workflow} in source_files
+
+    assert %{path: ".robine-ci/workflows/ci.yml", content: ^workflow, mode: mode} =
+             Enum.find(source_files, &(&1.path == ".robine-ci/workflows/ci.yml"))
+
+    assert mode in [0o644, 0o755]
 
     assert {:ok, %{repository: "read", status: "write"}} =
              ForgejoClient.installation_permissions(repository)
