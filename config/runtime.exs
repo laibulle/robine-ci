@@ -275,7 +275,10 @@ case {System.get_env("OIDC_ISSUER"), System.get_env("OIDC_CLIENT_ID"),
         client_id: client_id,
         client_secret: client_secret,
         redirect_uri: public_url <> "/auth/oidc/callback",
-        authorization_params: [scope: "openid email profile"],
+        # Assent's OIDC strategy always adds the mandatory `openid` scope.
+        # Supplying it here as well creates a duplicated scope value that
+        # conforming providers reject.
+        authorization_params: [scope: "email profile"],
         trusted_audiences: [client_id]
       ]
 
