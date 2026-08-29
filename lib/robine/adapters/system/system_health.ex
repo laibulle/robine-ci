@@ -144,6 +144,17 @@ defmodule Robine.Adapters.System.SystemHealth do
     do: "Last schedule reconciliation failed (#{failure}); cursor age #{age || "unknown"} seconds"
 
   defp docker do
+    if Application.fetch_env!(:robine, :local_runner_enabled) do
+      local_docker()
+    else
+      %{
+        status: :optional,
+        detail: "Docker execution is delegated to the authenticated runner fleet"
+      }
+    end
+  end
+
+  defp local_docker do
     task =
       Task.async(fn ->
         System.cmd("docker", ["version", "--format", "{{.Server.Version}}"],

@@ -49,7 +49,8 @@ func TestApplicationAcceptsAndCompletesOffer(t *testing.T) {
 
 func TestApplicationCancellationBusyAndMalformedEvents(t *testing.T) {
 	client := &fakeRequester{}
-	app := &application{client: client, transfers: newTransferClient(config.Config{}), executions: make(map[string]context.CancelCauseFunc)}
+	channelCtx, stopChannel := context.WithCancelCause(context.Background())
+	app := &application{client: client, transfers: newTransferClient(config.Config{}), executions: make(map[string]context.CancelCauseFunc), stopChannel: stopChannel}
 	cancelled := make(chan struct{})
 	ctx, cancel := context.WithCancelCause(context.Background())
 	app.executions["active"] = func(cause error) { cancel(cause); close(cancelled) }
@@ -78,6 +79,9 @@ func TestApplicationCancellationBusyAndMalformedEvents(t *testing.T) {
 	app.HandleEvent(context.Background(), "cancel", json.RawMessage(`{"attempt_id":"missing"}`))
 	app.HandleEvent(context.Background(), "lease_lost", json.RawMessage(`{"attempt_id":"missing"}`))
 	app.HandleEvent(context.Background(), "runner_revoked", json.RawMessage(`{}`))
+	if !errors.Is(context.Cause(channelCtx), errRunnerRevoked) {
+		t.Fatalf("revocation did not stop the channel: %v", context.Cause(channelCtx))
+	}
 	app.finish("active")
 	if len(app.ActiveAttemptIDs()) != 0 {
 		t.Fatal("finish did not remove active attempt")

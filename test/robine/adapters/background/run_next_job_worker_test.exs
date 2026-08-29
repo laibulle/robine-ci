@@ -177,4 +177,40 @@ defmodule Robine.Adapters.Background.RunNextJobWorkerTest do
 
     assert hd(snapshot.jobs).failure_detail == diagnostic.content
   end
+
+  test "does not execute in the BEAM when the production local fallback is disabled" do
+    previous = Application.fetch_env!(:robine, :local_runner_enabled)
+    Application.put_env(:robine, :local_runner_enabled, false)
+    on_exit(fn -> Application.put_env(:robine, :local_runner_enabled, previous) end)
+
+    context = Dependencies.context(%{id: "admin", role: :administrator}, "no-local-fallback")
+
+    assert {:ok, pipeline} =
+             Pipelines.create_pipeline(
+               %{
+                 repository_id: Ecto.UUID.generate(),
+                 workflow_name: "No BEAM runner",
+                 commit_sha: String.duplicate("4", 40),
+                 jobs: %{
+                   "test" => %{
+                     needs: [],
+                     image: "alpine:3.22",
+                     runs_on: ["docker"],
+                     steps: [%{name: "Never local", kind: :run, value: "exit 99"}]
+                   }
+                 }
+               },
+               context
+             )
+
+    outbox_job = Repo.one!(from job in Oban.Job, where: job.queue == "outbox")
+    assert :ok = perform_job(OutboxDeliveryWorker, outbox_job.args)
+
+    scheduler_job =
+      Repo.one!(from job in Oban.Job, where: job.worker == ^inspect(RunNextJobWorker))
+
+    assert {:snooze, 1} = perform_job(RunNextJobWorker, scheduler_job.args)
+    assert Repo.aggregate(Attempt, :count) == 0
+    assert Repo.get!(Pipeline, pipeline.id).status == :queued
+  end
 end

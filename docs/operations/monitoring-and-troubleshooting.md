@@ -32,7 +32,7 @@ The exporter normalizes dots to underscores. Counters keep their declared `*_cou
 | GitHub degraded | `increase(robine_github_api_request_count{outcome!="ok"}[10m]) > 5` | More than 5 failed API calls in 10 minutes | Check integration health, App permissions, rate-limit gauges, and GitHub status |
 | Authentication anomaly | `increase(robine_identity_login_count{outcome!="ok"}[10m]) > 20` | More than 20 failed logins in 10 minutes | Check source/network controls and OIDC health; rotate credentials only if compromise evidence exists |
 
-Also page when `GET /health/ready` fails continuously for five minutes. Liveness failure means the web process itself is unavailable; readiness failure identifies a required PostgreSQL, durable-queue, or blob-storage dependency. Docker, GitHub, and OIDC degradation appears in administrator health without making the control plane unready.
+Also page when `GET /health/ready` fails continuously for five minutes. Liveness failure means the web process itself is unavailable; readiness failure identifies a required PostgreSQL, durable-queue, or blob-storage dependency. GitHub and OIDC degradation appears in administrator health without making the control plane unready. Production Docker capacity is reported by the runner fleet and the bundled runner service healthcheck, because Phoenix deliberately has no Docker socket.
 
 ## Diagnosis order
 

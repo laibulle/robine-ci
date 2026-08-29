@@ -18,6 +18,9 @@ var version = "dev"
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "robine-runner:", err)
+		if runner.AuthenticationFailure(err) {
+			os.Exit(78)
+		}
 		os.Exit(1)
 	}
 }

@@ -43,6 +43,38 @@ services:
     volumes:
       - ./:/opt/robine:ro
       - storage_data:/var/lib/robine/storage
+      - runner_bootstrap:/var/lib/robine-runner-bootstrap
+
+  runner:
+    image: docker:28.5.2-cli@sha256:625d9431a9f54c5a2bc90f24f0e1c3d55b1349fd857dd85035f98c2c9acbdd4d
+    restart: unless-stopped
+    environment:
+      ROBINE_PUBLIC_URL: ${ROBINE_PUBLIC_URL:?ROBINE_PUBLIC_URL is required}
+      ROBINE_BUNDLED_RUNNER_NAME: ${ROBINE_BUNDLED_RUNNER_NAME:-robine-local}
+      ROBINE_RUNNER_RESOURCE_NAMESPACE: ${ROBINE_RUNNER_RESOURCE_NAMESPACE:-production}
+      ROBINE_RUNNER_CPU_MILLIS: ${ROBINE_RUNNER_CPU_MILLIS:-2000}
+      ROBINE_RUNNER_MEMORY_BYTES: ${ROBINE_RUNNER_MEMORY_BYTES:-4294967296}
+      ROBINE_RUNNER_PIDS_LIMIT: ${ROBINE_RUNNER_PIDS_LIMIT:-512}
+      ROBINE_RUNNER_READY_FILE: /var/lib/robine-runner/ready
+    depends_on:
+      server:
+        condition: service_healthy
+    command: ["/opt/robine/bin/start-bundled-runner"]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          test -s /var/lib/robine-runner/config.json &&
+          test -s /var/lib/robine-runner/ready &&
+          pgrep -f '/opt/robine/bin/rbe start --config /var/lib/robine-runner/config.json' >/dev/null
+      interval: 2s
+      timeout: 3s
+      retries: 60
+      start_period: 10s
+    volumes:
+      - ./:/opt/robine:ro
+      - runner_state:/var/lib/robine-runner
+      - runner_bootstrap:/var/lib/robine-runner-bootstrap
       - /var/run/docker.sock:/var/run/docker.sock
 
   proxy:
@@ -65,5 +97,7 @@ services:
 volumes:
   postgres_data:
   storage_data:
+  runner_state:
+  runner_bootstrap:
   caddy_data:
   caddy_config:

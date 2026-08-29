@@ -128,6 +128,35 @@ config :robine,
        :runner_cancellation_grace_ms,
        positive_integer.("ROBINE_RUNNER_CANCELLATION_GRACE_MS", 5_000)
 
+local_runner_enabled_default = if(config_env() == :prod, do: "false", else: "true")
+
+local_runner_enabled =
+  case System.get_env("ROBINE_LOCAL_RUNNER_ENABLED", local_runner_enabled_default) do
+    value when value in ["1", "true"] -> true
+    value when value in ["0", "false"] -> false
+    _invalid -> raise "ROBINE_LOCAL_RUNNER_ENABLED must be true or false"
+  end
+
+config :robine, :local_runner_enabled, local_runner_enabled
+
+bundled_runner_enabled =
+  case System.get_env(
+         "ROBINE_BUNDLED_RUNNER_ENABLED",
+         if(config_env() == :prod, do: "true", else: "false")
+       ) do
+    value when value in ["1", "true"] -> true
+    value when value in ["0", "false"] -> false
+    _invalid -> raise "ROBINE_BUNDLED_RUNNER_ENABLED must be true or false"
+  end
+
+bundled_runner_bootstrap_directory =
+  System.get_env("ROBINE_BUNDLED_RUNNER_BOOTSTRAP_DIRECTORY", "/var/lib/robine-runner-bootstrap")
+  |> Path.expand()
+
+config :robine, :bundled_runner,
+  enabled: bundled_runner_enabled,
+  bootstrap_directory: bundled_runner_bootstrap_directory
+
 decode_secret_key = fn encoded, label ->
   case Base.decode64(encoded) do
     {:ok, key} when byte_size(key) == 32 -> key

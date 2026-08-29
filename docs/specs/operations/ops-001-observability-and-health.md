@@ -5,7 +5,7 @@
 - **State:** Shipped
 - **Owner:** Robine maintainers
 - **Target:** MVP
-- **Last updated:** 2026-08-09
+- **Last updated:** 2026-08-29
 
 ## Summary
 
@@ -77,7 +77,7 @@ Structured event logging is owned by a single redaction-safe adapter. Its metada
 |---|---|---|
 | PostgreSQL unavailable | Readiness returns 503 and admin health reports database failure | Restore PostgreSQL connectivity; the next probe recovers automatically |
 | Blob path not writable | Readiness returns 503 without disclosing the path | Restore permissions or capacity and refresh |
-| Docker unavailable | Readiness remains 200 while execution health is degraded | Restore Docker before dispatching jobs |
+| Docker unavailable to the bundled runner | Control-plane readiness remains 200 while the runner service is unhealthy and Docker jobs stay queued | Restore Docker and restart the runner service |
 | GitHub or OIDC unconfigured | Integration is marked degraded or optional | Configure the integration or leave it intentionally disabled |
 
 ## Security and privacy

@@ -1,0 +1,72 @@
+#!/bin/sh
+
+set -eu
+
+rbe=${ROBINE_BUNDLED_RUNNER_BINARY:-/opt/robine/bin/rbe}
+server_url=${ROBINE_PUBLIC_URL:?ROBINE_PUBLIC_URL is required}
+config_path=${ROBINE_BUNDLED_RUNNER_CONFIG:-/var/lib/robine-runner/config.json}
+bootstrap_directory=${ROBINE_BUNDLED_RUNNER_BOOTSTRAP_DIRECTORY:-/var/lib/robine-runner-bootstrap}
+token_path=$bootstrap_directory/enrollment-token
+marker_path=$bootstrap_directory/configured
+runner_name=${ROBINE_BUNDLED_RUNNER_NAME:-robine-local}
+resource_namespace=${ROBINE_RUNNER_RESOURCE_NAMESPACE:-production}
+cpu_millis=${ROBINE_RUNNER_CPU_MILLIS:-2000}
+memory_bytes=${ROBINE_RUNNER_MEMORY_BYTES:-4294967296}
+pids_limit=${ROBINE_RUNNER_PIDS_LIMIT:-512}
+
+umask 077
+mkdir -p "$(dirname "$config_path")" "$bootstrap_directory"
+if [ -n "${ROBINE_RUNNER_READY_FILE:-}" ]; then
+  rm -f "$ROBINE_RUNNER_READY_FILE"
+fi
+
+mark_configured() {
+  temporary=$marker_path.tmp.$$
+  printf 'configured\n' >"$temporary"
+  chmod 600 "$temporary"
+  mv -f "$temporary" "$marker_path"
+}
+
+if [ ! -s "$config_path" ]; then
+  rm -f "$marker_path"
+  while [ ! -s "$token_path" ]; do
+    sleep 1
+  done
+
+  ROBINE_RUNNER_ENROLLMENT_TOKEN=$(cat "$token_path")
+  export ROBINE_RUNNER_ENROLLMENT_TOKEN
+
+  if ! "$rbe" enroll \
+    --server "$server_url" \
+    --name "$runner_name" \
+    --config "$config_path" \
+    --executor docker \
+    --resource-namespace "$resource_namespace" \
+    --cpu-millis "$cpu_millis" \
+    --memory-bytes "$memory_bytes" \
+    --pids-limit "$pids_limit"; then
+    unset ROBINE_RUNNER_ENROLLMENT_TOKEN
+    rm -f "$token_path"
+    exit 1
+  fi
+
+  unset ROBINE_RUNNER_ENROLLMENT_TOKEN
+fi
+
+rm -f "$token_path"
+mark_configured
+
+set +e
+"$rbe" start --config "$config_path" &
+runner_pid=$!
+trap 'kill -TERM "$runner_pid" 2>/dev/null || true' TERM INT
+wait "$runner_pid"
+runner_status=$?
+trap - TERM INT
+set -e
+
+if [ "$runner_status" -eq 78 ]; then
+  rm -f "$config_path" "$marker_path"
+fi
+
+exit "$runner_status"

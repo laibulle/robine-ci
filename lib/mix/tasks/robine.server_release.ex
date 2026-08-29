@@ -14,7 +14,8 @@ defmodule Mix.Tasks.Robine.ServerRelease do
 
     output = Path.expand(Keyword.get(options, :output, "dist/server"))
     version = Mix.Project.config() |> Keyword.fetch!(:version)
-    architecture = :erlang.system_info(:system_architecture) |> to_string() |> sanitize()
+    system_architecture = :erlang.system_info(:system_architecture) |> to_string()
+    architecture = sanitize(system_architecture)
     platform = release_platform!()
     target = "#{platform.id}-#{platform.version}-#{architecture}"
     artifact_name = "robine-server-#{version}-#{target}.tar.gz"
@@ -25,6 +26,7 @@ defmodule Mix.Tasks.Robine.ServerRelease do
     Mix.Task.run("release", ["--overwrite"])
 
     release_root = Path.join([Mix.Project.build_path(), "rel", "robine"])
+    build_bundled_runner!(release_root, version, go_architecture!(system_architecture))
 
     try do
       with false <- File.exists?(artifact),
@@ -61,6 +63,50 @@ defmodule Mix.Tasks.Robine.ServerRelease do
   end
 
   defp sanitize(value), do: String.replace(value, ~r/[^A-Za-z0-9._-]/, "-")
+
+  defp build_bundled_runner!(release_root, version, architecture) do
+    go = System.get_env("ROBINE_GO") || System.find_executable("go")
+
+    unless is_binary(go) do
+      Mix.raise("Go is required to package the bundled server runner; set ROBINE_GO")
+    end
+
+    destination = Path.join([release_root, "bin", "rbe"])
+
+    {output, status} =
+      System.cmd(
+        go,
+        [
+          "build",
+          "-buildvcs=false",
+          "-mod=readonly",
+          "-trimpath",
+          "-ldflags",
+          "-s -w -X main.version=#{version}",
+          "-o",
+          destination,
+          "./cmd/robine-runner"
+        ],
+        cd: Path.join(File.cwd!(), "runner-go"),
+        env: [{"CGO_ENABLED", "0"}, {"GOOS", "linux"}, {"GOARCH", architecture}],
+        stderr_to_stdout: true
+      )
+
+    if status != 0 do
+      Mix.raise("bundled Go runner build failed for linux/#{architecture}: #{output}")
+    end
+
+    File.chmod!(destination, 0o755)
+  end
+
+  defp go_architecture!(architecture) do
+    cond do
+      String.starts_with?(architecture, "x86_64") -> "amd64"
+      String.starts_with?(architecture, "aarch64") -> "arm64"
+      String.starts_with?(architecture, "arm64") -> "arm64"
+      true -> Mix.raise("unsupported bundled Go runner architecture: #{architecture}")
+    end
+  end
 
   defp release_platform! do
     values =

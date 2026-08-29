@@ -13,10 +13,15 @@ import (
 )
 
 type Config struct {
-	ServerURL  string `json:"server_url"`
-	RunnerID   string `json:"runner_id"`
-	Credential string `json:"credential"`
-	Name       string `json:"name"`
+	ServerURL         string `json:"server_url"`
+	RunnerID          string `json:"runner_id"`
+	Credential        string `json:"credential"`
+	Name              string `json:"name"`
+	Executor          string `json:"executor,omitempty"`
+	ResourceNamespace string `json:"resource_namespace,omitempty"`
+	CPUMillis         int64  `json:"cpu_millis,omitempty"`
+	MemoryBytes       int64  `json:"memory_bytes,omitempty"`
+	PIDsLimit         int64  `json:"pids_limit,omitempty"`
 }
 
 type CommandKind uint8
@@ -29,11 +34,16 @@ const (
 )
 
 type EnrollOptions struct {
-	ServerURL       string
-	Name            string
-	ConfigPath      string
-	EnrollmentToken string
-	Force           bool
+	ServerURL         string
+	Name              string
+	ConfigPath        string
+	EnrollmentToken   string
+	Force             bool
+	Executor          string
+	ResourceNamespace string
+	CPUMillis         int64
+	MemoryBytes       int64
+	PIDsLimit         int64
 }
 
 type InstallOptions struct {
@@ -68,6 +78,11 @@ func ParseCommand(args []string) (Command, error) {
 		set.StringVar(&options.Name, "name", "", "runner name")
 		set.StringVar(&options.ConfigPath, "config", "", "private config path")
 		set.BoolVar(&options.Force, "force", false, "replace an existing config")
+		set.StringVar(&options.Executor, "executor", defaultExecutor(), "native or docker executor")
+		set.StringVar(&options.ResourceNamespace, "resource-namespace", "robine", "Docker resource label namespace")
+		set.Int64Var(&options.CPUMillis, "cpu-millis", 2_000, "Docker job CPU limit in millicores")
+		set.Int64Var(&options.MemoryBytes, "memory-bytes", 4_294_967_296, "Docker job memory limit")
+		set.Int64Var(&options.PIDsLimit, "pids-limit", 512, "Docker job process limit")
 		if err := set.Parse(args[1:]); err != nil || set.NArg() != 0 {
 			return Command{}, usageError()
 		}
@@ -77,6 +92,9 @@ func ParseCommand(args []string) (Command, error) {
 			return Command{}, errors.New("enroll requires --server, --name, --config, and ROBINE_RUNNER_ENROLLMENT_TOKEN")
 		}
 		if err := ValidateServerURL(options.ServerURL); err != nil {
+			return Command{}, err
+		}
+		if err := validateExecutorOptions(options.Executor, options.ResourceNamespace, options.CPUMillis, options.MemoryBytes, options.PIDsLimit); err != nil {
 			return Command{}, err
 		}
 		options.ConfigPath, _ = filepath.Abs(options.ConfigPath)
@@ -161,7 +179,45 @@ func Validate(cfg Config) error {
 	if strings.TrimSpace(cfg.RunnerID) == "" || strings.TrimSpace(cfg.Credential) == "" || strings.TrimSpace(cfg.Name) == "" {
 		return errors.New("runner config is missing required values")
 	}
-	return ValidateServerURL(cfg.ServerURL)
+	if err := ValidateServerURL(cfg.ServerURL); err != nil {
+		return err
+	}
+	return validateExecutorOptions(Executor(cfg), ResourceNamespace(cfg), CPUMillis(cfg), MemoryBytes(cfg), PIDsLimit(cfg))
+}
+
+func Executor(cfg Config) string {
+	if cfg.Executor == "" {
+		return "native"
+	}
+	return cfg.Executor
+}
+
+func ResourceNamespace(cfg Config) string {
+	if cfg.ResourceNamespace == "" {
+		return "robine"
+	}
+	return cfg.ResourceNamespace
+}
+
+func CPUMillis(cfg Config) int64 {
+	if cfg.CPUMillis == 0 {
+		return 2_000
+	}
+	return cfg.CPUMillis
+}
+
+func MemoryBytes(cfg Config) int64 {
+	if cfg.MemoryBytes == 0 {
+		return 4_294_967_296
+	}
+	return cfg.MemoryBytes
+}
+
+func PIDsLimit(cfg Config) int64 {
+	if cfg.PIDsLimit == 0 {
+		return 512
+	}
+	return cfg.PIDsLimit
 }
 
 func SameServer(left, right string) bool {
@@ -214,7 +270,27 @@ func Write(path string, cfg Config, force bool) error {
 }
 
 func usageError() error {
-	return errors.New("usage: robine-runner version | enroll --server URL --name NAME --config PATH [--force] | start --config PATH | install [--config ABSOLUTE_PATH] [--server URL]")
+	return errors.New("usage: robine-runner version | enroll --server URL --name NAME --config PATH [--executor native|docker] [--force] | start --config PATH | install [--config ABSOLUTE_PATH] [--server URL]")
+}
+
+func defaultExecutor() string {
+	if runtime.GOOS == "linux" {
+		return "docker"
+	}
+	return "native"
+}
+
+func validateExecutorOptions(executor, namespace string, cpuMillis, memoryBytes, pidsLimit int64) error {
+	if executor != "native" && executor != "docker" {
+		return errors.New("runner executor must be native or docker")
+	}
+	if namespace == "" || len(namespace) > 80 || strings.ContainsAny(namespace, " /\\\t\r\n") {
+		return errors.New("runner resource namespace is invalid")
+	}
+	if cpuMillis < 100 || cpuMillis > 256_000 || memoryBytes < 64*1024*1024 || memoryBytes > 1024*1024*1024*1024 || pidsLimit < 16 || pidsLimit > 1_000_000 {
+		return errors.New("runner resource limits are invalid")
+	}
+	return nil
 }
 
 func canonicalServerURL(raw string) string {

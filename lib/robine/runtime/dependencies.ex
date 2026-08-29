@@ -97,9 +97,7 @@ defmodule Robine.Runtime.Dependencies do
       decoder: Robine.Adapters.Workflow.YamlDecoder
     })
 
-    ExecutionDependencies.validate!(%ExecutionDependencies{
-      runner: Robine.Adapters.Execution.DockerRunner
-    })
+    ExecutionDependencies.validate!(%ExecutionDependencies{runner: server_runner()})
 
     if profile == :standalone, do: IdentityDependencies.validate!(identity_dependencies())
     AutoscalingDependencies.validate!(autoscaling_dependencies())
@@ -178,7 +176,7 @@ defmodule Robine.Runtime.Dependencies do
         id_generator: Robine.Adapters.System.IdGenerator
       },
       workflows: %WorkflowDependencies{decoder: Robine.Adapters.Workflow.YamlDecoder},
-      execution: %ExecutionDependencies{runner: Robine.Adapters.Execution.DockerRunner},
+      execution: %ExecutionDependencies{runner: server_runner()},
       autoscaling: autoscaling_dependencies(),
       runners: runner_dependencies(),
       deployments: deployment_dependencies(),
@@ -217,6 +215,12 @@ defmodule Robine.Runtime.Dependencies do
     if profile == :standalone,
       do: Map.put(dependencies, :identities, identity_dependencies()),
       else: dependencies
+  end
+
+  defp server_runner do
+    if Application.fetch_env!(:robine, :local_runner_enabled),
+      do: Robine.Adapters.Execution.DockerRunner,
+      else: Robine.Adapters.Execution.DisabledRunner
   end
 
   defp identity_dependencies do

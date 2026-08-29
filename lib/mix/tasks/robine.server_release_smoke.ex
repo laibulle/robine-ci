@@ -64,6 +64,8 @@ defmodule Mix.Tasks.Robine.ServerReleaseSmoke do
 
     required = [
       "bin/robine",
+      "bin/rbe",
+      "bin/start-bundled-runner",
       "compose.yaml",
       "Caddyfile",
       ".env.example",
@@ -79,6 +81,8 @@ defmodule Mix.Tasks.Robine.ServerReleaseSmoke do
     if missing != [] do
       Mix.raise("server release is missing required files: #{Enum.join(missing, ", ")}")
     end
+
+    verify_bundled_runner!(release_root)
 
     assert_exact_file!(Path.join(release_root, "LICENSE"), "LICENSE")
 
@@ -122,6 +126,8 @@ defmodule Mix.Tasks.Robine.ServerReleaseSmoke do
       ROBINE_HOST ROBINE_PUBLIC_URL PHX_HOST PHX_SERVER PORT DATABASE_URL
       POSTGRES_PASSWORD SECRET_KEY_BASE ROBINE_CI_SECRET_KEY ROBINE_BOOTSTRAP_TOKEN
       ROBINE_STORAGE_ROOT
+      ROBINE_BUNDLED_RUNNER_ENABLED ROBINE_LOCAL_RUNNER_ENABLED
+      ROBINE_BUNDLED_RUNNER_BOOTSTRAP_DIRECTORY ROBINE_BUNDLED_RUNNER_NAME
       ROBINE_RUNTIME_IMAGE
     )
 
@@ -144,6 +150,24 @@ defmodule Mix.Tasks.Robine.ServerReleaseSmoke do
     verify_caddy_configuration!(release_root)
     verify_compose_runtime!(release_root)
   end
+
+  defp verify_bundled_runner!(release_root) do
+    executable = Path.join(release_root, "bin/rbe")
+    entrypoint = Path.join(release_root, "bin/start-bundled-runner")
+
+    unless executable?(executable) and executable?(entrypoint) do
+      Mix.raise("bundled runner binary and entrypoint must be executable")
+    end
+
+    {log, status} = System.cmd(executable, ["version"], stderr_to_stdout: true)
+    require_status!(status, 0, "bundled runner version", log)
+
+    unless String.trim(log) == "robine-runner #{version()}" do
+      Mix.raise("bundled runner returned unexpected version output: #{inspect(log)}")
+    end
+  end
+
+  defp executable?(path), do: File.stat!(path).mode |> Bitwise.band(0o111) != 0
 
   defp verify_caddy_configuration!(release_root) do
     project = "robine-caddy-smoke-#{System.unique_integer([:positive])}"

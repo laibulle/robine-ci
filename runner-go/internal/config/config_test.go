@@ -17,6 +17,9 @@ func TestParseCommandAndServerPolicy(t *testing.T) {
 	if command.Kind != CommandEnroll || command.Enroll.EnrollmentToken != "rbe_secret" || !filepath.IsAbs(command.Enroll.ConfigPath) {
 		t.Fatalf("unexpected command: %#v", command)
 	}
+	if command.Enroll.Executor == "" || command.Enroll.ResourceNamespace == "" || command.Enroll.CPUMillis == 0 {
+		t.Fatalf("executor defaults were not retained: %#v", command.Enroll)
+	}
 	if os.Getenv("ROBINE_RUNNER_ENROLLMENT_TOKEN") != "" {
 		t.Fatal("enrollment token remained in the environment")
 	}
@@ -120,5 +123,35 @@ func TestParseInstallPreservesExplicitConfigPath(t *testing.T) {
 func TestParseInstallRejectsRelativeConfig(t *testing.T) {
 	if _, err := ParseCommand([]string{"install", "--config", "runner.json"}); err == nil {
 		t.Fatal("relative install config was accepted")
+	}
+}
+
+func TestDockerExecutorConfigurationRoundTrip(t *testing.T) {
+	t.Setenv("ROBINE_RUNNER_ENROLLMENT_TOKEN", "rbe_secret")
+	path := filepath.Join(t.TempDir(), "runner.json")
+	command, err := ParseCommand([]string{
+		"enroll", "--server", "https://ci.example.test", "--name", "local", "--config", path,
+		"--executor", "docker", "--resource-namespace", "production", "--cpu-millis", "3000",
+		"--memory-bytes", "1073741824", "--pids-limit", "256",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{
+		ServerURL: "https://ci.example.test", RunnerID: "runner", Credential: "secret", Name: "local",
+		Executor: command.Enroll.Executor, ResourceNamespace: command.Enroll.ResourceNamespace,
+		CPUMillis: command.Enroll.CPUMillis, MemoryBytes: command.Enroll.MemoryBytes, PIDsLimit: command.Enroll.PIDsLimit,
+	}
+	if err := Write(path, cfg, false); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil || Executor(loaded) != "docker" || ResourceNamespace(loaded) != "production" || CPUMillis(loaded) != 3000 {
+		t.Fatalf("unexpected Docker config: %#v %v", loaded, err)
+	}
+
+	t.Setenv("ROBINE_RUNNER_ENROLLMENT_TOKEN", "rbe_secret")
+	if _, err := ParseCommand([]string{"enroll", "--server", "https://ci.example.test", "--name", "bad", "--config", filepath.Join(t.TempDir(), "bad.json"), "--executor", "unknown"}); err == nil {
+		t.Fatal("invalid executor was accepted")
 	}
 }

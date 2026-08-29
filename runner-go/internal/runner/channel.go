@@ -41,9 +41,10 @@ func (probeHandler) HandleEvent(context.Context, string, json.RawMessage) {}
 func (probeHandler) HandleHeartbeat(map[string]any)                       {}
 
 type channelClient struct {
-	config  config.Config
-	version string
-	handler channelHandler
+	config    config.Config
+	version   string
+	handler   channelHandler
+	readyFile string
 
 	mu      sync.Mutex
 	conn    *websocket.Conn
@@ -56,12 +57,13 @@ type channelClient struct {
 
 func newChannelClient(cfg config.Config, version string, handler channelHandler) *channelClient {
 	client := &channelClient{
-		config:  cfg,
-		version: version,
-		handler: handler,
-		ready:   make(chan struct{}),
-		lost:    make(chan struct{}),
-		pending: make(map[string]chan channelReply),
+		config:    cfg,
+		version:   version,
+		handler:   handler,
+		readyFile: os.Getenv("ROBINE_RUNNER_READY_FILE"),
+		ready:     make(chan struct{}),
+		lost:      make(chan struct{}),
+		pending:   make(map[string]chan channelReply),
 	}
 	client.nextRef.Store(1)
 	return client
@@ -71,6 +73,9 @@ func (c *channelClient) Run(ctx context.Context) error {
 	attempt := 0
 	for ctx.Err() == nil {
 		if err := c.runSession(ctx); err != nil && ctx.Err() == nil {
+			if AuthenticationFailure(err) {
+				return err
+			}
 			attempt++
 			delay := reconnectDelay(attempt)
 			log.Printf("connection unavailable: %v; reconnecting in %s", err, delay)
@@ -94,6 +99,8 @@ func (c *channelClient) runSession(ctx context.Context) error {
 	}
 	c.connect(conn)
 	defer c.disconnect(conn)
+	c.markReady()
+	defer c.markNotReady()
 	log.Printf("runner connected with protocol v1 as %s pid=%d", c.config.RunnerID, os.Getpid())
 	closed := make(chan struct{})
 	defer close(closed)
@@ -126,6 +133,21 @@ func (c *channelClient) runSession(ctx context.Context) error {
 	}
 }
 
+func (c *channelClient) markReady() {
+	if c.readyFile == "" {
+		return
+	}
+	if err := os.WriteFile(c.readyFile, []byte("ready\n"), 0o600); err != nil {
+		log.Printf("runner readiness marker could not be written")
+	}
+}
+
+func (c *channelClient) markNotReady() {
+	if c.readyFile != "" {
+		_ = os.Remove(c.readyFile)
+	}
+}
+
 func (c *channelClient) openSession(ctx context.Context) (*websocket.Conn, error) {
 	socketURL, err := websocketURL(c.config.ServerURL)
 	if err != nil {
@@ -147,7 +169,7 @@ func (c *channelClient) openSession(ctx context.Context) (*websocket.Conn, error
 	if err := c.join(ctx, conn); err != nil {
 		conn.Close()
 		if strings.Contains(strings.ToLower(err.Error()), "auth") || strings.Contains(strings.ToLower(err.Error()), "unauthorized") {
-			return nil, errors.New("authentication failed during runner protocol negotiation")
+			return nil, fmt.Errorf("%w during runner protocol negotiation", errAuthenticationFailure)
 		}
 		return nil, err
 	}
@@ -167,7 +189,7 @@ func Probe(ctx context.Context, cfg config.Config, version string) error {
 func classifyHTTPConnectionError(status int) error {
 	switch status {
 	case http.StatusUnauthorized, http.StatusForbidden:
-		return fmt.Errorf("authentication failed with HTTP %d", status)
+		return fmt.Errorf("%w with HTTP %d", errAuthenticationFailure, status)
 	case http.StatusBadGateway:
 		return errors.New("upstream returned HTTP 502 Bad Gateway")
 	default:
@@ -195,7 +217,7 @@ func (c *channelClient) join(ctx context.Context, conn *websocket.Conn) error {
 	hello := map[string]any{
 		"supported_protocol_versions": []int{1},
 		"software_version":            c.version,
-		"capabilities":                capabilities(),
+		"capabilities":                capabilities(c.config),
 		"active_attempt_ids":          c.handler.ActiveAttemptIDs(),
 		"active_deployment_ids":       []string{},
 	}
@@ -403,7 +425,7 @@ func websocketURL(serverURL string) (string, error) {
 	return u.String(), nil
 }
 
-func capabilities() map[string]any {
+func capabilities(cfg config.Config) map[string]any {
 	architecture := runtime.GOARCH
 	operatingSystem := runtime.GOOS
 	if operatingSystem == "darwin" {
@@ -412,12 +434,13 @@ func capabilities() map[string]any {
 	if architecture == "386" {
 		architecture = "x86"
 	}
+	executor := config.Executor(cfg)
 	return map[string]any{
 		"os":           operatingSystem,
 		"architecture": architecture,
-		"docker":       false,
-		"native":       true,
-		"executor":     "native",
+		"docker":       executor == "docker",
+		"native":       executor == "native",
+		"executor":     executor,
 		"deployments":  false,
 		"concurrency":  1,
 	}

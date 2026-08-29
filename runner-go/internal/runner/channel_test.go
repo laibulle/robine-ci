@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -39,6 +41,8 @@ func (h *channelTestHandler) HandleEvent(_ context.Context, event string, payloa
 func (h *channelTestHandler) HandleHeartbeat(map[string]any) {}
 
 func TestChannelJoinsRequestsAndReceivesServerEvents(t *testing.T) {
+	readyFile := filepath.Join(t.TempDir(), "ready")
+	t.Setenv("ROBINE_RUNNER_READY_FILE", readyFile)
 	upgrader := websocket.Upgrader{}
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/runner/socket/websocket" || request.Header.Get("X-Robine-Runner-Id") != "runner-1" || request.Header.Get("X-Robine-Runner-Credential") != "secret" {
@@ -90,6 +94,9 @@ func TestChannelJoinsRequestsAndReceivesServerEvents(t *testing.T) {
 	if err != nil || response["echo"] != "attempt_event" {
 		t.Fatalf("request failed: response=%v err=%v", response, err)
 	}
+	if body, err := os.ReadFile(readyFile); err != nil || string(body) != "ready\n" {
+		t.Fatalf("readiness marker was not written: %q %v", body, err)
+	}
 	select {
 	case <-handler.notified:
 	case <-time.After(5 * time.Second):
@@ -105,6 +112,9 @@ func TestChannelJoinsRequestsAndReceivesServerEvents(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("client did not stop after context cancellation")
+	}
+	if _, err := os.Stat(readyFile); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("readiness marker remained after disconnect: %v", err)
 	}
 }
 
@@ -129,10 +139,14 @@ func TestChannelHelpers(t *testing.T) {
 	if strings.Join(values, ",") != "one,two" {
 		t.Fatalf("unexpected string list: %v", values)
 	}
-	facts := capabilities()
+	facts := capabilities(config.Config{Executor: "native"})
 	expectedOS := runtime.GOOS
 	if expectedOS == "darwin" {
 		expectedOS = "macos"
+	}
+	dockerFacts := capabilities(config.Config{Executor: "docker"})
+	if dockerFacts["docker"] != true || dockerFacts["native"] != false || dockerFacts["executor"] != "docker" {
+		t.Fatalf("unexpected Docker capabilities: %#v", dockerFacts)
 	}
 	if facts["os"] != expectedOS || facts["architecture"] != runtime.GOARCH || facts["docker"] != false || facts["native"] != true {
 		t.Fatalf("unexpected capabilities: %v", facts)
@@ -182,6 +196,27 @@ func TestProbeClassifiesAuthenticationAndBadGateway(t *testing.T) {
 		if strings.Contains(err.Error(), cfg.Credential) {
 			t.Fatal("probe error leaked the runner credential")
 		}
+		if status == http.StatusUnauthorized && !AuthenticationFailure(err) {
+			t.Fatal("HTTP authentication failure was not marked permanent")
+		}
+	}
+}
+
+func TestChannelStopsRetryingAfterAuthenticationFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		http.Error(response, "unauthorized", http.StatusUnauthorized)
+	}))
+	defer server.Close()
+	client := newChannelClient(
+		config.Config{ServerURL: server.URL, RunnerID: "runner-1", Credential: "secret", Name: "local"},
+		"test",
+		&channelTestHandler{},
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := client.Run(ctx)
+	if !AuthenticationFailure(err) {
+		t.Fatalf("authentication failure was retried: %v", err)
 	}
 }
 

@@ -280,7 +280,7 @@ defmodule RobineWeb.AdminLive.Index do
   defp check_label(:durable_queue), do: "Durable queue"
   defp check_label(:outbox), do: "Event outbox"
   defp check_label(:scheduler), do: "Scheduled workflows"
-  defp check_label(:docker), do: "Docker Engine"
+  defp check_label(:docker), do: "Docker execution"
   defp check_label(:storage), do: "Blob storage"
   defp check_label(:github_app), do: "GitHub App"
   defp check_label(:oidc), do: "OpenID Connect"

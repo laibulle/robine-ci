@@ -5,7 +5,7 @@
 - **State:** Shipped
 - **Owner:** Platform
 - **Target:** MVP
-- **Last updated:** 2026-08-09
+- **Last updated:** 2026-08-29
 
 ## Summary
 
@@ -69,13 +69,13 @@ An operator deploying Robine on a Linux Docker host and a contributor implementi
 
 ## Proposed design
 
-The Phoenix application contains bounded contexts for source control, workflows, pipelines, identity, secrets, and storage. Their internal dependency rules, use cases, ports, adapters, and public facades are defined by [PLAT-002](plat-002-clean-application-architecture.md). A durable background-job mechanism handles webhook processing, reconciliation, and outbound GitHub updates. A scheduler claims ready jobs using transactional database locking and sends an execution specification to a local runner adapter. Event-driven dispatch provides low latency; the minute reconciler also schedules an idempotent dispatch pass to recover committed queued jobs after lost or conflicted notifications.
+The Phoenix application contains bounded contexts for source control, workflows, pipelines, identity, secrets, and storage. Their internal dependency rules, use cases, ports, adapters, and public facades are defined by [PLAT-002](plat-002-clean-application-architecture.md). A durable background-job mechanism handles webhook processing, reconciliation, and outbound GitHub updates. A scheduler claims ready jobs using transactional database locking and sends an execution specification through runner protocol v1 to a compatible Go runner. The production bundle supplies one such runner as a separate local sidecar; Phoenix neither executes repository commands nor mounts Docker. Event-driven dispatch provides low latency; the minute reconciler also schedules an idempotent dispatch pass to recover committed queued jobs after lost or conflicted notifications.
 
 Pipeline states are `created`, `queued`, `running`, `cancelling`, and terminal states `succeeded`, `failed`, `cancelled`, or `invalid`. Job attempts distinguish command failure, cancellation, timeout, runner loss, and system failure. Retrying creates a new attempt; it never mutates the history of the previous attempt.
 
 Every pipeline transaction stores one immutable workflow revision containing the exact source path and bytes, a SHA-256 digest, and the normalized execution graph. Source-triggered pipelines provide the fetched workflow bytes from the exact commit SHA; synthetic internal pipelines receive an explicit generated revision rather than a missing reference.
 
-The runner emits ordered, sequence-numbered events. The control plane deduplicates events and persists state before broadcasting it. This protocol is implemented locally in the MVP but MUST not rely on shared mutable process state, so it can be transported remotely later.
+The runner emits ordered, sequence-numbered protocol-v1 events. The control plane deduplicates events and persists state before broadcasting it. Bundled and separately enrolled runners share this authenticated transport and do not rely on shared mutable process state.
 
 ## Failure modes and recovery
 

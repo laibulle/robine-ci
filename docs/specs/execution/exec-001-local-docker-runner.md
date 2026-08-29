@@ -5,11 +5,11 @@
 - **State:** Shipped
 - **Owner:** Execution
 - **Target:** MVP
-- **Last updated:** 2026-08-11
+- **Last updated:** 2026-08-29
 
 ## Summary
 
-The local runner executes each job in one fresh Docker container, with sequential steps sharing a workspace. It enforces bounded concurrency, cancellation, timeouts, log streaming, and cleanup while making no claim that Docker safely contains hostile code.
+The Docker executor executes each job in one fresh container, with sequential steps sharing a workspace. It enforces bounded concurrency, cancellation, timeouts, log streaming, and cleanup while making no claim that Docker safely contains hostile code. Production server capacity is now hosted by the bundled Go runner specified in [RUN-004](../runners/run-004-bundled-go-docker-runner.md); the Elixir adapter remains for the developer CLI and compatibility tests only.
 
 ## Problem
 

@@ -18,6 +18,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/robine-ci/robine-runner/internal/config"
 )
 
 const maxOutputBytes = 10_000_000
@@ -27,6 +29,7 @@ var artifactNamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$
 type executor struct {
 	channel     requester
 	transfers   *transferClient
+	config      config.Config
 	logSequence atomic.Int64
 }
 
@@ -40,10 +43,21 @@ type requester interface {
 }
 
 func newExecutor(channel requester, transfers *transferClient) *executor {
-	return &executor{channel: channel, transfers: transfers}
+	return &executor{channel: channel, transfers: transfers, config: config.Config{Executor: "native"}}
 }
 
 func (e *executor) Run(ctx context.Context, offer Offer) error {
+	if config.Executor(e.config) == "docker" {
+		return e.runDocker(ctx, offer)
+	}
+	return e.runNative(ctx, offer)
+}
+
+func newConfiguredExecutor(cfg config.Config, channel requester, transfers *transferClient) *executor {
+	return &executor{channel: channel, transfers: transfers, config: cfg}
+}
+
+func (e *executor) runNative(ctx context.Context, offer Offer) error {
 	root, err := os.MkdirTemp("", "robine-native-"+safeID(offer.AttemptID)+"-")
 	if err != nil {
 		e.failPreparation(ctx, offer)

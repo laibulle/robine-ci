@@ -38,6 +38,8 @@ config :robine,
     cancellation_poll_interval_ms: 500
   ],
   runner_cancellation_grace_ms: 5_000,
+  local_runner_enabled: true,
+  bundled_runner: [enabled: false, bootstrap_directory: nil],
   retention: [log_seconds: 2_592_000, gc_grace_seconds: 3_600, batch_size: 1_000],
   public_url: "http://localhost:4004",
   github_adapter: Robine.Adapters.SourceControl.GitHubClient,

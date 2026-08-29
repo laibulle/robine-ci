@@ -20,8 +20,13 @@ defmodule Robine.Adapters.Background.RunNextJobWorker do
 
     TenantJob.run(job, __MODULE__, "local-runner:#{Ecto.UUID.generate()}", fn context ->
       case dispatch_remote(context, runner_control) do
-        :local -> claim_local(context, runner_control)
-        result -> result
+        :local ->
+          if Application.fetch_env!(:robine, :local_runner_enabled),
+            do: claim_local(context, runner_control),
+            else: {:snooze, 1}
+
+        result ->
+          result
       end
     end)
   end

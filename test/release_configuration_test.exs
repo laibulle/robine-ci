@@ -76,4 +76,32 @@ defmodule Robine.ReleaseConfigurationTest do
     assert ci =~ "image: #{image}"
     assert release =~ "image: #{image}"
   end
+
+  test "the production bundle isolates Docker in the bundled Go runner" do
+    compose = YamlElixir.read_from_file!("rel/overlays/compose.yaml")
+    server = get_in(compose, ["services", "server"])
+    runner = get_in(compose, ["services", "runner"])
+    server_volumes = server["volumes"]
+    runner_volumes = runner["volumes"]
+    entrypoint = File.read!("rel/overlays/bin/start-bundled-runner")
+    release_task = File.read!("lib/mix/tasks/robine.server_release.ex")
+
+    refute Enum.any?(server_volumes, &String.contains?(&1, "docker.sock"))
+    assert Enum.any?(runner_volumes, &String.contains?(&1, "docker.sock"))
+
+    assert Map.keys(runner["environment"])
+           |> Enum.all?(&(not String.contains?(&1, ["TOKEN", "CREDENTIAL", "SECRET"])))
+
+    refute Map.has_key?(runner, "env_file")
+    assert runner["command"] == ["/opt/robine/bin/start-bundled-runner"]
+    assert entrypoint =~ "ROBINE_BUNDLED_RUNNER_BINARY:-/opt/robine/bin/rbe"
+    assert entrypoint =~ "ROBINE_RUNNER_ENROLLMENT_TOKEN=$(cat \"$token_path\")"
+    assert entrypoint =~ "--executor docker"
+    assert entrypoint =~ ~s|if [ "$runner_status" -eq 78 ]|
+    assert entrypoint =~ ~s|rm -f "$config_path" "$marker_path"|
+    refute entrypoint =~ "--token"
+    assert release_task =~ ~s({"CGO_ENABLED", "0"})
+    assert release_task =~ ~s("-buildvcs=false")
+    assert release_task =~ ~s|Path.join([release_root, "bin", "rbe"])|
+  end
 end

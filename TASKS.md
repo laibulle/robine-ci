@@ -506,6 +506,16 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - [ ] Build a macOS `.app` fixture and prove that its declared artifact is retained and downloadable from Robine CI.
 - [x] Update launchd and operator documentation for the self-contained executable.
 
+### RUN-303 — Replace the server-local Elixir runner with Go
+
+- **Spec:** [RUN-004](docs/specs/runners/run-004-bundled-go-docker-runner.md)
+- **Depends on:** RUN-302
+- [x] Implement Docker execution, services, limits, cancellation, built-ins, and reconciliation in `rbe`.
+- [x] Package the matching Linux runner in the server release and start it as a separate production service.
+- [x] Automatically exchange a private single-use bootstrap file for the bundled runner credential.
+- [x] Remove the production local-Elixir fallback and Docker socket from Phoenix.
+- [x] Prove Docker/service/built-in parity, restart recovery, cleanup, revocation, and at least 75% Go coverage.
+
 These items are intentionally unordered and must receive specifications before implementation:
 
 - [x] S3-compatible artifact and cache storage — DATA-002 shipped with MinIO and remote-runner evidence.

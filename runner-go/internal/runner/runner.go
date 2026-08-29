@@ -16,7 +16,13 @@ var (
 	errCancellationRequested = errors.New("cancellation requested")
 	errLeaseLost             = errors.New("attempt lease lost")
 	errRunnerShutdown        = errors.New("runner shutting down")
+	errAuthenticationFailure = errors.New("runner authentication failed")
+	errRunnerRevoked         = fmt.Errorf("%w: credential was revoked", errAuthenticationFailure)
 )
+
+func AuthenticationFailure(err error) bool {
+	return errors.Is(err, errAuthenticationFailure)
+}
 
 type application struct {
 	config    config.Config
@@ -27,19 +33,35 @@ type application struct {
 	executions  map[string]context.CancelCauseFunc
 	executionWG sync.WaitGroup
 	stopping    bool
+	stopChannel context.CancelCauseFunc
 }
 
 func Run(ctx context.Context, cfg config.Config, version string) error {
+	channelCtx, stopChannel := context.WithCancelCause(ctx)
+	defer stopChannel(context.Canceled)
 	app := &application{
-		config:     cfg,
-		transfers:  newTransferClient(cfg),
-		executions: make(map[string]context.CancelCauseFunc),
+		config:      cfg,
+		transfers:   newTransferClient(cfg),
+		executions:  make(map[string]context.CancelCauseFunc),
+		stopChannel: stopChannel,
+	}
+	if config.Executor(cfg) == "docker" {
+		if err := dockerReady(ctx); err != nil {
+			return err
+		}
+		if err := reconcileDocker(ctx, cfg, nil); err != nil {
+			return fmt.Errorf("reconcile Docker resources: %w", err)
+		}
+		go app.reconcileDockerLoop(ctx)
 	}
 	channel := newChannelClient(cfg, version, app)
 	app.client = channel
-	err := channel.Run(ctx)
+	err := channel.Run(channelCtx)
 	app.stopExecutions()
 	app.waitForExecutions(10 * time.Second)
+	if errors.Is(context.Cause(channelCtx), errRunnerRevoked) {
+		return errRunnerRevoked
+	}
 	if errors.Is(err, context.Canceled) {
 		return nil
 	}
@@ -74,6 +96,9 @@ func (a *application) HandleEvent(ctx context.Context, event string, payload jso
 		}
 	case "runner_revoked":
 		a.cancelAll(errCancellationRequested)
+		if a.stopChannel != nil {
+			a.stopChannel(errRunnerRevoked)
+		}
 	case "lease_lost":
 		var input struct {
 			AttemptID string `json:"attempt_id"`
@@ -129,11 +154,26 @@ func (a *application) acceptOffer(ctx context.Context, offer Offer) {
 	go func() {
 		defer a.executionWG.Done()
 		defer a.finish(offer.AttemptID)
-		executor := newExecutor(a.client, a.transfers)
+		executor := newConfiguredExecutor(a.config, a.client, a.transfers)
 		if err := executor.Run(executionCtx, offer); err != nil && !errors.Is(err, context.Canceled) {
 			log.Printf("job %s failed: %v", offer.AttemptID, err)
 		}
 	}()
+}
+
+func (a *application) reconcileDockerLoop(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := reconcileDocker(ctx, a.config, a.ActiveAttemptIDs()); err != nil {
+				log.Printf("Docker resource reconciliation failed")
+			}
+		}
+	}
 }
 
 func (a *application) rejectOffer(ctx context.Context, offer Offer, reason string) {

@@ -17,12 +17,12 @@ The project is under active development. The product contract is documented in [
 - Workflow schema v1 parsing, semantic validation, and exact-revision reusable workflows
 - Deterministic `success`, `failure`, and `always` conditions plus bounded static job matrices
 - Stable workflow diagnostic codes and dependency-cycle detection
-- Isolated local/remote Docker execution, attempt-private service containers, and the `robine` validation/execution CLI
+- Isolated Go-runner Docker execution, attempt-private service containers, and the `robine` validation/execution CLI
 - Encrypted secrets, immutable artifacts, local or S3-compatible caches/artifacts, and cursor-based redacted logs
 - Authenticated GitHub webhooks, exact-SHA workflows, and durable check projection
 - Local Argon2id authentication, revocable sessions, and optional OpenID Connect SSO
 - Authenticated LiveView pipeline, job, log, cancellation, and retry experiences
-- Outbound-only remote Docker runners with versioned restart-safe sessions and fleet administration
+- A bundled server-local Go runner plus outbound-only remote runners with versioned restart-safe sessions and fleet administration
 
 Untrusted-workload isolation remains post-MVP. Release validation that requires a real GitHub installation or external first-use participants remains tracked in `TASKS.md`.
 
@@ -151,7 +151,7 @@ Artifact and cache metadata is admitted atomically against logical quotas of 50 
 
 Workflow validation defaults to 256 KiB, 64 jobs, 128 steps per job, 512 total steps, and DAG depth 16. Production deployments can override these with the `ROBINE_WORKFLOW_MAX_*` environment variables documented in [WF-001](docs/specs/workflows/wf-001-workflow-format.md).
 
-Runner admission requires at least 2 GiB free and at most 95% filesystem usage by default. Configure `ROBINE_RUNNER_MIN_FREE_BYTES` and `ROBINE_RUNNER_MAX_USED_PERCENT` for the host. Robine reconciles only Docker resources carrying its `io.robine.attempt` label.
+Runner admission requires at least 2 GiB free and at most 95% filesystem usage by default. Configure `ROBINE_RUNNER_MIN_FREE_BYTES` and `ROBINE_RUNNER_MAX_USED_PERCENT` for the host. In production, Phoenix dispatches through protocol v1 to the bundled `rbe` sidecar and does not mount Docker. The runner reconciles only Docker resources carrying both its `io.robine.attempt` and instance namespace labels.
 
 Each job is limited to 2 vCPU, 4 GiB RAM without additional swap, and 512 processes by default. Development uses 16 GiB RAM by default for the self-hosted CI workload. Configure `ROBINE_RUNNER_CPU_MILLIS`, `ROBINE_RUNNER_MEMORY_BYTES`, and `ROBINE_RUNNER_PIDS_LIMIT` to match the host.
 

@@ -54,10 +54,15 @@ func Enroll(ctx context.Context, options config.EnrollOptions) (config.Config, e
 		return config.Config{}, errors.New("invalid enrollment response")
 	}
 	return config.Config{
-		ServerURL:  options.ServerURL,
-		RunnerID:   enrolled.RunnerID,
-		Credential: enrolled.Credential,
-		Name:       options.Name,
+		ServerURL:         options.ServerURL,
+		RunnerID:          enrolled.RunnerID,
+		Credential:        enrolled.Credential,
+		Name:              options.Name,
+		Executor:          options.Executor,
+		ResourceNamespace: options.ResourceNamespace,
+		CPUMillis:         options.CPUMillis,
+		MemoryBytes:       options.MemoryBytes,
+		PIDsLimit:         options.PIDsLimit,
 	}, nil
 }
 

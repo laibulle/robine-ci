@@ -58,7 +58,18 @@ defmodule Robine.Runtime do
       Robine.Adapters.SourceControl.GitHubApiMonitor,
       Robine.Adapters.SourceControl.GitHubAppTokenCache
     ]
+    |> maybe_add_bundled_runner_bootstrap(profile)
   end
+
+  defp maybe_add_bundled_runner_bootstrap(children, :standalone) do
+    if Application.fetch_env!(:robine, :bundled_runner) |> Keyword.fetch!(:enabled) do
+      children ++ [Robine.Adapters.Runner.BundledBootstrap]
+    else
+      children
+    end
+  end
+
+  defp maybe_add_bundled_runner_bootstrap(children, :embedded), do: children
 
   defp delivery_children(:embedded), do: []
 

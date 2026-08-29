@@ -19,13 +19,15 @@ cd robine
 
 The installer refuses to replace an existing `.env`, creates all instance and database secrets with mode `0600`, applies migrations, waits for readiness, and prints the one-use bootstrap token once. Open the printed `/setup` URL within 15 minutes. Back up `.env` through an encrypted channel before completing setup; losing `ROBINE_CI_SECRET_KEY` makes stored secrets unrecoverable.
 
-The production Compose bundle pins PostgreSQL 18, the Ubuntu 24.04 or 26.04 runtime recorded by the target-specific release, and Caddy 2.10.2. Use an archive built for the host's exact supported Ubuntu version. Caddy obtains and renews HTTPS certificates automatically. The Robine service mounts the Docker socket because the trusted-code local runner creates sibling job containers; use a dedicated host and never connect untrusted repositories.
+The production Compose bundle pins PostgreSQL 18, the Ubuntu 24.04 or 26.04 runtime recorded by the target-specific release, and Caddy 2.10.2. Use an archive built for the host's exact supported Ubuntu version. Caddy obtains and renews HTTPS certificates automatically. A separate bundled `rbe` service enrolls itself through a private one-use handoff and provides the server's Linux Docker capacity through runner protocol v1. Only that runner service mounts the Docker socket; Phoenix has no Docker access. Use a dedicated host and never connect untrusted repositories.
+
+The runner identity appears as `robine-local` in Administration → Runners. Its credential is stored only in the private `runner_state` volume. If the identity is revoked, the runner discards that rejected credential, the server issues a new short-lived enrollment handoff, and the restarted sidecar enrolls a new ordinary runner identity. Set `ROBINE_BUNDLED_RUNNER_ENABLED=false` before startup to operate exclusively with separately enrolled runners; jobs remain queued when no compatible runner is online.
 
 To inspect the generated configuration without starting services, use `./install.sh --prepare-only ci.example.com`. Delete the resulting `.env` before a real clean-room timing session.
 
 ## Manual configuration
 
-For custom orchestration, create persistent PostgreSQL and blob-storage volumes. Generate `SECRET_KEY_BASE`, a 32-byte base64 `ROBINE_CI_SECRET_KEY`, and a one-use random `ROBINE_BOOTSTRAP_TOKEN`. Configure `DATABASE_URL`, `ROBINE_PUBLIC_URL`, `PHX_HOST`, `PORT`, and `PHX_SERVER=true`. Keep encryption keys outside the database and back them up separately.
+For custom orchestration, create persistent PostgreSQL, blob-storage, runner-state, and runner-bootstrap volumes. Generate `SECRET_KEY_BASE`, a 32-byte base64 `ROBINE_CI_SECRET_KEY`, and a one-use random `ROBINE_BOOTSTRAP_TOKEN`. Configure `DATABASE_URL`, `ROBINE_PUBLIC_URL`, `PHX_HOST`, `PORT`, and `PHX_SERVER=true`. Run the bundled Linux `rbe` from the same release as a separate service, sharing only its bootstrap volume with Phoenix and mounting Docker only into the runner. Keep encryption keys outside the database and back them up separately.
 
 Apply migrations before switching traffic:
 
