@@ -21,6 +21,12 @@ The installer refuses to replace an existing `.env`, creates all instance and da
 
 The production Compose bundle pins PostgreSQL 18, the Ubuntu 24.04 or 26.04 runtime recorded by the target-specific release, and Caddy 2.10.2. Use an archive built for the host's exact supported Ubuntu version. Caddy obtains and renews HTTPS certificates automatically. A separate bundled `rbe` service enrolls itself through a private one-use handoff and provides the server's Linux Docker capacity through runner protocol v1. Only that runner service mounts the Docker socket; Phoenix has no Docker access. Use a dedicated host and never connect untrusted repositories.
 
+Robine's native deployment workflow derives the same bundled runner companion automatically whenever
+`ROBINE_BUNDLED_RUNNER_ENABLED` is enabled. It creates persistent runner-state and private bootstrap
+volumes, mounts only the bootstrap volume into Phoenix, mounts the Docker socket only into the runner,
+and reuses the promoted server release for the matching `rbe` binary. Repeated activation is idempotent;
+explicitly disabling bundled capacity removes the companion but preserves its state volumes.
+
 The runner identity appears as `robine-local` in Administration → Runners. Its credential is stored only in the private `runner_state` volume. If the identity is revoked, the runner discards that rejected credential, the server issues a new short-lived enrollment handoff, and the restarted sidecar enrolls a new ordinary runner identity. Set `ROBINE_BUNDLED_RUNNER_ENABLED=false` before startup to operate exclusively with separately enrolled runners; jobs remain queued when no compatible runner is online.
 
 To inspect the generated configuration without starting services, use `./install.sh --prepare-only ci.example.com`. Delete the resulting `.env` before a real clean-room timing session.

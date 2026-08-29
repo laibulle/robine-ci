@@ -2,7 +2,6 @@
 set -euo pipefail
 
 repository="laibulle/robine-ci"
-asset_name="robine-runner-macos-multiarch.tar.gz"
 api_url="https://api.github.com/repos/${repository}/releases/latest"
 install_dir="${RBE_INSTALL_DIR:-${HOME}/.local/bin}"
 config_path="${RBE_CONFIG_PATH:-}"
@@ -28,13 +27,31 @@ fail() {
 
 trap cleanup EXIT HUP INT TERM
 
-[[ "$(uname -s)" == "Darwin" ]] || fail "macOS is required"
+case "$(uname -s)" in
+  Darwin)
+    platform="macOS"
+    asset_platform="macos"
+    binary_platform="darwin"
+    profile_path="${HOME}/.zprofile"
+    ;;
+  Linux)
+    platform="Linux"
+    asset_platform="linux"
+    binary_platform="linux"
+    profile_path="${HOME}/.profile"
+    ;;
+  *)
+    fail "unsupported operating system: $(uname -s)"
+    ;;
+esac
+
+asset_name="robine-runner-${asset_platform}-multiarch.tar.gz"
 
 case "$(uname -m)" in
-  arm64)
+  arm64|aarch64)
     architecture="arm64"
     ;;
-  x86_64)
+  x86_64|amd64)
     architecture="amd64"
     ;;
   *)
@@ -54,8 +71,17 @@ case "${skip_service_install}" in
     ;;
 esac
 command -v curl >/dev/null 2>&1 || fail "curl is required"
-command -v shasum >/dev/null 2>&1 || fail "shasum is required"
 command -v tar >/dev/null 2>&1 || fail "tar is required"
+
+sha256_file() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    fail "shasum or sha256sum is required"
+  fi
+}
 
 temporary_dir=$(mktemp -d "${TMPDIR:-/tmp}/rbe-install.XXXXXX")
 metadata_path="${temporary_dir}/release.json"
@@ -89,14 +115,14 @@ if [[ ! "${expected_sha256}" =~ ^[0-9a-f]{64}$ ]]; then
 fi
 
 asset_url="https://github.com/${repository}/releases/download/${tag}/${asset_name}"
-printf 'Downloading rbe %s for macOS %s...\n' "${tag#v}" "${architecture}"
+printf 'Downloading rbe %s for %s %s...\n' "${tag#v}" "${platform}" "${architecture}"
 curl --proto '=https' --tlsv1.2 -fL "${asset_url}" -o "${archive_path}"
 
-actual_sha256=$(shasum -a 256 "${archive_path}" | awk '{print $1}')
+actual_sha256=$(sha256_file "${archive_path}")
 [[ "${actual_sha256}" == "${expected_sha256}" ]] || fail "SHA-256 verification failed"
 
 version="${tag#v}"
-relative_binary="dist/runner-go/macos/robine-runner-${version}-darwin-${architecture}"
+relative_binary="dist/runner-go/${asset_platform}/robine-runner-${version}-${binary_platform}-${architecture}"
 source_binary="${temporary_dir}/${relative_binary}"
 tar -xzf "${archive_path}" -C "${temporary_dir}" -- "${relative_binary}"
 
@@ -143,7 +169,7 @@ case ":${PATH}:" in
   *":${install_dir}:"*)
     ;;
   *)
-    printf 'Add %s to PATH, for example:\n  echo '\''export PATH="%s:$PATH"'\'' >> ~/.zprofile\n' \
-      "${install_dir}" "${install_dir}"
+    printf 'Add %s to PATH, for example:\n  echo '\''export PATH="%s:$PATH"'\'' >> %s\n' \
+      "${install_dir}" "${install_dir}" "${profile_path}"
     ;;
 esac

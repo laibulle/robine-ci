@@ -45,15 +45,20 @@ defmodule Robine.ReleaseConfigurationTest do
     refute launchd =~ ".escript"
   end
 
-  test "the macOS installer is transparent and verifies the GitHub release digest" do
+  test "the cross-platform installers are transparent and verify GitHub release digests" do
     installer_path = "priv/static/install/rbe.sh"
     installer = File.read!(installer_path)
+    windows_installer = File.read!("priv/static/install/rbe.ps1")
 
     assert {_, 0} = System.cmd("bash", ["-n", installer_path], stderr_to_stdout: true)
     assert "install" in RobineWeb.static_paths()
     assert installer =~ "api.github.com/repos/${repository}/releases/latest"
     assert installer =~ "github.com/${repository}/releases/download/${tag}/${asset_name}"
     assert installer =~ "shasum -a 256"
+    assert installer =~ "sha256sum"
+    assert installer =~ ~s|Darwin)|
+    assert installer =~ ~s|Linux)|
+    assert installer =~ ~s|asset_name="robine-runner-${asset_platform}-multiarch.tar.gz"|
     assert installer =~ "mv -f \"${temporary_destination}\" \"${install_dir}/rbe\""
     assert installer =~ "install_arguments=(install)"
     assert installer =~ "RBE_CONFIG_PATH"
@@ -63,6 +68,14 @@ defmodule Robine.ReleaseConfigurationTest do
     refute installer =~ "base64"
     refute installer =~ "eval"
     refute installer =~ "sudo"
+
+    assert windows_installer =~ "$env:PROCESSOR_ARCHITECTURE"
+    assert windows_installer =~ "robine-runner-windows-multiarch.tar.gz"
+    assert windows_installer =~ "Get-FileHash -Algorithm SHA256"
+    assert windows_installer =~ "Move-Item -LiteralPath $TemporaryDestination"
+    assert windows_installer =~ "Windows service installation is not available yet"
+    refute windows_installer =~ "ROBINE_RUNNER_ENROLLMENT_TOKEN='"
+    refute windows_installer =~ "Start-Service"
   end
 
   test "CI and release builds pin the supported OTP toolchain" do

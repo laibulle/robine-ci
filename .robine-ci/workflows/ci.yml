@@ -81,6 +81,14 @@ jobs:
           fi
 
           exit "${coverage_status}"
+      - name: Verify installer syntax
+        run: |
+          set -euo pipefail
+          bash -n priv/static/install/rbe.sh
+          docker run --rm -i \
+            mcr.microsoft.com/powershell@sha256:042240d57ec9e47e511033b92625a8d95875ee5860af3015992c248b58a8be81 \
+            pwsh -NoProfile -Command '$source = [Console]::In.ReadToEnd(); $tokens = $null; $errors = $null; [System.Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$errors) | Out-Null; if ($errors.Count -gt 0) { $errors | ForEach-Object { Write-Error $_ }; exit 1 }' \
+            < priv/static/install/rbe.ps1
       - name: Verify the Go runner release targets
         run: |
           set -euo pipefail

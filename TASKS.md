@@ -516,6 +516,16 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - [x] Remove the production local-Elixir fallback and Docker socket from Phoenix.
 - [x] Prove Docker/service/built-in parity, restart recovery, cleanup, revocation, and at least 75% Go coverage.
 
+### RUN-304 — Deliver cross-platform runner installation
+
+- **Spec:** [RUN-005](docs/specs/runners/run-005-cross-platform-runner-installation.md)
+- **Depends on:** RUN-302, RUN-303
+- [~] Owner: Codex — implementation is complete; installation on a real Windows host remains to be retained as release evidence.
+- [x] Detect macOS and Linux OS/architecture from one transparent POSIX installer and verify the matching release digest.
+- [x] Install and reconcile an unprivileged systemd user service on Linux without placing credentials in the unit or process arguments.
+- [x] Publish a PowerShell installer for Windows and expose platform-specific commands in Administration → Runners.
+- [x] Prove explicit/default/stale configuration, idempotent service replacement, secret exclusion, and bounded diagnostics on supported service managers.
+
 These items are intentionally unordered and must receive specifications before implementation:
 
 - [x] S3-compatible artifact and cache storage — DATA-002 shipped with MinIO and remote-runner evidence.
@@ -558,6 +568,7 @@ These items are intentionally unordered and must receive specifications before i
 - [ ] Transfer only referenced secrets and the exact digest-verified artifact, reuse cursor-based redacted logs, and guarantee attempt cleanup without deleting persistent volumes. Secret/artifact transfer, safe temporary cleanup, and volume preservation exist; deployment log streaming remains.
 - [ ] Serialize deployments per environment and integrate ordered events, cancellation, lease recovery, remote observation, and capacity explanations. Queue serialization and ordered runner events exist; remote cancellation, lease recovery, observation, and diagnostics remain.
 - [x] Verify successful activation through bounded same-origin Req health and exact-version checks.
+- [~] Owner: Codex — companion convergence and idempotence are verified; the next tagged deployment must retain live upgrade/health evidence.
 - [ ] Require fresh backup evidence for PostgreSQL major upgrades and reject automatic downgrade or unsafe application rollback.
 
 ### DEP-103 — Deliver the deployment experience

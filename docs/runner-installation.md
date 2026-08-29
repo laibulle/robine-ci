@@ -24,7 +24,7 @@ The release artifact is verified by `mix robine.runner_release_smoke`. Do not co
 
 ## Enroll once
 
-In Robine, sign in as an administrator, open **Administration**, and select **Generate enrollment command**. The displayed token expires after 15 minutes, can be consumed once, and is not recoverable from the database. On macOS, the generated one-line command downloads and verifies `rbe`, enrolls the runner, then installs and starts its user LaunchAgent. The public download script never contains a token; the authenticated administration page injects it only into this ephemeral command.
+In Robine, sign in as an administrator, open **Administration**, and select **Generate enrollment command**. The displayed token expires after 15 minutes, can be consumed once, and is not recoverable from the database. On macOS or Linux, the generated POSIX command downloads and verifies `rbe`, enrolls the runner, then installs and starts its user LaunchAgent or systemd user unit. Windows receives a separate PowerShell command and explicit foreground-start guidance until durable Windows service support exists. Public download scripts never contain a token; the authenticated administration page injects it only into an ephemeral command.
 
 Run the displayed command on the trusted worker. The token is accepted only through `ROBINE_RUNNER_ENROLLMENT_TOKEN`; it is intentionally not accepted as a command-line option.
 
@@ -58,9 +58,9 @@ The reverse proxy must support WebSocket upgrade for `/runner/socket/websocket`,
 
 The runner accepts durably acknowledged job offers, downloads attempt-scoped source and secrets, executes Docker jobs, streams redacted logs, supports cancellation, and transfers caches and artifacts through authenticated endpoints. Control frames are bounded, log delivery blocks on socket writes, file responses use 64 KiB chunks, and uploads stream into blob storage under a cumulative 100 MiB transfer limit. Archive validation and extraction still require a bounded in-memory representation on the runner.
 
-## Native macOS runner
+## Cross-platform native runner
 
-The native macOS runner is a self-contained Go executable. It is cross-compiled on Linux without `cgo`; the target Mac does not need Erlang/OTP, Elixir, Go, or mise. The Mac still needs Xcode, its command-line tools, accepted license agreements, and any project-specific Apple SDKs because workflow steps invoke the real Apple toolchain. Docker Desktop is not used by native jobs.
+`rbe` is a self-contained Go executable cross-compiled on Linux without `cgo` for macOS, Linux, and Windows on `arm64` and `amd64`. Target machines do not need Erlang/OTP, Elixir, Go, or mise. A Mac still needs Xcode, its command-line tools, accepted license agreements, and project-specific Apple SDKs because native workflow steps invoke the real Apple toolchain. A Linux Docker executor needs Docker Engine and access to its socket. Windows service reconciliation and release-supported native jobs remain deferred.
 
 Build every release target from a Linux checkout with Go 1.27 or use the checksummed OS-specific payload retained by the tagged Robine release workflow:
 
@@ -89,13 +89,16 @@ Each Robine server exposes its packaged script publicly at `/install/rbe.sh`. To
 curl --proto '=https' --tlsv1.2 -fsSL https://ci.example.com/install/rbe.sh
 ```
 
-The download script resolves the latest GitHub Release, selects `arm64` or `amd64`, verifies the archive
+The POSIX download script resolves the latest GitHub Release, detects Darwin or Linux, selects `arm64` or `amd64`, verifies the matching OS archive
 against the SHA-256 digest returned by the GitHub Releases API, and atomically installs the executable
 as `~/.local/bin/rbe`. If the default config already exists, it invokes `rbe install --server` so the
 config's `server_url` must match the Robine instance that supplied the command. A stale default config
 for another server is printed by server and runner name, then refused before launchd is changed. Set
 `RBE_INSTALL_DIR`, `RBE_CONFIG_PATH`, and `RBE_SERVER_URL` to explicit values for a non-default layout.
-The script never invokes `sudo`, a package manager, an encoded URL, or `eval`.
+The script never invokes `sudo`, a package manager, an encoded URL, or `eval`. Windows exposes the
+equivalent token-free PowerShell installer at `/install/rbe.ps1`; it verifies the release digest and
+binary version before installing `~/.local/bin/rbe.exe` and does not claim foreground execution is a
+durable service.
 The administration page additionally sets `RBE_SKIP_SERVICE_INSTALL=1` in its all-in-one enrollment
 command so no stale service is started between downloading the binary and replacing the config.
 
@@ -112,7 +115,8 @@ ROBINE_RUNNER_ENROLLMENT_TOKEN='replace-once' "$HOME/.local/bin/rbe" enroll \
   --server https://ci.example.com
 ```
 
-`rbe install --config /absolute/path/config.json` preserves that exact path in `ProgramArguments`.
+`rbe install --config /absolute/path/config.json` preserves that exact path in launchd
+`ProgramArguments` or systemd `ExecStart`.
 When `--config` is omitted, only `~/.config/robine-runner/config.json` is considered; it must exist,
 be valid, have mode `0600`, and match the expected `--server`. Before changing launchd, the command
 prints only `server_url`, runner name, and config path. It never prints the runner ID credential or
@@ -151,13 +155,22 @@ jobs:
 
 The `image` field remains required by workflow schema v1 but is not used by native execution. Native execution is not a sandbox and is supported only for trusted repositories. Cache and artifact built-ins use the same attempt-scoped server transfers as Docker jobs. Safe Robine archives reject symbolic links, while application bundles containing frameworks commonly use them; package such bundles as a ZIP, DMG, or PKG before `artifacts/upload`. The initial native executor rejects service containers explicitly.
 
-The CLI validates the config and a protocol-v1 connection before changing launchd. It creates private
+The CLI validates the config and a protocol-v1 connection before changing the platform service. On
+macOS it creates private
 logs under `~/Library/Logs/RobineRunner`, lints the generated plist, stops an already loaded user job,
 terminates only a manually started process whose binary and `--config` arguments match exactly, then
 uses `launchctl bootstrap gui/$(id -u)` and `kickstart`. A different runner process is reported and left
 untouched. After startup it requires one launchd-managed PID with the requested executable/config and
 a protocol-v1 connection message from that same PID. Re-running the command performs the same bounded
 replacement safely without `sudo`.
+
+On Linux the same command creates a private systemd user unit at
+`~/.config/systemd/user/robine-runner.service` and logs under `~/.local/state/robine-runner`. It validates
+the unit with `systemd-analyze verify`, reloads the user manager, enables and restarts the unit, and then
+requires exactly one active PID with the requested binary/config and a protocol-v1 connection. It never
+changes Docker group membership or system linger policy. The runner account must already have Docker
+socket access, and the operator must enable lingering according to host policy when the service must
+survive logout.
 
 After enrollment, inspect the service:
 

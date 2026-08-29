@@ -96,7 +96,93 @@ defmodule Robine.Adapters.Deployments.DockerEnvironmentTest do
     assert postgres.spec_digest != String.duplicate("0", 64)
   end
 
-  defp environment do
+  test "application activation converges one idempotent bundled runner without exposing Docker to Phoenix" do
+    agent = start_supervised!({Agent, fn -> docker_state() end})
+    docker = stateful_docker(agent)
+    digest = String.duplicate("c", 64)
+    release_path = "/opt/robine/releases/#{digest}"
+    environment = environment()
+
+    options = [
+      docker: docker,
+      instance_id: "test-instance",
+      service_roles: [:application],
+      release_path: release_path,
+      artifact_digest: digest
+    ]
+
+    secrets = %{"secret-key-base" => "application-secret"}
+
+    assert {:ok, first} =
+             DockerEnvironment.converge(environment, :application, secrets, options)
+
+    assert Enum.map(first.services, &{&1.role, &1.action}) == [
+             {:application, :created},
+             {:bundled_runner, :created}
+           ]
+
+    assert {:ok, second} =
+             DockerEnvironment.converge(environment, :application, secrets, options)
+
+    assert Enum.map(second.services, &{&1.role, &1.action}) == [
+             {:application, :unchanged},
+             {:bundled_runner, :unchanged}
+           ]
+
+    calls = Agent.get(agent, &Enum.reverse(&1.calls))
+    creates = Enum.filter(calls, &match?(["container", "create" | _rest], &1))
+    assert length(creates) == 2
+
+    server_create = Enum.find(creates, &(option(&1, "--name") == "server"))
+    runner_create = Enum.find(creates, &(option(&1, "--name") == "server-runner"))
+
+    assert "server-runner-bootstrap:/var/lib/robine-runner-bootstrap" in server_create
+    refute Enum.any?(server_create, &String.contains?(&1, "docker.sock"))
+    refute "server-runner-state:/var/lib/robine-runner" in server_create
+
+    assert "#{release_path}:/opt/robine:ro" in runner_create
+    assert "server-runner-bootstrap:/var/lib/robine-runner-bootstrap" in runner_create
+    assert "server-runner-state:/var/lib/robine-runner" in runner_create
+    assert "/var/run/docker.sock:/var/run/docker.sock" in runner_create
+    assert "ROBINE_PUBLIC_URL=https://ci.example.test" in runner_create
+    refute Enum.any?(runner_create, &String.contains?(&1, "secret-key-base"))
+    refute "--env-file" in runner_create
+  end
+
+  test "explicitly disabling bundled capacity removes only the owned companion and preserves volumes" do
+    agent = start_supervised!({Agent, fn -> docker_state() end})
+    docker = stateful_docker(agent)
+    digest = String.duplicate("d", 64)
+
+    options = [
+      docker: docker,
+      instance_id: "test-instance",
+      service_roles: [:application],
+      release_path: "/opt/robine/releases/#{digest}",
+      artifact_digest: digest
+    ]
+
+    secrets = %{"secret-key-base" => "application-secret"}
+
+    assert {:ok, _enabled} =
+             DockerEnvironment.converge(environment(), :application, secrets, options)
+
+    disabled = environment(%{"ROBINE_BUNDLED_RUNNER_ENABLED" => "false"})
+
+    assert {:ok, result} =
+             DockerEnvironment.converge(disabled, :application, secrets, options)
+
+    assert Enum.any?(
+             result.services,
+             &match?(%{role: :bundled_runner, action: :removed}, &1)
+           )
+
+    calls = Agent.get(agent, & &1.calls)
+    assert ["container", "rm", "--force", "server-runner"] in calls
+    refute Enum.any?(calls, &(Enum.take(&1, 2) == ["volume", "rm"]))
+  end
+
+  defp environment(application_environment \\ %{}) do
     {:ok, environment} =
       Environment.new(%{
         id: "environment-1",
@@ -122,6 +208,7 @@ defmodule Robine.Adapters.Deployments.DockerEnvironmentTest do
             role: :application,
             name: "server",
             image: "hexpm/elixir@sha256:#{String.duplicate("b", 64)}",
+            environment: application_environment,
             secret_environment: %{"SECRET_KEY_BASE" => "secret-key-base"},
             healthcheck: %{type: :http, url: "http://server:4000/health"}
           }
@@ -138,5 +225,71 @@ defmodule Robine.Adapters.Deployments.DockerEnvironmentTest do
       "io.robine.instance" => "test-instance",
       "io.robine.environment" => environment.id
     })
+  end
+
+  defp docker_state do
+    %{calls: [], networks: %{}, volumes: %{}, containers: %{}}
+  end
+
+  defp stateful_docker(agent) do
+    fn arguments ->
+      Agent.get_and_update(agent, fn state ->
+        state = update_in(state.calls, &[arguments | &1])
+
+        case arguments do
+          [kind, "inspect" | _rest] when kind in ["network", "volume", "container"] ->
+            collection = String.to_existing_atom(kind <> "s")
+            name = List.last(arguments)
+
+            case get_in(state, [collection, name]) do
+              nil -> {{:error, :not_found}, state}
+              labels -> {{:ok, Jason.encode!(labels)}, state}
+            end
+
+          ["network", "create" | _rest] ->
+            name = List.last(arguments)
+            labels = labels_from(arguments)
+            {{:ok, name}, put_in(state, [:networks, name], labels)}
+
+          ["volume", "create" | _rest] ->
+            name = List.last(arguments)
+            labels = labels_from(arguments)
+            {{:ok, name}, put_in(state, [:volumes, name], labels)}
+
+          ["container", "create" | _rest] ->
+            name = option(arguments, "--name")
+            labels = labels_from(arguments)
+            {{:ok, name}, put_in(state, [:containers, name], labels)}
+
+          ["container", "rm", "--force", name] ->
+            {{:ok, name}, update_in(state.containers, &Map.delete(&1, name))}
+
+          _other ->
+            {{:ok, "ok"}, state}
+        end
+      end)
+    end
+  end
+
+  defp labels_from(arguments) do
+    arguments
+    |> Enum.chunk_every(2, 1, :discard)
+    |> Enum.reduce(%{}, fn
+      ["--label", value], labels ->
+        case String.split(value, "=", parts: 2) do
+          [key, item] -> Map.put(labels, key, item)
+          _invalid -> labels
+        end
+
+      _pair, labels ->
+        labels
+    end)
+  end
+
+  defp option(arguments, name) do
+    case Enum.find_index(arguments, &(&1 == name)) do
+      nil -> nil
+      index -> Enum.at(arguments, index + 1)
+    end
   end
 end

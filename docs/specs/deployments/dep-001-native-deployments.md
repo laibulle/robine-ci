@@ -73,6 +73,7 @@ A self-hosting administrator who has prepared a Linux Docker host and enrolled a
 - **FR-20:** Rollback MUST create a new deployment pointing to a previously retained exact digest. It MUST pass the same approval, activation, audit, serialization, and verification rules as an ordinary deployment.
 - **FR-21:** Cancellation MUST stop pending work and request runner cancellation, but MUST NOT delete persistent volumes or claim remote effects were reversed.
 - **FR-22:** On reconnect or lease expiry, Robine MUST inspect labeled Docker resources and release activation state before deciding whether to resume, verify, or fail. It MUST NOT blindly replay a non-idempotent migration.
+- **FR-23:** When the promoted application is a Robine server with bundled runner capacity enabled, activation MUST derive and converge one internal runner companion from the same release digest. This bounded companion MUST NOT become an operator-defined service role, MUST keep state volumes across application promotion, and MUST be removed only after an explicit disable while preserving those volumes.
 
 ### UX requirements
 
@@ -106,7 +107,7 @@ Persistent services and the application have separate desired digests. A normal 
 
 The deployment lifecycle is durable in PostgreSQL. Each event uses a deployment ID, attempt ID, idempotency token, monotonic sequence, phase, outcome, and safe diagnostic code. If the control plane restarts, the runner continues and resends unacknowledged events. If the runner restarts, reconciliation compares labels, container health, release directories, the `current` link, and the application's reported version. Unknown migration outcomes are terminal and require operator assessment rather than replay.
 
-The first runtime strategy is a packaged OTP release mounted into a pinned runtime container alongside pinned PostgreSQL, optional S3-compatible storage, and pinned ingress containers on an environment-private Docker network. Supporting an application OCI image later requires another strategy, not arbitrary Compose fields.
+The first runtime strategy is a packaged OTP release mounted into a pinned runtime container alongside pinned PostgreSQL, optional S3-compatible storage, and pinned ingress containers on an environment-private Docker network. A Robine application with bundled capacity enabled derives one application-scoped runner companion using a pinned Docker CLI image, the same read-only release, private named state/bootstrap volumes, and the host Docker socket. The application shares only the bootstrap volume. Supporting an application OCI image later requires another strategy, not arbitrary Compose fields.
 
 ## Failure modes and recovery
 

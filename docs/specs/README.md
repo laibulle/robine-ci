@@ -41,6 +41,7 @@ New specifications MUST start from [TEMPLATE.md](TEMPLATE.md). A feature is not 
 |---|---|---|
 | Runners | [RUN-001 remote runner protocol](runners/run-001-remote-runner-protocol.md) | Enrollment, authentication, versioned delivery, and reconnection |
 | Runners | [RUN-004 bundled Go Docker runner](runners/run-004-bundled-go-docker-runner.md) | Server-hosted Go capacity and Docker execution separation |
+| Runners | [RUN-005 cross-platform runner installation](runners/run-005-cross-platform-runner-installation.md) | Verified runner downloads and native service integration across supported platforms |
 | Runners | [RUN-002 runner fleet and scheduling](runners/run-002-runner-fleet-and-scheduling.md) | Labels, capacity matching, lifecycle administration, and autoscaling boundary |
 | Runners | [RUN-003 macOS native runner](runners/run-003-macos-native-runner.md) | Dedicated Darwin host execution for trusted Apple-platform CI |
 | Identity | [IAM-002 scoped API tokens](identity/iam-002-scoped-api-tokens.md) | Instance-global, revocable credentials with narrowly scoped permissions |

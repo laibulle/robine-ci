@@ -132,18 +132,20 @@ requires `Contents: read and write`; approve that updated permission on the inst
 pushing the tag. Release publication is idempotent and provider credentials remain in the control
 plane.
 
-Install the latest native runner on Apple Silicon or Intel macOS as `rbe`:
+Install the latest native runner on macOS or Linux as `rbe`; the script detects the operating system
+and `arm64`/`amd64` architecture:
 
 ```bash
 curl --proto '=https' --tlsv1.2 -fsSL https://ci.example.com/install/rbe.sh | RBE_SERVER_URL='https://ci.example.com' /bin/bash
 $HOME/.local/bin/rbe version
 ```
 
-Every Robine instance serves the token-free installer at `/install/rbe.sh`; Administration → Runners
-generates one ephemeral command that downloads the binary, enrolls it with a single-use token, then
-reconciles the unprivileged launchd service. The installer selects the current architecture and verifies
-the release asset against the SHA-256 digest published by GitHub before atomically replacing
-`~/.local/bin/rbe`. See [remote runner installation](docs/runner-installation.md) for details.
+Every Robine instance serves token-free installers at `/install/rbe.sh` and `/install/rbe.ps1`;
+Administration → Runners generates ephemeral POSIX and PowerShell enrollment commands. On macOS and
+Linux the POSIX journey reconciles an unprivileged launchd or systemd user service. Windows installation
+currently gives explicit foreground-start guidance. Every installer verifies the selected release asset
+against the SHA-256 digest published by GitHub before atomically replacing the executable. See
+[remote runner installation](docs/runner-installation.md) for details.
 
 Set `ROBINE_METRICS_TOKEN` to enable the token-protected Prometheus endpoint at `/metrics`; leave it unset to return 404. Initial alerts and diagnosis procedures are in [the monitoring runbook](docs/operations/monitoring-and-troubleshooting.md).
 

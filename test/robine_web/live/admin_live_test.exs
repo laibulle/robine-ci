@@ -76,9 +76,11 @@ defmodule RobineWeb.AdminLiveTest do
     assert has_element?(view, "a[href='/repositories']", "Trust repositories in Robine")
 
     view |> element("#admin-section-runners") |> render_click()
-    assert has_element?(view, "#runner-macos-installation")
-    assert has_element?(view, "#runner-macos-install-command")
+    assert has_element?(view, "#runner-installation")
+    assert has_element?(view, "#runner-posix-install-command")
+    assert has_element?(view, "#runner-windows-install-command")
     assert render(view) =~ "/install/rbe.sh"
+    assert render(view) =~ "/install/rbe.ps1"
 
     enrollment_html =
       view
@@ -97,6 +99,14 @@ defmodule RobineWeb.AdminLiveTest do
     assert has_element?(view, "#runner-enrollment-command", "--name")
     assert has_element?(view, "#runner-enrollment-command", "--force")
     assert has_element?(view, "#runner-enrollment-command", "scutil --get ComputerName")
+    assert has_element?(view, "#runner-windows-enrollment-command", "rbe.exe")
+
+    assert has_element?(
+             view,
+             "#runner-windows-enrollment-command",
+             "ROBINE_RUNNER_ENROLLMENT_TOKEN="
+           )
+
     refute has_element?(view, "#runner-enrollment-command", "RUNNER_NAME")
 
     stored_enrollment = Repo.one!(RunnerEnrollmentToken)

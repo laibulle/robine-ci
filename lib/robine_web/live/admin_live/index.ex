@@ -190,6 +190,7 @@ defmodule RobineWeb.AdminLive.Index do
         runner_forms: runner_forms(runners),
         retention: retention_projection(),
         runner_installer_url: runner_installer_url(),
+        runner_windows_installer_url: runner_windows_installer_url(),
         runner_enrollment: Map.get(socket.assigns, :runner_enrollment),
         runner_credential: Map.get(socket.assigns, :runner_credential),
         github_setup_step: Map.get(socket.assigns, :github_setup_step, 1),
@@ -207,6 +208,7 @@ defmodule RobineWeb.AdminLive.Index do
           runner_forms: %{},
           retention: retention_projection(),
           runner_installer_url: runner_installer_url(),
+          runner_windows_installer_url: runner_windows_installer_url(),
           runner_enrollment: Map.get(socket.assigns, :runner_enrollment),
           runner_credential: Map.get(socket.assigns, :runner_credential),
           github_setup_step: Map.get(socket.assigns, :github_setup_step, 1),
@@ -233,6 +235,23 @@ defmodule RobineWeb.AdminLive.Index do
   defp runner_installer_url do
     public_url = Application.fetch_env!(:robine, :public_url) |> String.trim_trailing("/")
     public_url <> "/install/rbe.sh"
+  end
+
+  defp runner_windows_installer_url do
+    public_url = Application.fetch_env!(:robine, :public_url) |> String.trim_trailing("/")
+    public_url <> "/install/rbe.ps1"
+  end
+
+  defp windows_enrollment_command(enrollment) do
+    public_url = Application.fetch_env!(:robine, :public_url)
+
+    "$env:RBE_SERVER_URL='#{public_url}'; irm '#{runner_windows_installer_url()}' | iex; " <>
+      "$env:ROBINE_RUNNER_ENROLLMENT_TOKEN='#{enrollment.token}'; " <>
+      "try { & \"$HOME\\.local\\bin\\rbe.exe\" enroll --server '#{public_url}' " <>
+      "--name $env:COMPUTERNAME --config \"$HOME\\.config\\robine-runner\\config.json\" --force; " <>
+      "$enrollStatus=$LASTEXITCODE } finally { Remove-Item Env:ROBINE_RUNNER_ENROLLMENT_TOKEN }; " <>
+      "if ($enrollStatus -ne 0) { exit $enrollStatus }; " <>
+      "& \"$HOME\\.local\\bin\\rbe.exe\" start --config \"$HOME\\.config\\robine-runner\\config.json\""
   end
 
   defp github_setup_projection(health) do
@@ -540,7 +559,7 @@ defmodule RobineWeb.AdminLive.Index do
         </section>
         <section :if={@admin_section == "runners"} class="surface-panel rounded-2xl p-6">
           <div
-            id="runner-macos-installation"
+            id="runner-installation"
             class="rounded-2xl border border-base-300 bg-base-200/40 p-4"
           >
             <div class="flex items-start gap-3">
@@ -548,16 +567,26 @@ defmodule RobineWeb.AdminLive.Index do
                 <.icon name="hero-arrow-down-tray" class="size-5" />
               </span>
               <div class="min-w-0 flex-1">
-                <h2 class="text-lg font-semibold">Install rbe on macOS</h2>
+                <h2 class="text-lg font-semibold">Install rbe</h2>
                 <p class="mt-1 text-sm leading-6 text-base-content/60">
-                  Paste this command into Terminal. Robine selects Apple Silicon or Intel, verifies the GitHub Release SHA-256, installs
+                  Robine detects macOS or Linux and the host architecture, verifies the GitHub Release SHA-256, installs
                   <code>rbe</code>
-                  and safely reconciles an existing runner configuration without Homebrew or sudo.
+                  and safely reconciles launchd or a systemd user service without a package manager. Windows uses the verified PowerShell installer below.
+                </p>
+                <p class="mt-3 text-xs font-bold uppercase tracking-[0.14em] text-base-content/45">
+                  macOS or Linux
                 </p>
                 <pre
-                  id="runner-macos-install-command"
+                  id="runner-posix-install-command"
                   class="mt-3 overflow-x-auto whitespace-pre-wrap break-all rounded-xl bg-base-300 p-3 text-xs"
                 ><code>curl --proto '=https' --tlsv1.2 -fsSL '{@runner_installer_url}' | RBE_SERVER_URL='{Application.fetch_env!(:robine, :public_url)}' /bin/bash</code></pre>
+                <p class="mt-4 text-xs font-bold uppercase tracking-[0.14em] text-base-content/45">
+                  Windows PowerShell
+                </p>
+                <pre
+                  id="runner-windows-install-command"
+                  class="mt-3 overflow-x-auto whitespace-pre-wrap break-all rounded-xl bg-base-300 p-3 text-xs"
+                ><code>$env:RBE_SERVER_URL='{Application.fetch_env!(:robine, :public_url)}'; irm '{@runner_windows_installer_url}' | iex</code></pre>
               </div>
             </div>
           </div>
@@ -565,7 +594,7 @@ defmodule RobineWeb.AdminLive.Index do
             <div>
               <h2 class="text-xl font-semibold">Remote runner enrollment</h2>
               <p class="mt-1 max-w-3xl text-sm text-base-content/60">
-                Generate a single-use token valid for 15 minutes. The one-time command installs <code>rbe</code>, enrolls this Mac, then starts its launchd service.
+                Generate a single-use token valid for 15 minutes. The one-time command installs <code>rbe</code>, enrolls this host, then starts launchd or systemd where supported; Windows remains in the foreground.
               </p>
             </div>
             <button
@@ -585,7 +614,7 @@ defmodule RobineWeb.AdminLive.Index do
           >
             <p class="font-semibold">Copy this command now</p>
             <p class="mt-1 text-sm text-base-content/70">
-              Run it unchanged on the trusted Mac. Its computer name becomes the runner name, and
+              Run the command for the trusted host. Its host name becomes the runner name, and
               any config at the standard path is explicitly replaced. The token expires at {DateTime.to_iso8601(
                 @runner_enrollment.expires_at
               )}.
@@ -594,6 +623,13 @@ defmodule RobineWeb.AdminLive.Index do
               id="runner-enrollment-command"
               class="mt-3 overflow-x-auto whitespace-pre-wrap break-all rounded-xl bg-base-300 p-3 text-xs"
             ><code>curl --proto '=https' --tlsv1.2 -fsSL '{@runner_installer_url}' | RBE_SERVER_URL='{Application.fetch_env!(:robine, :public_url)}' RBE_SKIP_SERVICE_INSTALL=1 /bin/bash &amp;&amp; ROBINE_RUNNER_ENROLLMENT_TOKEN='{@runner_enrollment.token}' "$HOME/.local/bin/rbe" enroll --server '{Application.fetch_env!(:robine, :public_url)}' --name "$(scutil --get ComputerName 2&gt;/dev/null || hostname -s)" --config "$HOME/.config/robine-runner/config.json" --force &amp;&amp; "$HOME/.local/bin/rbe" install --config "$HOME/.config/robine-runner/config.json" --server '{Application.fetch_env!(:robine, :public_url)}'</code></pre>
+            <p class="mt-4 text-xs font-bold uppercase tracking-[0.14em] text-base-content/45">
+              Windows PowerShell
+            </p>
+            <pre
+              id="runner-windows-enrollment-command"
+              class="mt-3 overflow-x-auto whitespace-pre-wrap break-all rounded-xl bg-base-300 p-3 text-xs"
+            ><code>{windows_enrollment_command(@runner_enrollment)}</code></pre>
           </div>
         </section>
         <section

@@ -68,32 +68,23 @@ func NewInstaller(stdout io.Writer, probe ProbeFunc) (Installer, error) {
 }
 
 func (i Installer) Install(ctx context.Context, options config.InstallOptions) error {
-	if i.Platform != "darwin" {
-		return errors.New("launchd installation is supported only on macOS")
+	switch i.Platform {
+	case "darwin":
+		return i.installLaunchd(ctx, options)
+	case "linux":
+		return i.installSystemd(ctx, options)
+	default:
+		return fmt.Errorf("service installation is unsupported on %s", i.Platform)
 	}
+}
+
+func (i Installer) installLaunchd(ctx context.Context, options config.InstallOptions) error {
 	if i.Stdout == nil || i.Commands == nil || i.Probe == nil || i.Sleep == nil || i.VerifyConnectionLog == nil {
 		return errors.New("launchd installer dependencies are incomplete")
 	}
-	configPath := options.ConfigPath
-	if !options.ConfigExplicit {
-		configPath = filepath.Join(i.HomeDir, ".config", "robine-runner", "config.json")
-	}
-	if !filepath.IsAbs(configPath) {
-		return errors.New("runner config path must be absolute")
-	}
-	cfg, err := config.Load(configPath)
+	configPath, cfg, err := i.loadConfiguration(ctx, options)
 	if err != nil {
-		return fmt.Errorf("runner config %s is invalid: %w", configPath, err)
-	}
-	fmt.Fprintf(i.Stdout, "Runner configuration:\n  server_url: %s\n  name: %s\n  config: %s\n", cfg.ServerURL, cfg.Name, configPath)
-	if options.ExpectedServerURL != "" && !config.SameServer(cfg.ServerURL, options.ExpectedServerURL) {
-		return fmt.Errorf("runner config belongs to %s, not requested server %s; pass --config with the intended runner configuration", cfg.ServerURL, options.ExpectedServerURL)
-	}
-	if !options.ConfigExplicit && options.ExpectedServerURL == "" {
-		return errors.New("refusing to install the default config without an expected server; pass --server or an explicit --config")
-	}
-	if err := i.Probe(ctx, cfg); err != nil {
-		return fmt.Errorf("runner connection check failed: %w", err)
+		return err
 	}
 
 	paths := i.paths()
@@ -154,6 +145,31 @@ func (i Installer) Install(ctx context.Context, options config.InstallOptions) e
 	}
 	fmt.Fprintf(i.Stdout, "Installed and started %s with PID %d.\n", serviceLabel, pid)
 	return nil
+}
+
+func (i Installer) loadConfiguration(ctx context.Context, options config.InstallOptions) (string, config.Config, error) {
+	configPath := options.ConfigPath
+	if !options.ConfigExplicit {
+		configPath = filepath.Join(i.HomeDir, ".config", "robine-runner", "config.json")
+	}
+	if !filepath.IsAbs(configPath) {
+		return "", config.Config{}, errors.New("runner config path must be absolute")
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		return "", config.Config{}, fmt.Errorf("runner config %s is invalid: %w", configPath, err)
+	}
+	fmt.Fprintf(i.Stdout, "Runner configuration:\n  server_url: %s\n  name: %s\n  config: %s\n", cfg.ServerURL, cfg.Name, configPath)
+	if options.ExpectedServerURL != "" && !config.SameServer(cfg.ServerURL, options.ExpectedServerURL) {
+		return "", config.Config{}, fmt.Errorf("runner config belongs to %s, not requested server %s; pass --config with the intended runner configuration", cfg.ServerURL, options.ExpectedServerURL)
+	}
+	if !options.ConfigExplicit && options.ExpectedServerURL == "" {
+		return "", config.Config{}, errors.New("refusing to install the default config without an expected server; pass --server or an explicit --config")
+	}
+	if err := i.Probe(ctx, cfg); err != nil {
+		return "", config.Config{}, fmt.Errorf("runner connection check failed: %w", err)
+	}
+	return configPath, cfg, nil
 }
 
 type installationPaths struct {

@@ -54,6 +54,7 @@ A self-hosting operator who installs one Robine server and expects it to provide
 - **FR-6:** Operators MUST be able to disable bundled capacity explicitly. Existing remote runners MUST continue to use the same scheduling contract.
 - **FR-7:** The server release MUST contain the matching Linux `rbe` binary and Compose MUST run it as a separate service with the Docker socket mounted only into that service.
 - **FR-8:** A revoked or missing bundled credential MUST require a new single-use bootstrap exchange; it MUST NOT silently create an unrestricted identity.
+- **FR-9:** Native deployment of a Robine server artifact with bundled capacity enabled MUST converge the application-scoped runner companion, its private state and bootstrap volumes, and the shared release mount. The application container MUST receive only the bootstrap volume; only the runner companion MAY receive the Docker socket.
 
 ### UX requirements
 
@@ -77,7 +78,7 @@ Phoenix writes a generated single-use enrollment token atomically to a private s
 
 `rbe` selects its executor from explicit config. Darwin defaults to native; the bundled Linux config uses Docker. Docker effects use argument vectors through the installed Docker CLI. Repository commands run only inside the job container. The control plane retains the existing normalized execution document and attempt-scoped transfer endpoints.
 
-The scheduler retains an explicit development/test fallback during migration, but production bundled mode treats missing compatible runner capacity as queued capacity rather than executing in Phoenix. After parity evidence, the production Compose bundle removes the Docker socket from `server` and the Elixir Docker adapter is no longer reachable from server dispatch.
+The scheduler retains an explicit development/test fallback during migration, but production bundled mode treats missing compatible runner capacity as queued capacity rather than executing in Phoenix. After parity evidence, the production Compose bundle removes the Docker socket from `server` and the Elixir Docker adapter is no longer reachable from server dispatch. Native application deployment derives the same companion from the immutable application artifact and converges it as part of application activation; it does not import Compose or expose a general-purpose service role.
 
 ## Failure modes and recovery
 
@@ -107,6 +108,7 @@ Expose bundled bootstrap state, runner connectivity, Docker readiness, active at
 - [x] With bundled mode enabled and the runner offline, a compatible job remains queued and never executes in the BEAM.
 - [x] Revocation and rebootstrap create a new credential without exposing either secret.
 - [x] Go tests and real Docker integration tests pass with aggregate coverage at or above 75%.
+- [ ] A native application deployment upgrades an existing server without a companion, creates one healthy Linux runner, and remains idempotent on redeploy.
 
 ## Open questions
 
