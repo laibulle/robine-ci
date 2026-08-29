@@ -185,7 +185,12 @@ defmodule RobineWeb.AdminLiveTest do
                runner_context
              )
 
-    assert {:ok, view, _html} = live(conn, ~p"/admin?section=runners")
+    assert {:ok, view, _html} = live(conn, ~p"/admin")
+    refute has_element?(view, "#runner-fleet")
+
+    view |> element("#admin-section-runners") |> render_click()
+    assert_patch(view, "/admin?section=runners")
+    assert has_element?(view, "#runner-settings-#{identity.runner_id}")
     assert has_element?(view, "#runner-form-#{identity.runner_id}")
     assert has_element?(view, "#runner-state-#{identity.runner_id}", "Drain")
 
@@ -225,6 +230,7 @@ defmodule RobineWeb.AdminLiveTest do
            ).admin_state == :revoked
 
     refute has_element?(view, "#runner-form-#{identity.runner_id}")
+    assert has_element?(view, "#runner-fleet", "Revoked identity retained for audit history")
   end
 
   defp signed_in_conn(conn) do

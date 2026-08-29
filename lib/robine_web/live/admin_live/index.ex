@@ -10,7 +10,15 @@ defmodule RobineWeb.AdminLive.Index do
   @impl true
   def handle_params(params, _uri, socket) do
     section = if params["section"] in @sections, do: params["section"], else: "overview"
-    {:noreply, assign(socket, :admin_section, section)}
+
+    socket = assign(socket, :admin_section, section)
+
+    socket =
+      if connected?(socket) and section == "runners",
+        do: load_runner_section(socket),
+        else: socket
+
+    {:noreply, socket}
   end
 
   @impl true
@@ -188,6 +196,7 @@ defmodule RobineWeb.AdminLive.Index do
         users: users,
         oidc: oidc,
         runner_forms: runner_forms(runners),
+        runner_count: length(runners),
         retention: retention_projection(),
         runner_installer_url: runner_installer_url(),
         runner_windows_installer_url: runner_windows_installer_url(),
@@ -206,6 +215,7 @@ defmodule RobineWeb.AdminLive.Index do
           users: [],
           oidc: %{enabled: false, preflight: {:error, reason}},
           runner_forms: %{},
+          runner_count: 0,
           retention: retention_projection(),
           runner_installer_url: runner_installer_url(),
           runner_windows_installer_url: runner_windows_installer_url(),
@@ -229,6 +239,23 @@ defmodule RobineWeb.AdminLive.Index do
       {:error, _reason} ->
         health = %{status: :not_ready, checks: %{}}
         assign(socket, health: health, github_setup: github_setup_projection(health))
+    end
+  end
+
+  defp load_runner_section(socket) do
+    with {:ok, runners} <- Runners.list_fleet(%{}, socket.assigns.execution_context),
+         {:ok, autoscaling} <-
+           Autoscaling.fleet_capacity(%{}, socket.assigns.execution_context) do
+      socket
+      |> assign(runner_forms: runner_forms(runners), runner_count: length(runners))
+      |> stream(:runners, runners, reset: true)
+      |> stream(:autoscaling_policies, autoscaling, reset: true)
+    else
+      {:error, _reason} ->
+        socket
+        |> assign(runner_forms: %{}, runner_count: 0)
+        |> stream(:runners, [], reset: true)
+        |> stream(:autoscaling_policies, [], reset: true)
     end
   end
 
@@ -339,6 +366,39 @@ defmodule RobineWeb.AdminLive.Index do
       {runner.id, form}
     end)
   end
+
+  defp runner_online?(runner), do: runner.connectivity in [:online, "online"]
+
+  defp runner_platform(runner) do
+    capabilities = runner.capabilities
+
+    [
+      Map.get(capabilities, "os"),
+      Map.get(capabilities, "architecture"),
+      Map.get(capabilities, "executor")
+    ]
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.map_join(" · ", &(&1 |> to_string() |> String.capitalize()))
+    |> case do
+      "" -> "Capabilities pending"
+      platform -> platform
+    end
+  end
+
+  defp runner_capability_tags(capabilities) do
+    capabilities
+    |> Enum.reject(fn {key, value} ->
+      key in ~w(os architecture executor concurrency) or value in [false, nil, ""]
+    end)
+    |> Enum.map(fn
+      {key, true} -> String.replace(key, "_", " ")
+      {key, value} -> "#{String.replace(key, "_", " ")}: #{value}"
+    end)
+    |> Enum.sort()
+  end
+
+  defp runner_last_seen(nil), do: "No heartbeat yet"
+  defp runner_last_seen(last_seen_at), do: Calendar.strftime(last_seen_at, "%b %d, %H:%M UTC")
 
   @impl true
   def render(assigns) do
@@ -454,106 +514,235 @@ defmodule RobineWeb.AdminLive.Index do
             </article>
           </div>
         </section>
-        <section :if={@admin_section == "runners"} class="surface-panel rounded-2xl p-6">
-          <div>
-            <p class="text-sm font-semibold uppercase tracking-[0.16em] text-primary">Fleet</p>
-            <h2 class="mt-1 text-xl font-semibold">Remote runners</h2>
-            <p class="mt-1 max-w-3xl text-sm text-base-content/60">
-              Operator labels are separate from machine-reported capabilities. Draining preserves active work and prevents new assignments.
-            </p>
+        <section
+          :if={@admin_section == "runners"}
+          class="surface-panel overflow-hidden rounded-2xl"
+        >
+          <div class="flex flex-wrap items-start justify-between gap-4 border-b border-base-300/70 p-5 sm:p-6">
+            <div>
+              <p class="text-sm font-semibold uppercase tracking-[0.16em] text-primary">Fleet</p>
+              <h2 class="mt-1 text-xl font-semibold">Remote runners</h2>
+              <p class="mt-1 max-w-3xl text-sm text-base-content/60">
+                Live capacity, machine capabilities and operator controls in one place.
+              </p>
+            </div>
+            <span class="rounded-full border border-base-300 bg-base-200/60 px-3 py-1.5 text-xs font-bold text-base-content/55">
+              {@runner_count} {if @runner_count == 1, do: "machine", else: "machines"}
+            </span>
           </div>
           <div
             :if={@runner_credential}
             id="runner-credential-result"
             role="status"
-            class="mt-5 rounded-2xl border border-warning/40 bg-warning/10 p-4"
+            class="m-5 rounded-2xl border border-warning/40 bg-warning/10 p-4 sm:m-6"
           >
             <p class="font-semibold">Copy the replacement credential now</p>
             <code class="mt-2 block break-all rounded-xl bg-base-300 p-3 text-xs">{@runner_credential.credential}</code>
           </div>
-          <div id="runner-fleet" phx-update="stream" class="mt-6 grid gap-4">
+          <div id="runner-fleet" phx-update="stream" class="grid gap-3 p-3 sm:p-4">
             <p
               id="runner-fleet-empty"
-              class="hidden rounded-2xl border border-dashed border-base-300 p-6 text-sm text-base-content/60 only:block"
+              class="hidden rounded-2xl border border-dashed border-base-300 p-8 text-center text-sm text-base-content/60 only:block"
             >
               No remote runner is enrolled yet.
             </p>
             <article
               :for={{dom_id, runner} <- @streams.runners}
               id={dom_id}
-              class="rounded-2xl border border-base-300 p-5 transition hover:border-primary/40"
+              class={[
+                "group relative overflow-hidden rounded-2xl border bg-base-100 transition duration-200",
+                runner.admin_state == :revoked && "border-base-300/60 opacity-70",
+                runner.admin_state != :revoked && runner_online?(runner) &&
+                  "border-success/30 hover:-translate-y-0.5 hover:border-success/50 hover:shadow-panel",
+                runner.admin_state != :revoked && !runner_online?(runner) &&
+                  "border-base-300 hover:-translate-y-0.5 hover:border-primary/35 hover:shadow-panel"
+              ]}
             >
-              <div class="flex flex-wrap items-start justify-between gap-4">
-                <div>
-                  <div class="flex flex-wrap items-center gap-2">
-                    <h3 class="font-semibold">{runner.name}</h3>
-                    <span class="badge badge-outline">{runner.admin_state}</span>
-                    <span class="badge badge-ghost">{runner.connectivity}</span>
+              <span class={[
+                "absolute inset-y-0 left-0 w-1",
+                runner.admin_state == :revoked && "bg-base-300",
+                runner.admin_state != :revoked && runner_online?(runner) && "bg-success",
+                runner.admin_state != :revoked && !runner_online?(runner) && "bg-warning"
+              ]}></span>
+              <div class="p-5 pl-6 sm:p-6 sm:pl-7">
+                <div class="flex flex-wrap items-start justify-between gap-4">
+                  <div class="flex min-w-0 items-center gap-3.5">
+                    <span class={[
+                      "grid size-11 shrink-0 place-items-center rounded-2xl border",
+                      runner_online?(runner) && runner.admin_state != :revoked &&
+                        "border-success/25 bg-success/10 text-success",
+                      (!runner_online?(runner) or runner.admin_state == :revoked) &&
+                        "border-base-300 bg-base-200/70 text-base-content/45"
+                    ]}>
+                      <.icon name="hero-command-line" class="size-5" />
+                    </span>
+                    <div class="min-w-0">
+                      <div class="flex flex-wrap items-center gap-2">
+                        <h3 class="truncate text-base font-extrabold">{runner.name}</h3>
+                        <span
+                          :if={runner.admin_state != :enabled}
+                          class={[
+                            "badge badge-sm font-bold",
+                            runner.admin_state == :revoked && "badge-ghost",
+                            runner.admin_state == :draining && "badge-warning"
+                          ]}
+                        >{runner.admin_state}</span>
+                      </div>
+                      <p class="mt-0.5 text-xs font-medium text-base-content/45">
+                        {runner_platform(runner)}
+                      </p>
+                    </div>
                   </div>
-                  <p class="mt-2 text-xs text-base-content/55">
-                    {runner.software_version || "version unknown"} · {runner.active_attempts}/{runner.concurrency} slots active · last heartbeat {if runner.last_seen_at,
-                      do: DateTime.to_iso8601(runner.last_seen_at),
-                      else: "never"}
-                  </p>
-                  <div class="mt-3 flex flex-wrap gap-2">
-                    <span :for={label <- runner.labels} class="badge badge-primary badge-outline">{label}</span>
-                    <span :for={{key, value} <- runner.capabilities} class="badge badge-ghost">{key}: {to_string(
-                      value
-                    )}</span>
-                  </div>
+                  <span class={[
+                    "inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-extrabold",
+                    runner_online?(runner) && runner.admin_state != :revoked &&
+                      "bg-success/10 text-success",
+                    (!runner_online?(runner) or runner.admin_state == :revoked) &&
+                      "bg-base-200 text-base-content/45"
+                  ]}>
+                    <span class={[
+                      "size-1.5 rounded-full",
+                      runner_online?(runner) && runner.admin_state != :revoked && "bg-success",
+                      (!runner_online?(runner) or runner.admin_state == :revoked) &&
+                        "bg-base-content/30"
+                    ]}></span>
+                    {runner.connectivity}
+                  </span>
                 </div>
-                <div :if={runner.admin_state != :revoked} class="flex flex-wrap items-center gap-2">
-                  <button
-                    id={"runner-state-#{runner.id}"}
-                    phx-click="set-runner-state"
-                    phx-value-runner_id={runner.id}
-                    phx-value-state={
-                      if runner.admin_state == :draining, do: "enabled", else: "draining"
-                    }
-                    class="btn btn-outline btn-sm"
-                  >
-                    {if runner.admin_state == :draining, do: "Enable", else: "Drain"}
-                  </button>
-                  <div
-                    class="ml-1 flex gap-2 border-l border-error/25 pl-3"
-                    aria-label="Sensitive runner actions"
-                  >
-                    <button
-                      id={"rotate-runner-#{runner.id}"}
-                      phx-click="rotate-runner"
-                      phx-value-runner_id={runner.id}
-                      data-confirm="Rotate this credential? The previous credential remains valid for five minutes."
-                      class="btn btn-outline btn-sm"
-                    >
-                      Rotate credential
-                    </button>
-                    <button
-                      id={"revoke-runner-#{runner.id}"}
-                      phx-click="revoke-runner"
-                      phx-value-runner_id={runner.id}
-                      data-confirm="Revoke this runner immediately? It will be disconnected and cannot authenticate again."
-                      class="btn btn-error btn-outline btn-sm"
-                    >
-                      Revoke
-                    </button>
+
+                <dl class="mt-5 grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-base-300/70 bg-base-300/70 sm:grid-cols-3">
+                  <div class="bg-base-100 px-4 py-3">
+                    <dt class="text-[0.65rem] font-bold uppercase tracking-[0.12em] text-base-content/35">
+                      Capacity
+                    </dt>
+                    <dd class="mt-1 text-sm font-extrabold">
+                      {runner.active_attempts}/{runner.concurrency}
+                      <span class="font-medium text-base-content/40">active</span>
+                    </dd>
                   </div>
+                  <div class="bg-base-100 px-4 py-3">
+                    <dt class="text-[0.65rem] font-bold uppercase tracking-[0.12em] text-base-content/35">
+                      Runner version
+                    </dt>
+                    <dd class="mt-1 truncate text-sm font-extrabold">
+                      {runner.software_version || "Unknown"}
+                    </dd>
+                  </div>
+                  <div class="col-span-2 bg-base-100 px-4 py-3 sm:col-span-1">
+                    <dt class="text-[0.65rem] font-bold uppercase tracking-[0.12em] text-base-content/35">
+                      Last seen
+                    </dt>
+                    <dd
+                      class="mt-1 truncate text-sm font-extrabold"
+                      title={runner.last_seen_at && DateTime.to_iso8601(runner.last_seen_at)}
+                    >
+                      {runner_last_seen(runner.last_seen_at)}
+                    </dd>
+                  </div>
+                </dl>
+
+                <div
+                  :if={runner.labels != [] or runner_capability_tags(runner.capabilities) != []}
+                  class="mt-4 flex flex-wrap gap-2"
+                >
+                  <span
+                    :for={label <- runner.labels}
+                    class="inline-flex items-center gap-1.5 rounded-lg border border-primary/20 bg-primary/5 px-2.5 py-1 text-xs font-bold text-primary"
+                  >
+                    <.icon name="hero-tag" class="size-3" />{label}
+                  </span>
+                  <span
+                    :for={capability <- runner_capability_tags(runner.capabilities)}
+                    class="rounded-lg bg-base-200/80 px-2.5 py-1 text-xs font-semibold text-base-content/55"
+                  >
+                    {capability}
+                  </span>
                 </div>
               </div>
-              <.form
+
+              <details
                 :if={runner.admin_state != :revoked}
-                for={@runner_forms[runner.id]}
-                id={"runner-form-#{runner.id}"}
-                phx-submit="update-runner"
-                class="mt-5 grid gap-3 md:grid-cols-[1fr_2fr_auto] md:items-end"
+                id={"runner-settings-#{runner.id}"}
+                class="group/settings border-t border-base-300/70 bg-base-200/20"
               >
-                <.input field={@runner_forms[runner.id][:runner_id]} type="hidden" />
-                <.input field={@runner_forms[runner.id][:name]} label="Display name" required />
-                <.input
-                  field={@runner_forms[runner.id][:labels]}
-                  label="Operator labels (comma-separated)"
-                />
-                <button class="btn btn-primary" phx-disable-with="Saving…">Save</button>
-              </.form>
+                <summary class="flex cursor-pointer list-none items-center justify-between gap-3 px-5 py-3 text-xs font-bold text-base-content/55 transition hover:bg-base-200/60 hover:text-base-content sm:px-6">
+                  <span class="flex items-center gap-2">
+                    <.icon name="hero-adjustments-horizontal" class="size-4" /> Configure runner
+                  </span>
+                  <.icon
+                    name="hero-chevron-down"
+                    class="size-4 transition group-open/settings:rotate-180"
+                  />
+                </summary>
+                <div class="border-t border-base-300/70 p-5 sm:p-6">
+                  <.form
+                    for={@runner_forms[runner.id]}
+                    id={"runner-form-#{runner.id}"}
+                    phx-submit="update-runner"
+                    class="grid gap-3 md:grid-cols-[minmax(12rem,0.8fr)_minmax(16rem,1.5fr)_auto] md:items-end"
+                  >
+                    <.input field={@runner_forms[runner.id][:runner_id]} type="hidden" />
+                    <.input field={@runner_forms[runner.id][:name]} label="Display name" required />
+                    <.input
+                      field={@runner_forms[runner.id][:labels]}
+                      label="Operator labels"
+                      placeholder="gpu, eu-west"
+                    />
+                    <button class="btn btn-primary" phx-disable-with="Saving…">Save changes</button>
+                  </.form>
+
+                  <div class="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-base-300/70 pt-5">
+                    <div>
+                      <p class="text-xs font-bold">Lifecycle controls</p>
+                      <p class="mt-0.5 text-xs text-base-content/45">
+                        Draining finishes active work before stopping new assignments.
+                      </p>
+                    </div>
+                    <div
+                      class="flex flex-wrap items-center gap-2"
+                      aria-label="Sensitive runner actions"
+                    >
+                      <button
+                        id={"runner-state-#{runner.id}"}
+                        phx-click="set-runner-state"
+                        phx-value-runner_id={runner.id}
+                        phx-value-state={
+                          if runner.admin_state == :draining, do: "enabled", else: "draining"
+                        }
+                        class="btn btn-outline btn-sm"
+                      >
+                        {if runner.admin_state == :draining, do: "Enable", else: "Drain"}
+                      </button>
+                      <button
+                        id={"rotate-runner-#{runner.id}"}
+                        phx-click="rotate-runner"
+                        phx-value-runner_id={runner.id}
+                        data-confirm="Rotate this credential? The previous credential remains valid for five minutes."
+                        class="btn btn-outline btn-sm"
+                      >
+                        Rotate credential
+                      </button>
+                      <button
+                        id={"revoke-runner-#{runner.id}"}
+                        phx-click="revoke-runner"
+                        phx-value-runner_id={runner.id}
+                        data-confirm="Revoke this runner immediately? It will be disconnected and cannot authenticate again."
+                        class="btn btn-error btn-outline btn-sm"
+                      >
+                        Revoke
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </details>
+
+              <div
+                :if={runner.admin_state == :revoked}
+                class="flex items-center gap-2 border-t border-base-300/70 bg-base-200/20 px-5 py-3 text-xs text-base-content/45 sm:px-6"
+              >
+                <.icon name="hero-archive-box" class="size-4" />
+                Revoked identity retained for audit history
+              </div>
             </article>
           </div>
         </section>
