@@ -2,13 +2,17 @@ package runner
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"runtime"
 	"strconv"
 	"strings"
@@ -29,6 +33,12 @@ type channelHandler interface {
 	HandleEvent(context.Context, string, json.RawMessage)
 	HandleHeartbeat(map[string]any)
 }
+
+type probeHandler struct{}
+
+func (probeHandler) ActiveAttemptIDs() []string                           { return nil }
+func (probeHandler) HandleEvent(context.Context, string, json.RawMessage) {}
+func (probeHandler) HandleHeartbeat(map[string]any)                       {}
 
 type channelClient struct {
 	config  config.Config
@@ -78,29 +88,13 @@ func (c *channelClient) Run(ctx context.Context) error {
 }
 
 func (c *channelClient) runSession(ctx context.Context) error {
-	socketURL, err := websocketURL(c.config.ServerURL)
+	conn, err := c.openSession(ctx)
 	if err != nil {
-		return err
-	}
-	headers := http.Header{}
-	headers.Set("X-Robine-Runner-Id", c.config.RunnerID)
-	headers.Set("X-Robine-Runner-Credential", c.config.Credential)
-	dialer := websocket.Dialer{HandshakeTimeout: 30 * time.Second, Proxy: http.ProxyFromEnvironment}
-	conn, response, err := dialer.DialContext(ctx, socketURL, headers)
-	if err != nil {
-		if response != nil {
-			return fmt.Errorf("websocket handshake HTTP %d: %w", response.StatusCode, err)
-		}
-		return fmt.Errorf("websocket handshake: %w", err)
-	}
-	conn.SetReadLimit(maxControlMessage)
-	if err := c.join(ctx, conn); err != nil {
-		conn.Close()
 		return err
 	}
 	c.connect(conn)
 	defer c.disconnect(conn)
-	log.Printf("runner connected with protocol v1 as %s", c.config.RunnerID)
+	log.Printf("runner connected with protocol v1 as %s pid=%d", c.config.RunnerID, os.Getpid())
 	closed := make(chan struct{})
 	defer close(closed)
 	go func() {
@@ -130,6 +124,71 @@ func (c *channelClient) runSession(ctx context.Context) error {
 			return err
 		}
 	}
+}
+
+func (c *channelClient) openSession(ctx context.Context) (*websocket.Conn, error) {
+	socketURL, err := websocketURL(c.config.ServerURL)
+	if err != nil {
+		return nil, err
+	}
+	headers := http.Header{}
+	headers.Set("X-Robine-Runner-Id", c.config.RunnerID)
+	headers.Set("X-Robine-Runner-Credential", c.config.Credential)
+	dialer := websocket.Dialer{HandshakeTimeout: 30 * time.Second, Proxy: http.ProxyFromEnvironment}
+	conn, response, err := dialer.DialContext(ctx, socketURL, headers)
+	if err != nil {
+		if response != nil {
+			_ = response.Body.Close()
+			return nil, classifyHTTPConnectionError(response.StatusCode)
+		}
+		return nil, classifyNetworkError(err)
+	}
+	conn.SetReadLimit(maxControlMessage)
+	if err := c.join(ctx, conn); err != nil {
+		conn.Close()
+		if strings.Contains(strings.ToLower(err.Error()), "auth") || strings.Contains(strings.ToLower(err.Error()), "unauthorized") {
+			return nil, errors.New("authentication failed during runner protocol negotiation")
+		}
+		return nil, err
+	}
+	return conn, nil
+}
+
+func Probe(ctx context.Context, cfg config.Config, version string) error {
+	client := newChannelClient(cfg, version, probeHandler{})
+	conn, err := client.openSession(ctx)
+	if err != nil {
+		return err
+	}
+	_ = conn.Close()
+	return nil
+}
+
+func classifyHTTPConnectionError(status int) error {
+	switch status {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return fmt.Errorf("authentication failed with HTTP %d", status)
+	case http.StatusBadGateway:
+		return errors.New("upstream returned HTTP 502 Bad Gateway")
+	default:
+		return fmt.Errorf("runner websocket returned HTTP %d", status)
+	}
+}
+
+func classifyNetworkError(err error) error {
+	var dnsError *net.DNSError
+	if errors.As(err, &dnsError) {
+		return fmt.Errorf("DNS resolution failed: %w", dnsError)
+	}
+	var certificateError *tls.CertificateVerificationError
+	var unknownAuthority x509.UnknownAuthorityError
+	var hostnameError x509.HostnameError
+	var invalidCertificate x509.CertificateInvalidError
+	var recordHeader tls.RecordHeaderError
+	if errors.As(err, &certificateError) || errors.As(err, &unknownAuthority) || errors.As(err, &hostnameError) || errors.As(err, &invalidCertificate) || errors.As(err, &recordHeader) {
+		return fmt.Errorf("TLS validation failed: %w", err)
+	}
+	return fmt.Errorf("network connection failed: %w", err)
 }
 
 func (c *channelClient) join(ctx context.Context, conn *websocket.Conn) error {

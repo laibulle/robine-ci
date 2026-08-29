@@ -5,22 +5,15 @@ repository="laibulle/robine-ci"
 asset_name="robine-runner-macos-multiarch.tar.gz"
 api_url="https://api.github.com/repos/${repository}/releases/latest"
 install_dir="${RBE_INSTALL_DIR:-${HOME}/.local/bin}"
-config_path="${RBE_CONFIG_PATH:-${HOME}/.config/robine-runner/config.json}"
-launch_agent_dir="${HOME}/Library/LaunchAgents"
-launch_agent_path="${launch_agent_dir}/com.robine.runner.plist"
-log_dir="${HOME}/Library/Logs/RobineRunner"
-service_label="com.robine.runner"
+config_path="${RBE_CONFIG_PATH:-}"
+server_url="${RBE_SERVER_URL:-}"
+skip_service_install="${RBE_SKIP_SERVICE_INSTALL:-0}"
 temporary_dir=""
 temporary_destination=""
-temporary_launch_agent=""
 
 cleanup() {
   if [[ -n "${temporary_destination}" ]]; then
     rm -f "${temporary_destination}"
-  fi
-
-  if [[ -n "${temporary_launch_agent}" ]]; then
-    rm -f "${temporary_launch_agent}"
   fi
 
   if [[ -n "${temporary_dir}" ]]; then
@@ -50,9 +43,17 @@ case "$(uname -m)" in
 esac
 
 [[ "${install_dir}" == /* ]] || fail "RBE_INSTALL_DIR must be an absolute path"
-[[ "${config_path}" == /* ]] || fail "RBE_CONFIG_PATH must be an absolute path"
+if [[ -n "${config_path}" && "${config_path}" != /* ]]; then
+  fail "RBE_CONFIG_PATH must be an absolute path"
+fi
+case "${skip_service_install}" in
+  0|1)
+    ;;
+  *)
+    fail "RBE_SKIP_SERVICE_INSTALL must be 0 or 1"
+    ;;
+esac
 command -v curl >/dev/null 2>&1 || fail "curl is required"
-command -v launchctl >/dev/null 2>&1 || fail "launchctl is required"
 command -v shasum >/dev/null 2>&1 || fail "shasum is required"
 command -v tar >/dev/null 2>&1 || fail "tar is required"
 
@@ -116,67 +117,26 @@ temporary_destination=""
 installed_version=$("${install_dir}/rbe" version)
 printf 'Installed %s at %s/rbe\n' "${installed_version}" "${install_dir}"
 
-xml_home=$(printf '%s' "${HOME}" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')
-xml_binary=$(printf '%s' "${install_dir}/rbe" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')
-xml_config=$(printf '%s' "${config_path}" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')
-xml_log_dir=$(printf '%s' "${log_dir}" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')
+default_config_path="${HOME}/.config/robine-runner/config.json"
+install_service=false
+install_arguments=(install)
+if [[ -n "${config_path}" ]]; then
+  install_arguments+=(--config "${config_path}")
+  install_service=true
+elif [[ -f "${default_config_path}" ]]; then
+  install_service=true
+fi
+if [[ -n "${server_url}" ]]; then
+  install_arguments+=(--server "${server_url}")
+fi
 
-mkdir -p "$(dirname "${config_path}")" "${launch_agent_dir}" "${log_dir}"
-chmod 0700 "$(dirname "${config_path}")"
-temporary_launch_agent=$(mktemp "${launch_agent_dir}/.com.robine.runner.XXXXXX")
-cat >"${temporary_launch_agent}" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-  <dict>
-    <key>Label</key>
-    <string>${service_label}</string>
-    <key>ProgramArguments</key>
-    <array>
-      <string>${xml_binary}</string>
-      <string>start</string>
-      <string>--config</string>
-      <string>${xml_config}</string>
-    </array>
-    <key>WorkingDirectory</key>
-    <string>${xml_home}</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-      <key>HOME</key>
-      <string>${xml_home}</string>
-      <key>PATH</key>
-      <string>${xml_home}/.cargo/bin:${xml_home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-    </dict>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <dict>
-      <key>SuccessfulExit</key>
-      <false/>
-    </dict>
-    <key>ProcessType</key>
-    <string>Background</string>
-    <key>ThrottleInterval</key>
-    <integer>10</integer>
-    <key>StandardOutPath</key>
-    <string>${xml_log_dir}/stdout.log</string>
-    <key>StandardErrorPath</key>
-    <string>${xml_log_dir}/stderr.log</string>
-  </dict>
-</plist>
-EOF
-chmod 0600 "${temporary_launch_agent}"
-mv -f "${temporary_launch_agent}" "${launch_agent_path}"
-temporary_launch_agent=""
-printf 'Installed launchd service definition at %s\n' "${launch_agent_path}"
-
-if [[ -f "${config_path}" ]]; then
-  launchctl bootout "gui/$(id -u)/${service_label}" >/dev/null 2>&1 || true
-  launchctl bootstrap "gui/$(id -u)" "${launch_agent_path}"
-  launchctl kickstart -k "gui/$(id -u)/${service_label}"
-  printf 'Started %s\n' "${service_label}"
+if [[ "${skip_service_install}" == 1 ]]; then
+  printf 'Service installation deferred until enrollment completes.\n'
+elif [[ "${install_service}" == true ]]; then
+  "${install_dir}/rbe" "${install_arguments[@]}"
 else
-  printf 'The service will be started after runner enrollment creates %s\n' "${config_path}"
+  printf 'No runner config exists yet. Enroll the runner, then run:\n'
+  printf '  %s/rbe install --config /absolute/path/to/config.json --server https://ci.example.com\n' "${install_dir}"
 fi
 
 case ":${PATH}:" in

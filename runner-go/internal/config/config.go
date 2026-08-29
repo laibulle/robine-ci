@@ -25,6 +25,7 @@ const (
 	CommandVersion CommandKind = iota + 1
 	CommandEnroll
 	CommandStart
+	CommandInstall
 )
 
 type EnrollOptions struct {
@@ -35,10 +36,17 @@ type EnrollOptions struct {
 	Force           bool
 }
 
+type InstallOptions struct {
+	ConfigPath        string
+	ConfigExplicit    bool
+	ExpectedServerURL string
+}
+
 type Command struct {
 	Kind       CommandKind
 	ConfigPath string
 	Enroll     EnrollOptions
+	Install    InstallOptions
 }
 
 func ParseCommand(args []string) (Command, error) {
@@ -83,6 +91,31 @@ func ParseCommand(args []string) (Command, error) {
 		}
 		path, _ = filepath.Abs(path)
 		return Command{Kind: CommandStart, ConfigPath: path}, nil
+	case "install":
+		set := flag.NewFlagSet("install", flag.ContinueOnError)
+		set.SetOutput(os.Stderr)
+		var options InstallOptions
+		set.StringVar(&options.ConfigPath, "config", "", "existing private config path")
+		set.StringVar(&options.ExpectedServerURL, "server", "", "expected Robine CI server URL")
+		if err := set.Parse(args[1:]); err != nil || set.NArg() != 0 {
+			return Command{}, usageError()
+		}
+		set.Visit(func(flag *flag.Flag) {
+			if flag.Name == "config" {
+				options.ConfigExplicit = true
+			}
+		})
+		if options.ConfigExplicit {
+			if options.ConfigPath == "" || !filepath.IsAbs(options.ConfigPath) {
+				return Command{}, errors.New("install --config requires an absolute path")
+			}
+		}
+		if options.ExpectedServerURL != "" {
+			if err := ValidateServerURL(options.ExpectedServerURL); err != nil {
+				return Command{}, err
+			}
+		}
+		return Command{Kind: CommandInstall, Install: options}, nil
 	default:
 		return Command{}, usageError()
 	}
@@ -131,6 +164,10 @@ func Validate(cfg Config) error {
 	return ValidateServerURL(cfg.ServerURL)
 }
 
+func SameServer(left, right string) bool {
+	return canonicalServerURL(left) == canonicalServerURL(right)
+}
+
 func Write(path string, cfg Config, force bool) error {
 	if err := Validate(cfg); err != nil {
 		return err
@@ -177,5 +214,16 @@ func Write(path string, cfg Config, force bool) error {
 }
 
 func usageError() error {
-	return errors.New("usage: robine-runner version | enroll --server URL --name NAME --config PATH [--force] | start --config PATH")
+	return errors.New("usage: robine-runner version | enroll --server URL --name NAME --config PATH [--force] | start --config PATH | install [--config ABSOLUTE_PATH] [--server URL]")
+}
+
+func canonicalServerURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	u.Scheme = strings.ToLower(u.Scheme)
+	u.Host = strings.ToLower(u.Host)
+	u.Path = strings.TrimRight(u.Path, "/")
+	return u.String()
 }

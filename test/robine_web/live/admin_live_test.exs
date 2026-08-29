@@ -86,13 +86,18 @@ defmodule RobineWeb.AdminLiveTest do
       |> render_click()
 
     assert enrollment_html =~ "Copy this command now"
-    assert enrollment_html =~ "ROBINE_RUNNER_ENROLLMENT_TOKEN="
-    assert enrollment_html =~ "rbe_"
-    assert enrollment_html =~ ".local/bin/rbe"
-    assert enrollment_html =~ "launchctl bootstrap"
-    assert enrollment_html =~ "com.robine.runner"
-    assert enrollment_html =~ "--name"
-    assert enrollment_html =~ "RUNNER_NAME"
+    assert has_element?(view, "#runner-enrollment-command", "ROBINE_RUNNER_ENROLLMENT_TOKEN=")
+    assert has_element?(view, "#runner-enrollment-command", "rbe_")
+    assert has_element?(view, "#runner-enrollment-command", "/install/rbe.sh")
+    assert has_element?(view, "#runner-enrollment-command", "RBE_SERVER_URL=")
+    assert has_element?(view, "#runner-enrollment-command", "RBE_SKIP_SERVICE_INSTALL=1")
+    assert has_element?(view, "#runner-enrollment-command", ".local/bin/rbe")
+    assert has_element?(view, "#runner-enrollment-command", "install --config")
+    assert has_element?(view, "#runner-enrollment-command", "--server")
+    assert has_element?(view, "#runner-enrollment-command", "--name")
+    assert has_element?(view, "#runner-enrollment-command", "--force")
+    assert has_element?(view, "#runner-enrollment-command", "scutil --get ComputerName")
+    refute has_element?(view, "#runner-enrollment-command", "RUNNER_NAME")
 
     stored_enrollment = Repo.one!(RunnerEnrollmentToken)
     refute enrollment_html =~ Base.url_encode64(stored_enrollment.token_digest, padding: false)

@@ -552,12 +552,12 @@ defmodule RobineWeb.AdminLive.Index do
                 <p class="mt-1 text-sm leading-6 text-base-content/60">
                   Paste this command into Terminal. Robine selects Apple Silicon or Intel, verifies the GitHub Release SHA-256, installs
                   <code>rbe</code>
-                  and prepares its launchd service without Homebrew or sudo.
+                  and safely reconciles an existing runner configuration without Homebrew or sudo.
                 </p>
                 <pre
                   id="runner-macos-install-command"
                   class="mt-3 overflow-x-auto whitespace-pre-wrap break-all rounded-xl bg-base-300 p-3 text-xs"
-                ><code>curl --proto '=https' --tlsv1.2 -fsSL '{@runner_installer_url}' | /bin/bash</code></pre>
+                ><code>curl --proto '=https' --tlsv1.2 -fsSL '{@runner_installer_url}' | RBE_SERVER_URL='{Application.fetch_env!(:robine, :public_url)}' /bin/bash</code></pre>
               </div>
             </div>
           </div>
@@ -565,7 +565,7 @@ defmodule RobineWeb.AdminLive.Index do
             <div>
               <h2 class="text-xl font-semibold">Remote runner enrollment</h2>
               <p class="mt-1 max-w-3xl text-sm text-base-content/60">
-                Generate a single-use token valid for 15 minutes. It is displayed once and grants creation of one machine identity.
+                Generate a single-use token valid for 15 minutes. The one-time command installs <code>rbe</code>, enrolls this Mac, then starts its launchd service.
               </p>
             </div>
             <button
@@ -585,12 +585,15 @@ defmodule RobineWeb.AdminLive.Index do
           >
             <p class="font-semibold">Copy this command now</p>
             <p class="mt-1 text-sm text-base-content/70">
-              Replace <code>RUNNER_NAME</code>
-              and run it on the trusted worker. The token expires at {DateTime.to_iso8601(
+              Run it unchanged on the trusted Mac. Its computer name becomes the runner name, and
+              any config at the standard path is explicitly replaced. The token expires at {DateTime.to_iso8601(
                 @runner_enrollment.expires_at
               )}.
             </p>
-            <pre class="mt-3 overflow-x-auto whitespace-pre-wrap break-all rounded-xl bg-base-300 p-3 text-xs"><code>ROBINE_RUNNER_ENROLLMENT_TOKEN='{@runner_enrollment.token}' "$HOME/.local/bin/rbe" enroll --server '{Application.fetch_env!(:robine, :public_url)}' --name 'RUNNER_NAME' --config "$HOME/.config/robine-runner/config.json" &amp;&amp; launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.robine.runner.plist" &amp;&amp; launchctl kickstart -k "gui/$(id -u)/com.robine.runner"</code></pre>
+            <pre
+              id="runner-enrollment-command"
+              class="mt-3 overflow-x-auto whitespace-pre-wrap break-all rounded-xl bg-base-300 p-3 text-xs"
+            ><code>curl --proto '=https' --tlsv1.2 -fsSL '{@runner_installer_url}' | RBE_SERVER_URL='{Application.fetch_env!(:robine, :public_url)}' RBE_SKIP_SERVICE_INSTALL=1 /bin/bash &amp;&amp; ROBINE_RUNNER_ENROLLMENT_TOKEN='{@runner_enrollment.token}' "$HOME/.local/bin/rbe" enroll --server '{Application.fetch_env!(:robine, :public_url)}' --name "$(scutil --get ComputerName 2&gt;/dev/null || hostname -s)" --config "$HOME/.config/robine-runner/config.json" --force &amp;&amp; "$HOME/.local/bin/rbe" install --config "$HOME/.config/robine-runner/config.json" --server '{Application.fetch_env!(:robine, :public_url)}'</code></pre>
           </div>
         </section>
         <section

@@ -9,7 +9,7 @@
       <string>__ROBINE_RUNNER_HOME__/.local/bin/rbe</string>
       <string>start</string>
       <string>--config</string>
-      <string>__ROBINE_RUNNER_HOME__/.config/robine-runner/config.json</string>
+      <string>__ROBINE_RUNNER_CONFIG__</string>
     </array>
     <key>WorkingDirectory</key>
     <string>__ROBINE_RUNNER_HOME__</string>

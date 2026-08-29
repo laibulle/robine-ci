@@ -9,7 +9,7 @@ on:
 
 jobs:
   verify:
-    image: elixir@sha256:7ee41a9a8a8427dbd40c9133ee5b9047f585b58db4968fd675fbcd9498e3b22e
+    image: hexpm/elixir@sha256:2431278a45d8aa9e019202ee73fc50eed21df9b456c4b72ed09b37550b04069b
     shell: /bin/bash
     timeout: 20m
     env:

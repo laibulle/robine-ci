@@ -59,7 +59,8 @@ A self-hosted operator with a dedicated Mac who needs CI evidence from macOS or 
 - **FR-11:** A workflow MUST be able to invoke Xcode, Swift, `xcodebuild`, `codesign`, or any other tool available to the dedicated runner account without the runner embedding Apple frameworks.
 - **FR-12:** `artifacts/upload` MUST create a safe gzip-compressed TAR archive from declared workspace-relative paths and publish it through the existing authenticated attempt endpoint before reporting the step successful.
 - **FR-13:** A temporary disconnect MUST backpressure delivery, reconnect with bounded jitter, reconcile active attempts, and preserve durable attempt message IDs and sequences.
-- **FR-14:** Every Robine instance MUST expose its packaged macOS installer at `/install/rbe.sh`, and Administration → Runners MUST display a copyable command derived from the configured public URL. The installer MUST select the latest released `arm64` or `amd64` runner, verify the GitHub-published SHA-256 digest, atomically install it as `rbe`, and create its unprivileged launchd service definition without a package manager or privilege escalation. Enrollment MUST start the prepared service only after the credential file exists.
+- **FR-14:** Every Robine instance MUST expose its token-free packaged macOS installer at `/install/rbe.sh`, and Administration → Runners MUST display one copyable, instance-specific command that downloads and verifies `rbe`, supplies the single-use enrollment token only through the process environment, enrolls the named runner, and reconciles its launchd service. The installer MUST select the latest released `arm64` or `amd64` runner, verify the GitHub-published SHA-256 digest, and atomically install it as `rbe` without a package manager or privilege escalation. `rbe install` MUST retain an explicit absolute config path exactly, validate a default config against the expected server, show only its server and runner name, and reconcile an unprivileged launchd service idempotently after a successful authenticated protocol check.
+- **FR-15:** Launchd installation MUST keep credentials out of the plist, arguments, diagnostics, and logs; stop only an identical manually started runner; leave different runner processes untouched; lint the plist; use `gui/<uid>`; and verify one running launchd PID with the requested executable, config path, and protocol-v1 connection.
 
 ### UX requirements
 
@@ -86,6 +87,9 @@ The native executor creates an attempt-namespaced directory under the operating-
 | No matching Mac is online | Job remains queued with unmet `macos` capacity | Start, enable, or relabel a Mac runner |
 | Shell or tool is missing | Attempt fails without weakening execution semantics | Install the tool for the runner account or update the workflow |
 | Runner process exits | Lease reconciliation reports runner loss | launchd restarts it; retry the job |
+| Default config belongs to another server | Installation stops before changing launchd and displays the non-secret config identity | Pass the intended absolute config with `--config` or enroll a new runner |
+| `launchctl bootstrap` fails | Installation reports plist lint, path modes, user-domain state, and bounded launchctl output without secrets | Correct the reported user-scoped condition; never retry the LaunchAgent with `sudo` |
+| Control-plane connection fails | Installation distinguishes DNS, network, TLS, HTTP 502, and authentication failures | Correct the named external or credential condition, then rerun the idempotent install |
 | Service container requested | Preparation fails with an explicit unsupported-capability reason | Split the workflow or use a Docker runner until support ships |
 
 ## Security and privacy
@@ -105,7 +109,8 @@ The existing runner connection, heartbeat, attempt, log, cancellation, and runne
 - [ ] A macOS fixture build produces an `.app` bundle and `artifacts/upload` makes its archive visible in Robine CI.
 - [x] Cache and artifact archives publish and restore through the shared transfer contract with digest and path validation.
 - [x] Remote checkout accepts provider file lists and preserves executable source-file modes through the bounded archive transfer.
-- [x] A transparent package-manager-free installer selects the target Mac architecture, verifies the latest GitHub Release digest, installs `rbe` atomically, and prepares its launchd service without privilege escalation.
+- [x] A transparent package-manager-free installer selects the target Mac architecture, verifies the latest GitHub Release digest, installs `rbe` atomically, and delegates config-bound launchd reconciliation to `rbe install` without privilege escalation.
+- [x] Automated tests cover explicit/default/stale configs, loaded jobs, matching and different manual processes, bootstrap diagnostics, idempotent reinstall, managed PID verification, and credential exclusion.
 - [ ] A target Mac connects through TLS and completes a real `runs-on: [macos]` pipeline.
 - [ ] launchd installation, upgrade, troubleshooting, and removal use the self-contained Go binary and are verified on macOS.
 

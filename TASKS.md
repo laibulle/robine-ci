@@ -500,7 +500,9 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - [x] Safely transfer source, secrets, caches, and artifact archives through the existing attempt-scoped API.
 - [x] Preserve executable source-file modes and accept provider file lists through remote checkout so native workflows do not need an independent Git clone.
 - [x] Cross-compile and checksum Darwin, Linux, and Windows `arm64` and `amd64` releases from Linux with `CGO_ENABLED=0`.
-- [x] Serve a transparent package-manager-free macOS installer from Robine, display its copyable instance-specific command on the runner page, verify the latest GitHub Release digest, install `rbe` atomically, and prepare its launchd service.
+- [x] Serve a transparent token-free macOS installer from Robine and display one authenticated, copyable command that downloads it, enrolls with the ephemeral token, and installs the launchd service; verify the latest GitHub Release digest and install `rbe` atomically.
+- [x] Bind `rbe install` to an explicit validated config and expected server, reconcile launchd idempotently, avoid duplicate manual processes, and return bounded secret-free bootstrap/connection diagnostics.
+- [ ] Re-run the config-bound installer on Apple Silicon against a stale default config and a valid production config, then retain the launchd/PID/protocol-v1 evidence.
 - [ ] Build a macOS `.app` fixture and prove that its declared artifact is retained and downloadable from Robine CI.
 - [x] Update launchd and operator documentation for the self-contained executable.
 

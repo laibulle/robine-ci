@@ -28,7 +28,7 @@ Untrusted-workload isolation remains post-MVP. Release validation that requires 
 
 ## Requirements
 
-- Elixir 1.20 and Erlang/OTP 29
+- Elixir 1.20.3 and Erlang/OTP 29.0.5
 - Ubuntu Server 24.04 LTS or 26.04 LTS on x86-64 or ARM64
 - Docker Engine 29.x
 - Docker Compose v2
@@ -135,15 +135,15 @@ plane.
 Install the latest native runner on Apple Silicon or Intel macOS as `rbe`:
 
 ```bash
-curl --proto '=https' --tlsv1.2 -fsSL https://ci.example.com/install/rbe.sh | /bin/bash
+curl --proto '=https' --tlsv1.2 -fsSL https://ci.example.com/install/rbe.sh | RBE_SERVER_URL='https://ci.example.com' /bin/bash
 $HOME/.local/bin/rbe version
 ```
 
-Every Robine instance serves the installer at `/install/rbe.sh`; Administration → Runners displays
-the exact command for its configured public URL. The installer selects the current architecture and
-verifies the release asset against the SHA-256 digest published by GitHub before atomically replacing
-`~/.local/bin/rbe` and preparing its unprivileged launchd service. See
-[remote runner installation](docs/runner-installation.md) for details.
+Every Robine instance serves the token-free installer at `/install/rbe.sh`; Administration → Runners
+generates one ephemeral command that downloads the binary, enrolls it with a single-use token, then
+reconciles the unprivileged launchd service. The installer selects the current architecture and verifies
+the release asset against the SHA-256 digest published by GitHub before atomically replacing
+`~/.local/bin/rbe`. See [remote runner installation](docs/runner-installation.md) for details.
 
 Set `ROBINE_METRICS_TOKEN` to enable the token-protected Prometheus endpoint at `/metrics`; leave it unset to return 404. Initial alerts and diagnosis procedures are in [the monitoring runbook](docs/operations/monitoring-and-troubleshooting.md).
 

@@ -99,3 +99,26 @@ func TestVersionStartAndInvalidConfig(t *testing.T) {
 		t.Fatal("invalid config was written")
 	}
 }
+
+func TestParseInstallPreservesExplicitConfigPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "production-runner.json")
+	command, err := ParseCommand([]string{"install", "--config", path, "--server", "https://ci.example.test/"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if command.Kind != CommandInstall || !command.Install.ConfigExplicit || command.Install.ConfigPath != path {
+		t.Fatalf("explicit config path was not preserved: %#v", command)
+	}
+	if command.Install.ExpectedServerURL != "https://ci.example.test/" {
+		t.Fatalf("unexpected expected server: %q", command.Install.ExpectedServerURL)
+	}
+	if !SameServer("https://CI.EXAMPLE.TEST", "https://ci.example.test/") {
+		t.Fatal("equivalent server URLs did not match")
+	}
+}
+
+func TestParseInstallRejectsRelativeConfig(t *testing.T) {
+	if _, err := ParseCommand([]string{"install", "--config", "runner.json"}); err == nil {
+		t.Fatal("relative install config was accepted")
+	}
+}

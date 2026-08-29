@@ -7,7 +7,7 @@ on:
 
 jobs:
   package:
-    image: hexpm/elixir@sha256:1d7b070659ac993d5778b605bf767bc2477faedaea26f09bfa945d5e91d5fa14
+    image: hexpm/elixir@sha256:2431278a45d8aa9e019202ee73fc50eed21df9b456c4b72ed09b37550b04069b
     shell: /bin/bash
     timeout: 20m
     env:

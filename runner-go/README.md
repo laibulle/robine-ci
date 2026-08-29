@@ -20,4 +20,4 @@ From the repository root:
 ROBINE_GO="$(command -v go)" mix robine.macos_runner_release --output dist/runner-macos
 ```
 
-This produces independently checksummed Darwin ARM64 and AMD64 Mach-O executables. Enrollment and launchd installation are documented in `docs/runner-installation.md`.
+This produces independently checksummed Darwin ARM64 and AMD64 Mach-O executables. After enrollment, use `rbe install --config /absolute/path/config.json --server https://ci.example.com`; the CLI validates the non-secret config identity and protocol connection before reconciling the user LaunchAgent. Full enrollment, launchd, diagnostic, and removal procedures are documented in `docs/runner-installation.md`.

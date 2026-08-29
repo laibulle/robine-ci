@@ -6,9 +6,11 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/robine-ci/robine-runner/internal/config"
 	"github.com/robine-ci/robine-runner/internal/runner"
+	"github.com/robine-ci/robine-runner/internal/service"
 )
 
 var version = "dev"
@@ -48,6 +50,18 @@ func run(args []string) error {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		return runner.Run(ctx, cfg, version)
+	case config.CommandInstall:
+		installer, err := service.NewInstaller(os.Stdout, func(ctx context.Context, cfg config.Config) error {
+			probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			defer cancel()
+			return runner.Probe(probeCtx, cfg, version)
+		})
+		if err != nil {
+			return err
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		defer cancel()
+		return installer.Install(ctx, command.Install)
 	default:
 		return fmt.Errorf("unsupported command")
 	}

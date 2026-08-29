@@ -2,7 +2,10 @@ package runner
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
+	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -159,5 +162,41 @@ func TestChannelJoinReportsProtocolRejection(t *testing.T) {
 	_ = conn.Close()
 	if err == nil || !strings.Contains(err.Error(), "incompatible_protocol") {
 		t.Fatalf("unexpected join error: %v", err)
+	}
+}
+
+func TestProbeClassifiesAuthenticationAndBadGateway(t *testing.T) {
+	for status, expected := range map[int]string{
+		http.StatusUnauthorized: "authentication failed",
+		http.StatusBadGateway:   "HTTP 502",
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+			http.Error(response, http.StatusText(status), status)
+		}))
+		cfg := config.Config{ServerURL: server.URL, RunnerID: "runner-1", Credential: "secret", Name: "mac"}
+		err := Probe(context.Background(), cfg, "test")
+		server.Close()
+		if err == nil || !strings.Contains(err.Error(), expected) {
+			t.Fatalf("HTTP %d was not classified as %q: %v", status, expected, err)
+		}
+		if strings.Contains(err.Error(), cfg.Credential) {
+			t.Fatal("probe error leaked the runner credential")
+		}
+	}
+}
+
+func TestConnectionErrorsDistinguishDNSNetworkAndTLS(t *testing.T) {
+	tests := []struct {
+		err      error
+		expected string
+	}{
+		{err: &net.DNSError{Err: "no such host", Name: "ci.invalid"}, expected: "DNS resolution failed"},
+		{err: &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}, expected: "network connection failed"},
+		{err: tls.RecordHeaderError{Msg: "bad TLS record"}, expected: "TLS validation failed"},
+	}
+	for _, test := range tests {
+		if err := classifyNetworkError(test.err); !strings.Contains(err.Error(), test.expected) {
+			t.Fatalf("%T was not classified as %q: %v", test.err, test.expected, err)
+		}
 	}
 }

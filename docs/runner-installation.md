@@ -24,7 +24,7 @@ The release artifact is verified by `mix robine.runner_release_smoke`. Do not co
 
 ## Enroll once
 
-In Robine, sign in as an administrator, open **Administration**, and select **Generate enrollment command**. The displayed token expires after 15 minutes, can be consumed once, and is not recoverable from the database.
+In Robine, sign in as an administrator, open **Administration**, and select **Generate enrollment command**. The displayed token expires after 15 minutes, can be consumed once, and is not recoverable from the database. On macOS, the generated one-line command downloads and verifies `rbe`, enrolls the runner, then installs and starts its user LaunchAgent. The public download script never contains a token; the authenticated administration page injects it only into this ephemeral command.
 
 Run the displayed command on the trusted worker. The token is accepted only through `ROBINE_RUNNER_ENROLLMENT_TOKEN`; it is intentionally not accepted as a command-line option.
 
@@ -72,11 +72,14 @@ sha256sum --check RUNNER_SHA256SUMS
 
 The release build emits `arm64` and `amd64` binaries under `macos`, `linux`, and `windows`; Windows executable names use the `.exe` suffix. Native application builds remain release-supported on macOS while the Linux and Windows binaries provide early cross-platform runner packages for direct validation.
 
-Create a dedicated standard macOS account such as `robine-runner`. It must not be an administrator and must not own personal keychains, SSH keys, cloud credentials, or unrelated source trees. In Robine, open **Administration → Runners** and copy the installation command generated from the instance's configured public URL:
+Create a dedicated standard macOS account such as `robine-runner`. It must not be an administrator and must not own personal keychains, SSH keys, cloud credentials, or unrelated source trees. In Robine, open **Administration → Runners**, generate an enrollment command, and run the resulting single command unchanged. It derives the runner name from the Mac's Computer Name, downloads `rbe`, defers service reconciliation until enrollment has written the requested config, then installs and starts launchd. The command explicitly uses `--force`, so an old config at the standard path is replaced by the newly enrolled identity instead of being reused silently. The token remains an environment variable and never becomes a `rbe` argument, plist value, config value, log entry, or repository secret.
+
+The separate token-free installation command remains available for upgrades and for machines that already have a valid config:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://ci.example.com/install/rbe.sh | /bin/bash
+  https://ci.example.com/install/rbe.sh | \
+  RBE_SERVER_URL='https://ci.example.com' /bin/bash
 $HOME/.local/bin/rbe version
 ```
 
@@ -86,12 +89,15 @@ Each Robine server exposes its packaged script publicly at `/install/rbe.sh`. To
 curl --proto '=https' --tlsv1.2 -fsSL https://ci.example.com/install/rbe.sh
 ```
 
-The installer resolves the latest GitHub Release, selects `arm64` or `amd64`, verifies the archive
+The download script resolves the latest GitHub Release, selects `arm64` or `amd64`, verifies the archive
 against the SHA-256 digest returned by the GitHub Releases API, and atomically installs the executable
-as `~/.local/bin/rbe`. It also creates `~/Library/LaunchAgents/com.robine.runner.plist`, the private
-configuration directory, and the log directory. It does not start launchd before enrollment creates
-the credential file. Set `RBE_INSTALL_DIR` and `RBE_CONFIG_PATH` to other absolute user-writable paths
-when needed. It never invokes `sudo`, a package manager, an encoded URL, or `eval`.
+as `~/.local/bin/rbe`. If the default config already exists, it invokes `rbe install --server` so the
+config's `server_url` must match the Robine instance that supplied the command. A stale default config
+for another server is printed by server and runner name, then refused before launchd is changed. Set
+`RBE_INSTALL_DIR`, `RBE_CONFIG_PATH`, and `RBE_SERVER_URL` to explicit values for a non-default layout.
+The script never invokes `sudo`, a package manager, an encoded URL, or `eval`.
+The administration page additionally sets `RBE_SKIP_SERVICE_INSTALL=1` in its all-in-one enrollment
+command so no stale service is started between downloading the binary and replacing the config.
 
 Enroll the installed runner:
 
@@ -101,8 +107,24 @@ ROBINE_RUNNER_ENROLLMENT_TOKEN='replace-once' "$HOME/.local/bin/rbe" enroll \
   --server https://ci.example.com \
   --name mac-mini-arm64 \
   --config "$HOME/.config/robine-runner/config.json"
-launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.robine.runner.plist"
-launchctl kickstart -k "gui/$(id -u)/com.robine.runner"
+"$HOME/.local/bin/rbe" install \
+  --config "$HOME/.config/robine-runner/config.json" \
+  --server https://ci.example.com
+```
+
+`rbe install --config /absolute/path/config.json` preserves that exact path in `ProgramArguments`.
+When `--config` is omitted, only `~/.config/robine-runner/config.json` is considered; it must exist,
+be valid, have mode `0600`, and match the expected `--server`. Before changing launchd, the command
+prints only `server_url`, runner name, and config path. It never prints the runner ID credential or
+places it in the plist or process arguments. Enrollment uses a one-use, expiring, revocable token in
+`ROBINE_RUNNER_ENROLLMENT_TOKEN`; it never requests an administrator email or password.
+
+To install an already enrolled production config stored elsewhere:
+
+```sh
+"$HOME/.local/bin/rbe" install \
+  --config "$HOME/rbn-config.json" \
+  --server https://ci.example.com
 ```
 
 On Darwin the runner automatically announces `macos`, normalized `arm64` or `amd64`, and `native`; it does not announce `docker`. A native job must opt in explicitly:
@@ -129,7 +151,15 @@ jobs:
 
 The `image` field remains required by workflow schema v1 but is not used by native execution. Native execution is not a sandbox and is supported only for trusted repositories. Cache and artifact built-ins use the same attempt-scoped server transfers as Docker jobs. Safe Robine archives reject symbolic links, while application bundles containing frameworks commonly use them; package such bundles as a ZIP, DMG, or PKG before `artifacts/upload`. The initial native executor rejects service containers explicitly.
 
-The installer generates the launch agent with the resolved executable, home, configuration, and log paths. After enrollment, inspect the service:
+The CLI validates the config and a protocol-v1 connection before changing launchd. It creates private
+logs under `~/Library/Logs/RobineRunner`, lints the generated plist, stops an already loaded user job,
+terminates only a manually started process whose binary and `--config` arguments match exactly, then
+uses `launchctl bootstrap gui/$(id -u)` and `kickstart`. A different runner process is reported and left
+untouched. After startup it requires one launchd-managed PID with the requested executable/config and
+a protocol-v1 connection message from that same PID. Re-running the command performs the same bounded
+replacement safely without `sudo`.
+
+After enrollment, inspect the service:
 
 ```sh
 launchctl print "gui/$(id -u)/com.robine.runner"
@@ -137,4 +167,12 @@ launchctl print "gui/$(id -u)/com.robine.runner"
 
 `docs/launchd/com.robine.runner.plist` remains the auditable template. Logs are retained under `~/Library/Logs/RobineRunner/`; the credential remains in the mode-`0600` config file and never belongs in the plist.
 
-For upgrades, run the installer again, then kickstart the service. To remove the service, run `launchctl bootout "gui/$(id -u)/com.robine.runner"`, remove the plist and `~/.local/bin/rbe`, revoke the runner in Robine, and only then remove its private config and logs.
+If bootstrap fails, `rbe install` reports `plutil -lint`, file existence and modes for the executable,
+config, working directory, and logs, plus `launchctl print gui/$UID/com.robine.runner`. A connection
+failure is classified as DNS, network, TLS, HTTP 502, or authentication. Do not rerun a user
+LaunchAgent with `sudo`.
+
+For upgrades, run the download command again with the intended `RBE_SERVER_URL` and, for a custom
+location, `RBE_CONFIG_PATH`; the CLI reconciles the service idempotently. To remove the service, run
+`launchctl bootout "gui/$(id -u)/com.robine.runner"`, remove the plist and `~/.local/bin/rbe`, revoke
+the runner in Robine, and only then remove its private config and logs.
