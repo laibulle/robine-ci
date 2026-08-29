@@ -189,6 +189,7 @@ defmodule RobineWeb.AdminLive.Index do
         oidc: oidc,
         runner_forms: runner_forms(runners),
         retention: retention_projection(),
+        runner_installer_url: runner_installer_url(),
         runner_enrollment: Map.get(socket.assigns, :runner_enrollment),
         runner_credential: Map.get(socket.assigns, :runner_credential),
         github_setup_step: Map.get(socket.assigns, :github_setup_step, 1),
@@ -205,6 +206,7 @@ defmodule RobineWeb.AdminLive.Index do
           oidc: %{enabled: false, preflight: {:error, reason}},
           runner_forms: %{},
           retention: retention_projection(),
+          runner_installer_url: runner_installer_url(),
           runner_enrollment: Map.get(socket.assigns, :runner_enrollment),
           runner_credential: Map.get(socket.assigns, :runner_credential),
           github_setup_step: Map.get(socket.assigns, :github_setup_step, 1),
@@ -226,6 +228,11 @@ defmodule RobineWeb.AdminLive.Index do
         health = %{status: :not_ready, checks: %{}}
         assign(socket, health: health, github_setup: github_setup_projection(health))
     end
+  end
+
+  defp runner_installer_url do
+    public_url = Application.fetch_env!(:robine, :public_url) |> String.trim_trailing("/")
+    public_url <> "/install/rbe.sh"
   end
 
   defp github_setup_projection(health) do
@@ -532,7 +539,29 @@ defmodule RobineWeb.AdminLive.Index do
           </div>
         </section>
         <section :if={@admin_section == "runners"} class="surface-panel rounded-2xl p-6">
-          <div class="flex flex-wrap items-start justify-between gap-4">
+          <div
+            id="runner-macos-installation"
+            class="rounded-2xl border border-base-300 bg-base-200/40 p-4"
+          >
+            <div class="flex items-start gap-3">
+              <span class="grid size-10 shrink-0 place-items-center rounded-xl bg-primary/10 text-primary">
+                <.icon name="hero-arrow-down-tray" class="size-5" />
+              </span>
+              <div class="min-w-0 flex-1">
+                <h2 class="text-lg font-semibold">Install rbe on macOS</h2>
+                <p class="mt-1 text-sm leading-6 text-base-content/60">
+                  Paste this command into Terminal. Robine selects Apple Silicon or Intel, verifies the GitHub Release SHA-256, and installs
+                  <code>rbe</code>
+                  without Homebrew or sudo.
+                </p>
+                <pre
+                  id="runner-macos-install-command"
+                  class="mt-3 overflow-x-auto whitespace-pre-wrap break-all rounded-xl bg-base-300 p-3 text-xs"
+                ><code>curl --proto '=https' --tlsv1.2 -fsSL '{@runner_installer_url}' | /bin/bash</code></pre>
+              </div>
+            </div>
+          </div>
+          <div class="mt-6 flex flex-wrap items-start justify-between gap-4">
             <div>
               <h2 class="text-xl font-semibold">Remote runner enrollment</h2>
               <p class="mt-1 max-w-3xl text-sm text-base-content/60">
@@ -561,7 +590,7 @@ defmodule RobineWeb.AdminLive.Index do
                 @runner_enrollment.expires_at
               )}.
             </p>
-            <pre class="mt-3 overflow-x-auto whitespace-pre-wrap break-all rounded-xl bg-base-300 p-3 text-xs"><code>ROBINE_RUNNER_ENROLLMENT_TOKEN='{@runner_enrollment.token}' robine-runner enroll --server '{Application.fetch_env!(:robine, :public_url)}' --name 'RUNNER_NAME' --config /etc/robine-runner/config.json</code></pre>
+            <pre class="mt-3 overflow-x-auto whitespace-pre-wrap break-all rounded-xl bg-base-300 p-3 text-xs"><code>mkdir -p "$HOME/.config/robine-runner" &amp;&amp; ROBINE_RUNNER_ENROLLMENT_TOKEN='{@runner_enrollment.token}' "$HOME/.local/bin/rbe" enroll --server '{Application.fetch_env!(:robine, :public_url)}' --name 'RUNNER_NAME' --config "$HOME/.config/robine-runner/config.json"</code></pre>
           </div>
         </section>
         <section

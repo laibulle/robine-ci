@@ -132,6 +132,18 @@ requires `Contents: read and write`; approve that updated permission on the inst
 pushing the tag. Release publication is idempotent and provider credentials remain in the control
 plane.
 
+Install the latest native runner on Apple Silicon or Intel macOS as `rbe`:
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL https://ci.example.com/install/rbe.sh | /bin/bash
+$HOME/.local/bin/rbe version
+```
+
+Every Robine instance serves the installer at `/install/rbe.sh`; Administration → Runners displays
+the exact command for its configured public URL. The installer selects the current architecture and
+verifies the release asset against the SHA-256 digest published by GitHub before atomically replacing
+`~/.local/bin/rbe`. See [remote runner installation](docs/runner-installation.md) for details.
+
 Set `ROBINE_METRICS_TOKEN` to enable the token-protected Prometheus endpoint at `/metrics`; leave it unset to return 404. Initial alerts and diagnosis procedures are in [the monitoring runbook](docs/operations/monitoring-and-troubleshooting.md).
 
 Artifact and cache metadata is admitted atomically against logical quotas of 50 GiB per instance and 10 GiB per repository. Override them with `ROBINE_STORAGE_INSTANCE_QUOTA_BYTES` and `ROBINE_STORAGE_REPOSITORY_QUOTA_BYTES`; the repository value cannot exceed the instance value.

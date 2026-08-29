@@ -76,6 +76,9 @@ defmodule RobineWeb.AdminLiveTest do
     assert has_element?(view, "a[href='/repositories']", "Trust repositories in Robine")
 
     view |> element("#admin-section-runners") |> render_click()
+    assert has_element?(view, "#runner-macos-installation")
+    assert has_element?(view, "#runner-macos-install-command")
+    assert render(view) =~ "/install/rbe.sh"
 
     enrollment_html =
       view
@@ -85,6 +88,7 @@ defmodule RobineWeb.AdminLiveTest do
     assert enrollment_html =~ "Copy this command now"
     assert enrollment_html =~ "ROBINE_RUNNER_ENROLLMENT_TOKEN="
     assert enrollment_html =~ "rbe_"
+    assert enrollment_html =~ ".local/bin/rbe"
     assert enrollment_html =~ "--name"
     assert enrollment_html =~ "RUNNER_NAME"
 

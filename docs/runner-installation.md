@@ -72,12 +72,30 @@ sha256sum --check RUNNER_SHA256SUMS
 
 The release build emits `arm64` and `amd64` binaries under `macos`, `linux`, and `windows`; Windows executable names use the `.exe` suffix. Native application builds remain release-supported on macOS while the Linux and Windows binaries provide early cross-platform runner packages for direct validation.
 
-Create a dedicated standard macOS account such as `robine-runner`. It must not be an administrator and must not own personal keychains, SSH keys, cloud credentials, or unrelated source trees. Log in as that account to build, install, and enroll:
+Create a dedicated standard macOS account such as `robine-runner`. It must not be an administrator and must not own personal keychains, SSH keys, cloud credentials, or unrelated source trees. In Robine, open **Administration → Runners** and copy the installation command generated from the instance's configured public URL:
 
 ```sh
-install -m 0755 robine-runner-<version>-darwin-arm64 "$HOME/bin/robine-runner"
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://ci.example.com/install/rbe.sh | /bin/bash
+$HOME/.local/bin/rbe version
+```
+
+Each Robine server exposes its packaged script publicly at `/install/rbe.sh`. To inspect it before execution:
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL https://ci.example.com/install/rbe.sh
+```
+
+The installer resolves the latest GitHub Release, selects `arm64` or `amd64`, verifies the archive
+against the SHA-256 digest returned by the GitHub Releases API, and atomically installs the executable
+as `~/.local/bin/rbe`. Set `RBE_INSTALL_DIR` to another absolute user-writable directory when needed.
+It never invokes `sudo`, a package manager, an encoded URL, or `eval`.
+
+Enroll the installed runner:
+
+```sh
 mkdir -m 0700 -p "$HOME/.config/robine-runner"
-ROBINE_RUNNER_ENROLLMENT_TOKEN='replace-once' "$HOME/bin/robine-runner" enroll \
+ROBINE_RUNNER_ENROLLMENT_TOKEN='replace-once' "$HOME/.local/bin/rbe" enroll \
   --server https://ci.example.com \
   --name mac-mini-arm64 \
   --config "$HOME/.config/robine-runner/config.json"
@@ -118,4 +136,4 @@ launchctl print "gui/$(id -u)/com.robine.runner"
 
 Before installation, replace `__ROBINE_RUNNER_HOME__` in the plist with the absolute home directory of the dedicated account. Logs are retained under `~/Library/Logs/RobineRunner/`; the credential remains in the mode-`0600` config file and never belongs in the plist.
 
-For upgrades, download the checksummed binary matching the target architecture, stop the service, atomically replace `~/bin/robine-runner`, and kickstart it again. To remove the service, run `launchctl bootout "gui/$(id -u)/com.robine.runner"`, remove the plist and executable, revoke the runner in Robine, and only then remove its private config and logs.
+For upgrades, run the installer again, then kickstart the service. To remove the service, run `launchctl bootout "gui/$(id -u)/com.robine.runner"`, remove the plist and `~/.local/bin/rbe`, revoke the runner in Robine, and only then remove its private config and logs.

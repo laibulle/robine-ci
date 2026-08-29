@@ -38,9 +38,24 @@ defmodule Robine.ReleaseConfigurationTest do
   test "the macOS launch agent invokes the self-contained runner directly" do
     launchd = File.read!("docs/launchd/com.robine.runner.plist")
 
-    assert launchd =~ "__ROBINE_RUNNER_HOME__/bin/robine-runner"
+    assert launchd =~ "__ROBINE_RUNNER_HOME__/.local/bin/rbe"
     assert launchd =~ "<string>start</string>"
     refute launchd =~ "mise"
     refute launchd =~ ".escript"
+  end
+
+  test "the macOS installer is transparent and verifies the GitHub release digest" do
+    installer_path = "priv/static/install/rbe.sh"
+    installer = File.read!(installer_path)
+
+    assert {_, 0} = System.cmd("bash", ["-n", installer_path], stderr_to_stdout: true)
+    assert "install" in RobineWeb.static_paths()
+    assert installer =~ "api.github.com/repos/${repository}/releases/latest"
+    assert installer =~ "github.com/${repository}/releases/download/${tag}/${asset_name}"
+    assert installer =~ "shasum -a 256"
+    assert installer =~ "mv -f \"${temporary_destination}\" \"${install_dir}/rbe\""
+    refute installer =~ "base64"
+    refute installer =~ "eval"
+    refute installer =~ "sudo"
   end
 end

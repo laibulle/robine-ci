@@ -5,7 +5,7 @@
 - **State:** Implementing
 - **Owner:** Execution
 - **Target:** Post-MVP
-- **Last updated:** 2026-08-28
+- **Last updated:** 2026-08-29
 
 ## Summary
 
@@ -59,6 +59,7 @@ A self-hosted operator with a dedicated Mac who needs CI evidence from macOS or 
 - **FR-11:** A workflow MUST be able to invoke Xcode, Swift, `xcodebuild`, `codesign`, or any other tool available to the dedicated runner account without the runner embedding Apple frameworks.
 - **FR-12:** `artifacts/upload` MUST create a safe gzip-compressed TAR archive from declared workspace-relative paths and publish it through the existing authenticated attempt endpoint before reporting the step successful.
 - **FR-13:** A temporary disconnect MUST backpressure delivery, reconnect with bounded jitter, reconcile active attempts, and preserve durable attempt message IDs and sequences.
+- **FR-14:** Every Robine instance MUST expose its packaged macOS installer at `/install/rbe.sh`, and Administration → Runners MUST display a copyable command derived from the configured public URL. The installer MUST select the latest released `arm64` or `amd64` runner, verify the GitHub-published SHA-256 digest, and atomically install it as `rbe` without a package manager or privilege escalation.
 
 ### UX requirements
 
@@ -103,6 +104,7 @@ The existing runner connection, heartbeat, attempt, log, cancellation, and runne
 - [x] Command failure, conditional execution, timeout, cancellation, process-group termination, reconnect, and cleanup are covered by automated tests.
 - [ ] A macOS fixture build produces an `.app` bundle and `artifacts/upload` makes its archive visible in Robine CI.
 - [x] Cache and artifact archives publish and restore through the shared transfer contract with digest and path validation.
+- [x] A transparent package-manager-free installer selects the target Mac architecture, verifies the latest GitHub Release digest, and installs `rbe` atomically without privilege escalation.
 - [ ] A target Mac connects through TLS and completes a real `runs-on: [macos]` pipeline.
 - [ ] launchd installation, upgrade, troubleshooting, and removal use the self-contained Go binary and are verified on macOS.
 
