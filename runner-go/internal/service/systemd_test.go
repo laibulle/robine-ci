@@ -130,6 +130,28 @@ func TestSystemdInstallPreservesConfigAndExcludesCredential(t *testing.T) {
 	}
 }
 
+func TestRenderSystemdUnitEscapesPathDirectivesWithoutQuotes(t *testing.T) {
+	home := "/home/runner user"
+	paths := systemdPaths{
+		stdoutLog: "/home/runner user/stdout.log",
+		stderrLog: "/home/runner user/stderr.log",
+	}
+	unit := renderSystemdUnit("/home/runner user/rbe", "/home/runner user/config.json", home, paths)
+
+	for _, expected := range []string{
+		`WorkingDirectory=/home/runner\x20user`,
+		`StandardOutput=append:/home/runner\x20user/stdout.log`,
+		`StandardError=append:/home/runner\x20user/stderr.log`,
+	} {
+		if !strings.Contains(unit, expected) {
+			t.Fatalf("systemd unit missing %q: %s", expected, unit)
+		}
+	}
+	if strings.Contains(unit, `WorkingDirectory="`) || strings.Contains(unit, `append:"`) {
+		t.Fatalf("path directive retained unsupported quotes: %s", unit)
+	}
+}
+
 func TestSystemdInstallIsIdempotentAndStopsOnlyMatchingManualRunner(t *testing.T) {
 	harness, commands := newSystemdHarness(t, "", "https://ci.base59.dev")
 	commands.processes[1200] = commands.expected

@@ -213,7 +213,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart=` + systemdQuote(binary) + ` start --config ` + systemdQuote(configPath) + `
-WorkingDirectory=` + systemdQuote(home) + `
+WorkingDirectory=` + systemdPath(home) + `
 Environment="HOME=` + systemdEscape(home) + `"
 Environment="PATH=` + systemdEscape(filepath.Join(home, ".local", "bin")+":/usr/local/bin:/usr/bin:/bin") + `"
 UMask=0077
@@ -221,8 +221,8 @@ Restart=on-failure
 RestartSec=10
 NoNewPrivileges=true
 PrivateTmp=true
-StandardOutput=append:` + systemdQuote(paths.stdoutLog) + `
-StandardError=append:` + systemdQuote(paths.stderrLog) + `
+StandardOutput=append:` + systemdPath(paths.stdoutLog) + `
+StandardError=append:` + systemdPath(paths.stderrLog) + `
 
 [Install]
 WantedBy=default.target
@@ -231,6 +231,15 @@ WantedBy=default.target
 
 func systemdQuote(value string) string {
 	return `"` + systemdEscape(value) + `"`
+}
+
+func systemdPath(value string) string {
+	value = strings.ReplaceAll(value, `\`, `\x5c`)
+	value = strings.ReplaceAll(value, " ", `\x20`)
+	value = strings.ReplaceAll(value, "\t", `\x09`)
+	value = strings.ReplaceAll(value, `"`, `\x22`)
+	value = strings.ReplaceAll(value, "%", "%%")
+	return strings.ReplaceAll(value, "\n", "")
 }
 
 func systemdEscape(value string) string {
