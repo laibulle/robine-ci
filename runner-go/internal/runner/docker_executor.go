@@ -219,7 +219,7 @@ func (e *executor) createDockerJob(ctx context.Context, offer Offer, resources d
 		"--memory", strconv.FormatInt(config.MemoryBytes(e.config), 10),
 		"--memory-swap", strconv.FormatInt(config.MemoryBytes(e.config), 10),
 		"--pids-limit", strconv.FormatInt(config.PIDsLimit(e.config), 10),
-		"--tmpfs", "/tmp:rw,noexec,nosuid,size=1g",
+		"--tmpfs", "/tmp:rw,exec,nosuid,size=1g",
 		"--network", dockerNetwork(resources.network),
 		"--mount", "type=volume,source=" + resources.volume + ",target=/workspace",
 		"--workdir", "/workspace",

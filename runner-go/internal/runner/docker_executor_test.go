@@ -111,7 +111,7 @@ func TestDockerExecutorRunsServiceRedactsAndUploads(t *testing.T) {
 			Env: map[string]string{}, BuildEnv: map[string]string{"ROBINE_BUILD_COMMIT_SHA": "abc"}, SecretNames: []string{"TOKEN", "DB_PASSWORD"},
 			Services: map[string]json.RawMessage{"postgres": postgres, "redis": redis},
 			Steps: []Step{
-				{Name: "Build", Kind: "run", Condition: "success", Value: "nc -z postgres 5432; nc -z redis 6379; test \"$(cat source-value)\" = checked-out; mkdir -p output deps; printf artifact >output/value; printf cached >deps/value; printf '%s' \"$TOKEN\""},
+				{Name: "Build", Kind: "run", Condition: "success", Value: "nc -z postgres 5432; nc -z redis 6379; test \"$(cat source-value)\" = checked-out; printf '#!/bin/sh\\nexit 0\\n' >/tmp/generated-test; chmod +x /tmp/generated-test; /tmp/generated-test; mkdir -p output deps; printf artifact >output/value; printf cached >deps/value; printf '%s' \"$TOKEN\""},
 				{Name: "Save cache", Kind: "builtin", Condition: "success", Value: "cache/save", With: map[string]any{"key": "docker-cache", "paths": []any{"deps"}}},
 				{Name: "Clear cache", Kind: "run", Condition: "success", Value: "rm -rf deps"},
 				{Name: "Restore cache", Kind: "builtin", Condition: "success", Value: "cache/restore", With: map[string]any{"key": "docker-cache", "paths": []any{"deps"}}},
