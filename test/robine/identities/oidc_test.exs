@@ -51,6 +51,14 @@ defmodule Robine.Identities.OIDCTest do
     assert Repo.aggregate(OIDCIdentity, :count) == 1
     assert Repo.aggregate(Session, :count) == 1
 
+    conflicting_subject = %{claims | "sub" => "subject-2"}
+
+    assert {:error, :oidc_email_collision} =
+             Identities.complete_oidc(
+               %{params: %{claims: conflicting_subject}, session_params: %{}},
+               context
+             )
+
     changed_email = %{claims | "email" => "renamed@example.com"}
 
     assert {:ok, %{user: %{email: "dev@example.com"}}} =
@@ -62,7 +70,7 @@ defmodule Robine.Identities.OIDCTest do
     assert Repo.aggregate(OIDCIdentity, :count) == 1
   end
 
-  test "rejects silent email linking and unverified email" do
+  test "links the first verified OIDC subject to an active local recovery account" do
     context = oidc_context()
 
     assert {:ok, _admin} =
@@ -75,20 +83,42 @@ defmodule Robine.Identities.OIDCTest do
                context
              )
 
-    collision = %{
+    claims = %{
       "iss" => "https://id.example",
-      "sub" => "attacker",
+      "sub" => "admin-subject",
       "email" => "admin@example.com",
       "email_verified" => true
     }
 
-    assert {:error, :oidc_email_collision} =
+    assert {:ok, %{user: %{email: "admin@example.com", role: :administrator}}} =
              Identities.complete_oidc(
-               %{params: %{claims: collision}, session_params: %{}},
+               %{params: %{claims: claims}, session_params: %{}},
                context
              )
 
-    unverified = %{collision | "email" => "other@example.com", "email_verified" => false}
+    assert Repo.aggregate(OIDCIdentity, :count) == 1
+    assert Repo.aggregate(Session, :count) == 1
+
+    second_subject = %{claims | "sub" => "different-subject"}
+
+    assert {:error, :oidc_email_collision} =
+             Identities.complete_oidc(
+               %{params: %{claims: second_subject}, session_params: %{}},
+               context
+             )
+
+    assert Repo.aggregate(OIDCIdentity, :count) == 1
+  end
+
+  test "rejects unverified email" do
+    context = oidc_context()
+
+    unverified = %{
+      "iss" => "https://id.example",
+      "sub" => "subject",
+      "email" => "other@example.com",
+      "email_verified" => false
+    }
 
     assert {:error, :unverified_oidc_identity} =
              Identities.complete_oidc(

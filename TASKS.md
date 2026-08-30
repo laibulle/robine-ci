@@ -49,7 +49,7 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 
 - **Specs:** [IAM-001](docs/specs/identity/iam-001-authentication-and-sso.md), [GH-001](docs/specs/github/gh-001-github-integration.md)
 - **Depends on:** DEC-001
-- [x] Choose invite-only, verified-domain, or open OIDC provisioning. (Open provisioning requires a provider-verified email and grants viewer by default; collisions never auto-link.)
+- [x] Choose invite-only, verified-domain, or open OIDC provisioning. (Open provisioning requires a provider-verified email and grants viewer by default; the first verified match may bridge an active unlinked local recovery account, while all other collisions fail closed.)
 - [x] Define bootstrap token delivery and rotation. (`ROBINE_BOOTSTRAP_TOKEN`, hashed in memory, expires 15 minutes after startup, and becomes unusable after first-user creation.)
 - [x] Decide whether repository-specific authorization is required for MVP. (Instance roles govern trusted repositories for MVP.)
 - [x] Decide draft pull-request behavior. (Draft pull requests are ignored until `ready_for_review`.)
@@ -322,7 +322,7 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - **Depends on:** IAM-101
 - [x] Implement authorization code flow with PKCE, state, nonce, issuer, audience, and signature validation.
 - [x] Implement metadata/JWKS refresh and bounded clock skew.
-- [x] Link identities by issuer and subject, never silently by email alone.
+- [x] Link identities durably by issuer and subject; permit one verified-email bootstrap bridge to an active unlinked local recovery account and reject every other collision.
 - [x] Add provider preflight test and exact redirect URI guidance.
 - [x] Test provider outage and break-glass recovery, including failed authorization and callback, no partial identity/session, and local administrator access during the incident.
 

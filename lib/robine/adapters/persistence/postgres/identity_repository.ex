@@ -129,15 +129,25 @@ defmodule Robine.Adapters.Persistence.Postgres.IdentityRepository do
         identity.issuer <> ":" <> identity.subject
       ])
 
+      Repo.query!("SELECT pg_advisory_xact_lock(hashtext($1))", [
+        "oidc-email:" <> identity.email
+      ])
+
       case oidc_user(identity) do
         {:ok, user} ->
           user
 
         {:error, :not_found} ->
-          if Repo.exists?(from user in User, where: user.email == ^identity.email) do
-            Repo.rollback(:oidc_email_collision)
-          else
-            create_oidc_user(identity, user_attributes)
+          case linkable_local_user(identity.email) do
+            {:ok, user} ->
+              link_oidc_user(user, identity, user_attributes.inserted_at)
+
+            {:error, :not_found} ->
+              if Repo.exists?(from user in User, where: user.email == ^identity.email) do
+                Repo.rollback(:oidc_email_collision)
+              else
+                create_oidc_user(identity, user_attributes)
+              end
           end
       end
     end)
@@ -249,22 +259,49 @@ defmodule Robine.Adapters.Persistence.Postgres.IdentityRepository do
     end
   end
 
+  defp linkable_local_user(email) do
+    query =
+      from user in User,
+        as: :user,
+        join: credential in LocalCredential,
+        on: credential.user_id == user.id,
+        where:
+          user.email == ^email and user.disabled == false and
+            not exists(from oidc in OIDCIdentity, where: oidc.user_id == parent_as(:user).id),
+        select: user
+
+    case Repo.one(query) do
+      nil -> {:error, :not_found}
+      user -> {:ok, user}
+    end
+  end
+
+  defp link_oidc_user(user, identity, inserted_at) do
+    case create_oidc_identity(user.id, identity, inserted_at) do
+      {:ok, _identity} -> domain_user(user)
+      {:error, changeset} -> Repo.rollback({:identity_persistence, changeset})
+    end
+  end
+
   defp create_oidc_user(identity, user_attributes) do
     attributes = Map.merge(user_attributes, %{email: identity.email, disabled: false})
 
     with {:ok, user} <- User.changeset(%User{}, attributes) |> Repo.insert(),
-         {:ok, _oidc} <-
-           OIDCIdentity.changeset(%OIDCIdentity{}, %{
-             user_id: user.id,
-             issuer: identity.issuer,
-             subject: identity.subject,
-             inserted_at: user_attributes.inserted_at
-           })
-           |> Repo.insert() do
+         {:ok, _oidc} <- create_oidc_identity(user.id, identity, user_attributes.inserted_at) do
       domain_user(user)
     else
       {:error, changeset} -> Repo.rollback({:identity_persistence, changeset})
     end
+  end
+
+  defp create_oidc_identity(user_id, identity, inserted_at) do
+    OIDCIdentity.changeset(%OIDCIdentity{}, %{
+      user_id: user_id,
+      issuer: identity.issuer,
+      subject: identity.subject,
+      inserted_at: inserted_at
+    })
+    |> Repo.insert()
   end
 
   defp normalize({:ok, _schema}, _tag), do: :ok

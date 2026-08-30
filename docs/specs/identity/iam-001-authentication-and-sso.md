@@ -5,7 +5,7 @@
 - **State:** Shipped
 - **Owner:** Identity
 - **Target:** MVP
-- **Last updated:** 2026-08-09
+- **Last updated:** 2026-08-30
 
 ## Summary
 
@@ -49,7 +49,7 @@ An instance administrator configuring identity and developers signing in through
 - **FR-2:** Local passwords MUST be hashed with a current memory-hard password hashing algorithm and configurable safe parameters.
 - **FR-3:** The MVP MUST support one OIDC provider using authorization code flow with PKCE, state, and nonce validation.
 - **FR-4:** OIDC issuer metadata and signing keys MUST be validated and refreshed according to standards.
-- **FR-5:** OIDC account linking MUST require a stable provider subject identifier; email alone MUST NOT silently link accounts.
+- **FR-5:** OIDC account identity MUST use the stable issuer and subject identifier. The first provider-verified email match MAY link to an active local recovery account that has no OIDC identity; subsequent or OIDC-only email collisions MUST fail closed.
 - **FR-6:** Roles MUST be `administrator`, `maintainer`, and `viewer`.
 - **FR-7:** Administrators MUST manage instance settings and identity; maintainers MUST manage repositories and pipelines; viewers MUST have read-only access to authorized repositories.
 - **FR-8:** The last usable administrator MUST NOT be demoted or disabled through the normal UI.
@@ -71,6 +71,8 @@ An instance administrator configuring identity and developers signing in through
 ## Proposed design
 
 Identity records separate users from authentication identities. A user can hold a local credential and an OIDC identity, allowing an administrator to preserve recovery access. Repository access inherits from the MVP instance role; future repository-specific membership can extend this model without changing identity keys.
+
+The first successful OIDC callback may attach its validated issuer and stable subject to an active local recovery account with the same provider-verified email. This bootstrap bridge preserves the local role and password, and is available only while that user has no OIDC identity. Once linked, email changes or a different subject never select the account.
 
 OIDC is part of the AGPL-licensed self-hosted product. The supported MVP surface is standards-based OIDC only; the product should call it “SSO with OpenID Connect,” not imply SAML or LDAP support.
 

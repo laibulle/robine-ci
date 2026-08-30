@@ -284,7 +284,7 @@ export OIDC_CLIENT_ID="robine"
 export OIDC_CLIENT_SECRET="..."
 ```
 
-OIDC uses Authorization Code with PKCE, state, nonce, issuer/audience/signature validation, and provider JWKS. New identities require a provider-verified email and start as viewers. Email collisions never auto-link accounts; local administrator sign-in remains available for recovery.
+OIDC uses Authorization Code with PKCE, state, nonce, issuer/audience/signature validation, and provider JWKS. New identities require a provider-verified email and start as viewers. The first matching verified identity may link to an active local recovery account that has no OIDC identity, preserving its role and password; all subsequent email collisions fail closed. Local administrator sign-in remains available for recovery.
 
 ## Verification
 
