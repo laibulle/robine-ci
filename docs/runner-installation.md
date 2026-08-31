@@ -56,7 +56,7 @@ The reverse proxy must support WebSocket upgrade for `/runner/socket/websocket`,
 - Revocation disables every credential immediately, pushes cancellation to an already connected runner, and rejects its next authenticated request or reconnect. Attempt leases remain protected by durable reconciliation if delivery is interrupted.
 - Never paste a runner config, enrollment token, credential, job secret, or full environment into logs or support tickets.
 
-The runner accepts durably acknowledged job offers, downloads attempt-scoped source and secrets, executes Docker jobs, streams redacted logs, supports cancellation, and transfers caches and artifacts through authenticated endpoints. Control frames are bounded, log delivery blocks on socket writes, file responses use 64 KiB chunks, and uploads stream into blob storage under a cumulative 100 MiB transfer limit. Archive validation and extraction still require a bounded in-memory representation on the runner.
+The runner accepts durably acknowledged job offers, downloads attempt-scoped source and secrets, executes Docker jobs, streams redacted logs, supports cancellation, and transfers caches and artifacts through authenticated endpoints. Control frames are bounded, log delivery blocks on socket writes, and file responses use 64 KiB chunks. Cache and artifact archives default to a shared 256 MiB upload/download ceiling configured with `ROBINE_TRANSFER_MAX_ARCHIVE_BYTES` on both server and runner; archive validation and extraction still require a bounded in-memory representation on the runner.
 
 ## Cross-platform native runner
 

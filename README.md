@@ -151,6 +151,8 @@ Set `ROBINE_METRICS_TOKEN` to enable the token-protected Prometheus endpoint at 
 
 Artifact and cache metadata is admitted atomically against logical quotas of 50 GiB per instance and 10 GiB per repository. Override them with `ROBINE_STORAGE_INSTANCE_QUOTA_BYTES` and `ROBINE_STORAGE_REPOSITORY_QUOTA_BYTES`; the repository value cannot exceed the instance value.
 
+Runner cache and artifact archives are limited to 256 MiB for both upload and download. Override the shared server and runner ceiling with `ROBINE_TRANSFER_MAX_ARCHIVE_BYTES`, up to the 1,000,000,000-byte expanded-archive safety limit.
+
 Workflow validation defaults to 256 KiB, 64 jobs, 128 steps per job, 512 total steps, and DAG depth 16. Production deployments can override these with the `ROBINE_WORKFLOW_MAX_*` environment variables documented in [WF-001](docs/specs/workflows/wf-001-workflow-format.md).
 
 Runner admission requires at least 2 GiB free and at most 95% filesystem usage by default. Configure `ROBINE_RUNNER_MIN_FREE_BYTES` and `ROBINE_RUNNER_MAX_USED_PERCENT` for the host. In production, Phoenix dispatches through protocol v1 to the bundled `rbe` sidecar and does not mount Docker. The runner reconciles only Docker resources carrying both its `io.robine.attempt` and instance namespace labels.

@@ -182,7 +182,7 @@ func TestBuiltinsSaveRestoreAndDownload(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(artifactWorkspace, "Downloaded.app", "value"), []byte("artifact"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	artifactBody, err := createArchive(artifactWorkspace, []string{"Downloaded.app"})
+	artifactBody, err := createArchive(artifactWorkspace, []string{"Downloaded.app"}, config.TransferMaxArchiveBytes())
 	if err != nil {
 		t.Fatal(err)
 	}

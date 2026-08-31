@@ -91,7 +91,7 @@ func extractArchive(body []byte, destination string, stripRoot bool) error {
 	}
 }
 
-func createArchive(workspace string, paths []string) ([]byte, error) {
+func createArchive(workspace string, paths []string, maxArchiveBytes int64) ([]byte, error) {
 	if len(paths) == 0 {
 		return nil, errors.New("artifact paths must not be empty")
 	}
@@ -200,7 +200,7 @@ func createArchive(workspace string, paths []string) ([]byte, error) {
 					return nil, closeErr
 				}
 			}
-			if buffer.Len() > maxUploadBytes {
+			if int64(buffer.Len()) > maxArchiveBytes {
 				return nil, errors.New("artifact upload limit exceeded")
 			}
 		}
@@ -211,7 +211,7 @@ func createArchive(workspace string, paths []string) ([]byte, error) {
 	if err := gz.Close(); err != nil {
 		return nil, err
 	}
-	if buffer.Len() > maxUploadBytes {
+	if int64(buffer.Len()) > maxArchiveBytes {
 		return nil, errors.New("artifact upload limit exceeded")
 	}
 	return buffer.Bytes(), nil

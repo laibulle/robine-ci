@@ -9,7 +9,13 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+)
+
+const (
+	defaultTransferMaxArchiveBytes = int64(256 * 1024 * 1024)
+	maximumTransferMaxArchiveBytes = int64(1_000_000_000)
 )
 
 type Config struct {
@@ -182,7 +188,15 @@ func Validate(cfg Config) error {
 	if err := ValidateServerURL(cfg.ServerURL); err != nil {
 		return err
 	}
+	if _, err := transferMaxArchiveBytes(); err != nil {
+		return err
+	}
 	return validateExecutorOptions(Executor(cfg), ResourceNamespace(cfg), CPUMillis(cfg), MemoryBytes(cfg), PIDsLimit(cfg))
+}
+
+func TransferMaxArchiveBytes() int64 {
+	value, _ := transferMaxArchiveBytes()
+	return value
 }
 
 func Executor(cfg Config) string {
@@ -302,4 +316,16 @@ func canonicalServerURL(raw string) string {
 	u.Host = strings.ToLower(u.Host)
 	u.Path = strings.TrimRight(u.Path, "/")
 	return u.String()
+}
+
+func transferMaxArchiveBytes() (int64, error) {
+	raw := os.Getenv("ROBINE_TRANSFER_MAX_ARCHIVE_BYTES")
+	if raw == "" {
+		return defaultTransferMaxArchiveBytes, nil
+	}
+	value, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || value <= 0 || value > maximumTransferMaxArchiveBytes {
+		return defaultTransferMaxArchiveBytes, errors.New("ROBINE_TRANSFER_MAX_ARCHIVE_BYTES must be an integer from 1 through 1000000000")
+	}
+	return value, nil
 }

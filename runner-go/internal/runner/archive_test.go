@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/robine-ci/robine-runner/internal/config"
 )
 
 func TestCreateAndExtractArchive(t *testing.T) {
@@ -19,9 +21,12 @@ func TestCreateAndExtractArchive(t *testing.T) {
 	if err := os.WriteFile(binary, []byte("mac executable"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	body, err := createArchive(workspace, []string{"Demo.app"})
+	body, err := createArchive(workspace, []string{"Demo.app"}, config.TransferMaxArchiveBytes())
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err := createArchive(workspace, []string{"Demo.app"}, 1); err == nil {
+		t.Fatal("configured archive limit was not enforced")
 	}
 	destination := t.TempDir()
 	if err := extractArchive(body, destination, false); err != nil {
@@ -63,11 +68,11 @@ func TestExtractSourceStripsRootAndRejectsUnsafeEntries(t *testing.T) {
 
 func TestCreateArchiveRejectsEscapesAndSymlinks(t *testing.T) {
 	workspace := t.TempDir()
-	if _, err := createArchive(workspace, []string{"../outside"}); err == nil {
+	if _, err := createArchive(workspace, []string{"../outside"}, config.TransferMaxArchiveBytes()); err == nil {
 		t.Fatal("path escape accepted")
 	}
 	if err := os.Symlink("outside", filepath.Join(workspace, "link")); err == nil {
-		if _, err := createArchive(workspace, []string{"link"}); err == nil {
+		if _, err := createArchive(workspace, []string{"link"}, config.TransferMaxArchiveBytes()); err == nil {
 			t.Fatal("symlink accepted")
 		}
 	}
@@ -76,7 +81,7 @@ func TestCreateArchiveRejectsEscapesAndSymlinks(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(outside, filepath.Join(workspace, "parent-link")); err == nil {
-		if _, err := createArchive(workspace, []string{"parent-link/value"}); err == nil {
+		if _, err := createArchive(workspace, []string{"parent-link/value"}, config.TransferMaxArchiveBytes()); err == nil {
 			t.Fatal("path through a symlinked parent was accepted")
 		}
 	}

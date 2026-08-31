@@ -35,6 +35,23 @@ func TestParseCommandAndServerPolicy(t *testing.T) {
 	}
 }
 
+func TestTransferArchiveLimitConfiguration(t *testing.T) {
+	if got := TransferMaxArchiveBytes(); got != 256*1024*1024 {
+		t.Fatalf("default transfer limit is %d", got)
+	}
+	t.Setenv("ROBINE_TRANSFER_MAX_ARCHIVE_BYTES", "335544320")
+	if got := TransferMaxArchiveBytes(); got != 335544320 {
+		t.Fatalf("configured transfer limit is %d", got)
+	}
+	cfg := Config{ServerURL: "https://ci.example.test", RunnerID: "runner-1", Credential: "secret", Name: "mac"}
+	for _, invalid := range []string{"0", "1000000001", "invalid"} {
+		t.Setenv("ROBINE_TRANSFER_MAX_ARCHIVE_BYTES", invalid)
+		if err := Validate(cfg); err == nil {
+			t.Fatalf("accepted invalid transfer limit %q", invalid)
+		}
+	}
+}
+
 func TestWriteAndLoadPrivateConfig(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "private", "runner.json")

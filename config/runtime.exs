@@ -32,6 +32,15 @@ config :robine, :storage_quotas,
   instance_bytes: storage_instance_quota,
   repository_bytes: storage_repository_quota
 
+transfer_max_archive_bytes =
+  positive_integer.("ROBINE_TRANSFER_MAX_ARCHIVE_BYTES", 268_435_456)
+
+if transfer_max_archive_bytes > 1_000_000_000 do
+  raise "ROBINE_TRANSFER_MAX_ARCHIVE_BYTES must not exceed 1000000000"
+end
+
+config :robine, :transfer_limits, max_archive_bytes: transfer_max_archive_bytes
+
 storage_root = System.get_env("ROBINE_STORAGE_ROOT", "var/storage") |> Path.expand()
 config :robine, :storage_root, storage_root
 

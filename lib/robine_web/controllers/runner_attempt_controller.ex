@@ -4,8 +4,6 @@ defmodule RobineWeb.RunnerAttemptController do
   alias Robine.{Pipelines, Repositories, Runners, Secrets, Storage, Transfers}
   alias Robine.Runtime.Dependencies
 
-  @max_upload_bytes 100 * 1024 * 1024
-
   def source(conn, %{"attempt_id" => attempt_id}) do
     with {:ok, raw, _runner_context, system_context} <- authorized_execution(conn, attempt_id),
          true <- checkout_required?(raw),
@@ -189,20 +187,27 @@ defmodule RobineWeb.RunnerAttemptController do
     end
   end
 
-  defp read_upload(conn), do: read_upload(conn, [], 0)
+  defp read_upload(conn) do
+    max_bytes =
+      :robine
+      |> Application.fetch_env!(:transfer_limits)
+      |> Keyword.fetch!(:max_archive_bytes)
 
-  defp read_upload(conn, chunks, size) do
-    remaining = @max_upload_bytes - size
+    read_upload(conn, [], 0, max_bytes)
+  end
+
+  defp read_upload(conn, chunks, size, max_bytes) do
+    remaining = max_bytes - size
 
     case Plug.Conn.read_body(conn,
            length: remaining + 1,
            read_length: min(1_000_000, remaining + 1)
          ) do
-      {:ok, body, conn} when size + byte_size(body) <= @max_upload_bytes ->
+      {:ok, body, conn} when size + byte_size(body) <= max_bytes ->
         {:ok, Enum.reverse([body | chunks]), conn}
 
-      {:more, body, conn} when size + byte_size(body) <= @max_upload_bytes ->
-        read_upload(conn, [body | chunks], size + byte_size(body))
+      {:more, body, conn} when size + byte_size(body) <= max_bytes ->
+        read_upload(conn, [body | chunks], size + byte_size(body), max_bytes)
 
       {:ok, _oversized, conn} ->
         {:error, :payload_too_large, conn}
@@ -258,7 +263,7 @@ defmodule RobineWeb.RunnerAttemptController do
   defp positive_integer(_value), do: {:error, :invalid_retention}
 
   defp transfer_error(_conn, {:error, :payload_too_large, conn}),
-    do: conn |> put_status(:payload_too_large) |> json(%{error: "payload too large"})
+    do: conn |> put_status(:request_entity_too_large) |> json(%{error: "payload too large"})
 
   defp transfer_error(conn, {:error, reason}) when reason in [:unauthorized, :forbidden],
     do: unauthorized(conn)

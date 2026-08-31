@@ -268,7 +268,7 @@ func (e *executor) executeBuiltin(ctx context.Context, offer Offer, workspace st
 		if err != nil {
 			return err
 		}
-		body, err := createArchive(workspace, paths)
+		body, err := createArchive(workspace, paths, e.transfers.maxArchiveBytes)
 		if err != nil {
 			return err
 		}

@@ -104,6 +104,25 @@ defmodule RobineWeb.RunnerAttemptControllerTest do
 
     assert response(missing_cache, :no_content) == ""
 
+    previous_transfer_limits = Application.fetch_env!(:robine, :transfer_limits)
+    on_exit(fn -> Application.put_env(:robine, :transfer_limits, previous_transfer_limits) end)
+    Application.put_env(:robine, :transfer_limits, max_archive_bytes: 4)
+
+    oversized_artifact =
+      build_conn()
+      |> authenticate(identity)
+      |> put_req_header("content-type", "application/octet-stream")
+      |> put(
+        ~p"/api/v1/runners/attempts/#{attempt.id}/artifacts?name=oversized&retention_days=7",
+        "12345"
+      )
+
+    assert json_response(oversized_artifact, :request_entity_too_large) == %{
+             "error" => "payload too large"
+           }
+
+    Application.put_env(:robine, :transfer_limits, previous_transfer_limits)
+
     artifact_content = "artifact-archive-#{Ecto.UUID.generate()}"
 
     uploaded_artifact =

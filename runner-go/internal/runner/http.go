@@ -17,15 +17,11 @@ import (
 	"github.com/robine-ci/robine-runner/internal/config"
 )
 
-const (
-	maxDownloadBytes = 250_000_000
-	maxUploadBytes   = 100 * 1024 * 1024
-)
-
 type transferClient struct {
-	client     *http.Client
-	runnerID   string
-	credential string
+	client          *http.Client
+	runnerID        string
+	credential      string
+	maxArchiveBytes int64
 }
 
 func Enroll(ctx context.Context, options config.EnrollOptions) (config.Config, error) {
@@ -68,9 +64,10 @@ func Enroll(ctx context.Context, options config.EnrollOptions) (config.Config, e
 
 func newTransferClient(cfg config.Config) *transferClient {
 	return &transferClient{
-		client:     &http.Client{Timeout: 60 * time.Second},
-		runnerID:   cfg.RunnerID,
-		credential: cfg.Credential,
+		client:          &http.Client{Timeout: 60 * time.Second},
+		runnerID:        cfg.RunnerID,
+		credential:      cfg.Credential,
+		maxArchiveBytes: config.TransferMaxArchiveBytes(),
 	}
 }
 
@@ -86,12 +83,12 @@ func (c *transferClient) get(ctx context.Context, endpoint, accept string) ([]by
 		return nil, nil, 0, fmt.Errorf("download transfer: %w", err)
 	}
 	defer response.Body.Close()
-	limited := io.LimitReader(response.Body, maxDownloadBytes+1)
+	limited := io.LimitReader(response.Body, c.maxArchiveBytes+1)
 	body, err := io.ReadAll(limited)
 	if err != nil {
 		return nil, nil, response.StatusCode, fmt.Errorf("read transfer: %w", err)
 	}
-	if len(body) > maxDownloadBytes {
+	if int64(len(body)) > c.maxArchiveBytes {
 		return nil, nil, response.StatusCode, errors.New("download exceeds runner limit")
 	}
 	if response.StatusCode == http.StatusOK {
@@ -106,7 +103,7 @@ func (c *transferClient) get(ctx context.Context, endpoint, accept string) ([]by
 }
 
 func (c *transferClient) put(ctx context.Context, endpoint string, query url.Values, body []byte) error {
-	if len(body) > maxUploadBytes {
+	if int64(len(body)) > c.maxArchiveBytes {
 		return errors.New("upload exceeds runner limit")
 	}
 	u, err := url.Parse(endpoint)

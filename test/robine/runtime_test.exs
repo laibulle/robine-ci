@@ -25,7 +25,7 @@ defmodule Robine.RuntimeTest do
   end
 
   test "publishes package and migration metadata" do
-    assert Metadata.version() == "0.3.0-alpha20"
+    assert Metadata.version() == "0.3.0-alpha21"
     assert Metadata.default_prefix() == "robine_ci"
     assert File.dir?(Metadata.migrations_path())
   end

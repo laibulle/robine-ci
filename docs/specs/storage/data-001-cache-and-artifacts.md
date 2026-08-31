@@ -5,7 +5,7 @@
 - **State:** Shipped
 - **Owner:** Storage
 - **Target:** MVP
-- **Last updated:** 2026-08-09
+- **Last updated:** 2026-09-01
 
 ## Summary
 
@@ -70,6 +70,7 @@ A developer caching dependencies, transferring build outputs, downloading diagno
 - **OR-2:** Storage writes MUST use temporary files and atomic finalization on the same filesystem.
 - **OR-3:** Database metadata and filesystem objects MUST be reconciled periodically.
 - **OR-4:** The storage interface MUST not expose local paths to callers, enabling a later object-storage implementation.
+- **OR-5:** Runner cache and artifact transfer archives MUST enforce one operator-configured upload/download ceiling, defaulting to 256 MiB and never exceeding the 1,000,000,000-byte expanded-archive ceiling.
 
 ## Proposed design
 
@@ -78,6 +79,8 @@ The database records logical cache entries and immutable artifacts. Blobs use co
 The MVP defaults artifact and cache declarations to seven days and log retention to 30 days. An hourly durable worker removes expired metadata in batches of 1,000 and places possible orphan blobs into a persistent garbage-collection queue. It waits one hour, rechecks references across artifacts and caches, deletes the blob, and acknowledges the candidate only after filesystem deletion succeeds. The same pass inventories content-addressed objects, compares them with cache and artifact references, stages bounded orphan batches, reports missing and unsafe objects, and deletes abandoned temporary files older than the grace interval. Operators may configure log retention, grace, and batch size through environment variables.
 
 The initial storage ceilings are 50 GiB of logical retained content for the instance and 10 GiB per repository. TAR with gzip compression is the sole MVP archive format. An artifact that completed publication before its job later failed keeps its declared retention; the MVP does not run implicit post-failure artifact collection after command execution stops.
+
+The control plane and runner read the same `ROBINE_TRANSFER_MAX_ARCHIVE_BYTES` setting. It defaults to 268,435,456 bytes (256 MiB), bounds both runner archive uploads and downloads, and is capped at 1,000,000,000 bytes so it cannot exceed the expanded-archive safety ceiling.
 
 Cache restore extracts into the job workspace before user steps that depend on it. Artifact download follows explicit built-in steps. Cache and artifact archives use one documented format and normalized metadata to avoid owner and timestamp surprises.
 

@@ -231,6 +231,7 @@ Only one status marker belongs on a task. Complete dependencies before starting 
 - [x] Enforce repository scoping and explicit dependency access.
 - [x] Implement retry against retained dependency artifacts.
 - [x] Refuse retries with precise rerun scope when required artifacts expired.
+- [x] Make the runner archive transfer ceiling configurable end to end with a shared 256 MiB default.
 
 ### DATA-103 — Upload locally produced artifacts
 

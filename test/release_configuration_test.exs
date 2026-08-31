@@ -105,6 +105,9 @@ defmodule Robine.ReleaseConfigurationTest do
     assert Map.keys(runner["environment"])
            |> Enum.all?(&(not String.contains?(&1, ["TOKEN", "CREDENTIAL", "SECRET"])))
 
+    assert runner["environment"]["ROBINE_TRANSFER_MAX_ARCHIVE_BYTES"] ==
+             "${ROBINE_TRANSFER_MAX_ARCHIVE_BYTES:-268435456}"
+
     refute Map.has_key?(runner, "env_file")
     assert runner["command"] == ["/opt/robine/bin/start-bundled-runner"]
     assert entrypoint =~ "ROBINE_BUNDLED_RUNNER_BINARY:-/opt/robine/bin/rbe"

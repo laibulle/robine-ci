@@ -33,6 +33,7 @@ defmodule Robine.Runtime.EmbeddedConfiguration do
       storage_root: Keyword.get(options, :storage_root, Path.expand("var/robine-ci")),
       storage_max_object_bytes: 1_073_741_824,
       storage_quotas: [instance_bytes: 53_687_091_200, repository_bytes: 10_737_418_240],
+      transfer_limits: [max_archive_bytes: 268_435_456],
       workflow_limits: [
         max_source_bytes: 262_144,
         max_jobs: 64,

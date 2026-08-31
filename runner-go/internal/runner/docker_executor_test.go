@@ -25,14 +25,14 @@ func TestDockerExecutorRunsServiceRedactsAndUploads(t *testing.T) {
 		t.Skip("Docker Engine is unavailable")
 	}
 	namespace := "test-" + strings.ToLower(safeID(t.Name())) + "-" + strconvTimestamp()
-	config := config.Config{
+	runnerConfig := config.Config{
 		Executor:          "docker",
 		ResourceNamespace: namespace,
 		CPUMillis:         1_000,
 		MemoryBytes:       256 * 1024 * 1024,
 		PIDsLimit:         128,
 	}
-	defer reconcileDocker(context.Background(), config, nil)
+	defer reconcileDocker(context.Background(), runnerConfig, nil)
 
 	seedRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(seedRoot, "downloaded"), 0o755); err != nil {
@@ -41,7 +41,7 @@ func TestDockerExecutorRunsServiceRedactsAndUploads(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(seedRoot, "downloaded", "value"), []byte("downloaded"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	seedArtifact, err := createArchive(seedRoot, []string{"downloaded"})
+	seedArtifact, err := createArchive(seedRoot, []string{"downloaded"}, config.TransferMaxArchiveBytes())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func TestDockerExecutorRunsServiceRedactsAndUploads(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(sourceRoot, "source", "source-value"), []byte("checked-out"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	sourceArchive, err := createArchive(sourceRoot, []string{"source"})
+	sourceArchive, err := createArchive(sourceRoot, []string{"source"}, config.TransferMaxArchiveBytes())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +122,7 @@ func TestDockerExecutorRunsServiceRedactsAndUploads(t *testing.T) {
 		},
 	}
 	channel := &fakeRequester{}
-	executor := newConfiguredExecutor(config, channel, newTransferClient(configForTransfers(server.URL)))
+	executor := newConfiguredExecutor(runnerConfig, channel, newTransferClient(configForTransfers(server.URL)))
 	if err := executor.Run(context.Background(), offer); err != nil {
 		t.Fatal(err)
 	}

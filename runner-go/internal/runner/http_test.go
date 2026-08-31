@@ -70,6 +70,10 @@ func TestTransferRejectsDigestMismatchAndHTTPFailure(t *testing.T) {
 			_, _ = io.WriteString(response, "body")
 			return
 		}
+		if request.URL.Path == "/too-large" {
+			_, _ = io.WriteString(response, "12345")
+			return
+		}
 		http.Error(response, "no", http.StatusServiceUnavailable)
 	}))
 	defer server.Close()
@@ -80,8 +84,12 @@ func TestTransferRejectsDigestMismatchAndHTTPFailure(t *testing.T) {
 	if err := client.put(context.Background(), server.URL+"/failure", nil, []byte("body")); err == nil {
 		t.Fatal("failed upload accepted")
 	}
-	if err := client.put(context.Background(), server.URL+"/failure", nil, make([]byte, maxUploadBytes+1)); err == nil {
+	client.maxArchiveBytes = 4
+	if err := client.put(context.Background(), server.URL+"/failure", nil, make([]byte, client.maxArchiveBytes+1)); err == nil {
 		t.Fatal("oversized upload accepted")
+	}
+	if _, _, _, err := client.get(context.Background(), server.URL+"/too-large", "application/gzip"); err == nil {
+		t.Fatal("oversized download accepted")
 	}
 }
 
